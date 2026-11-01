@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macro-scenario-lab"
+version = "0.1.0"
+description = "Causal macro factors -> historical-reweighting scenario engine -> asset K-lines, portfolio and withdrawal risk"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.1",
+  "scipy>=1.11",
+  "scikit-learn>=1.4",
+  "fastapi>=0.110",
+  "uvicorn>=0.30",
+  "requests>=2.31",
+  "xlrd>=2.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["scenariolab*"]
+
+[tool.setuptools.package-data]
+"scenariolab.scenarios" = ["specs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

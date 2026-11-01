@@ -1,0 +1,21 @@
+# data is downloaded and derived locally; sources have their own licenses
+data/raw/
+data/processed/
+data/results/
+
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# os / editors
+.DS_Store
+.idea/
+.vscode/

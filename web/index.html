@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>宏观情景实验室 · Macro Scenario Lab</title>
+  <link rel="stylesheet" href="css/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">MSL</div>
+        <div>
+          <div class="brand-name">宏观情景实验室</div>
+          <div class="brand-sub">Macro Scenario Lab</div>
+        </div>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="sidebar-foot" id="build-info"></div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <h1 id="page-title">总览</h1>
+        <div class="topbar-right">
+          <label class="kline-pref" title="K 线配色">
+            <span>K 线</span>
+            <select id="kline-color">
+              <option value="cn">红涨绿跌</option>
+              <option value="us">绿涨红跌</option>
+            </select>
+          </label>
+          <span class="data-date" id="data-date"></span>
+        </div>
+      </header>
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
