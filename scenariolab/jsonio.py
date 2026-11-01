@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 DECIMALS = 6
+# A tiny negative number rounded in prose reads "-0.00" / "-0.0%"; written text drops that sign.
+# Dates ("2020-01"), exponents ("3.6e-08") and real negatives ("-0.05") are left alone.
+NEG_ZERO = re.compile(r"(^|[^\d.A-Za-z_])[-−](0(?:\.0+)?)(?![\d.])")
+
+
+def tidy(text: str) -> str:
+    return NEG_ZERO.sub(r"\1\2", text) if "0" in text and ("-0" in text or "−0" in text) else text
 
 
 def clean(obj):
@@ -27,8 +35,8 @@ def clean(obj):
         return round(f, DECIMALS) if math.isfinite(f) else None
     if isinstance(obj, pd.Timestamp):
         return obj.strftime("%Y-%m")
-    if isinstance(obj, np.str_):
-        return str(obj)
+    if isinstance(obj, (str, np.str_)):
+        return tidy(str(obj))
     return obj
 
 

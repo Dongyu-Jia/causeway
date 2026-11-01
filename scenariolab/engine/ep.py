@@ -93,8 +93,22 @@ def entropy_pool(p: np.ndarray,
     return q, bool(viol < 1e-4), viol
 
 
+def view_column(frame: pd.DataFrame, col: str) -> np.ndarray:
+    """A view column as floats, missing values filled with the column mean."""
+    x = frame[col].to_numpy(dtype=float)
+    if np.isnan(x).any():
+        x = np.where(np.isnan(x), np.nanmean(x), x)
+    return x
+
+
+def support(x: np.ndarray) -> tuple[float, float]:
+    """Range a view target may take: the 2nd-98th percentile of the column."""
+    lo, hi = np.percentile(x, [2, 98])
+    return float(lo), float(hi)
+
+
 def apply_views(frame: pd.DataFrame, views: list[dict], p: np.ndarray | None = None,
-                confidence: float = 1.0) -> EPResult:
+                confidence: float = 1.0, shrink: float = 1.0) -> EPResult:
     """Translate view dicts into constraints on `frame` columns and solve.
 
     View forms (values in the column's native monthly units unless noted):
@@ -103,23 +117,31 @@ def apply_views(frame: pd.DataFrame, views: list[dict], p: np.ndarray | None = N
       {"var": col, "shift_sd": k}        E_q[col] = prior mean + k * prior sd
       {"var": col, "min": x} / {"max": x}  inequality on the mean (also *_annual)
       {"var": col, "vol_mult": k}        E_q[(col - m)^2] = (k * prior sd)^2,
-                                         m = the view mean if given, else prior mean
+                                         m = the view mean if given, else prior mean.
+                                         When the frame carries a companion column
+                                         "<col>__sq" (pooling over block starts: the
+                                         mean of x^2 over the months a start draws),
+                                         the constraint is on that second moment
+                                         instead, so the drawn months' monthly
+                                         variance around m is k^2 times the prior's
     Targets outside the historical range are clipped to the 2nd/98th percentile
     of the column (reported per view), since no reweighting can reach them.
-    `confidence` < 1 blends the posterior back toward the prior (opinion pooling).
+    `shrink` in [0, 1] moves every view toward what the prior already
+    satisfies (mean targets and binding bounds by prior + shrink * (target -
+    prior), variance targets likewise); 0 returns the prior. `confidence` < 1
+    blends the posterior back toward the prior (opinion pooling).
     """
     T = len(frame)
     p = np.full(T, 1.0 / T) if p is None else np.asarray(p, float) / np.sum(p)
+    lam = float(np.clip(shrink, 0.0, 1.0))
     A_eq, b_eq, A_in, b_in, report = [], [], [], [], []
     means: dict[str, float] = {}
     for v in views:
         col = v["var"]
-        x = frame[col].to_numpy(dtype=float)
-        if np.isnan(x).any():
-            x = np.where(np.isnan(x), np.nanmean(x), x)
+        x = view_column(frame, col)
         prior_mean = float(x @ p)
         prior_sd = float(np.sqrt(((x - prior_mean) ** 2) @ p))
-        lo, hi = np.percentile(x, [2, 98])
+        lo, hi = support(x)
         entry = {"var": col, "prior_mean": prior_mean, "prior_sd": prior_sd, "clipped": False}
 
         target = None
@@ -134,24 +156,36 @@ def apply_views(frame: pd.DataFrame, views: list[dict], p: np.ndarray | None = N
                 entry["clipped"] = True
                 entry["requested"] = target
                 target = float(np.clip(target, lo, hi))
+            used = prior_mean + lam * (target - prior_mean)
             A_eq.append(x)
-            b_eq.append(target)
-            means[col] = target
-            entry.update({"kind": "mean", "target": target})
+            b_eq.append(used)
+            means[col] = used
+            entry.update({"kind": "mean", "target": target, "target_used": used})
 
         for key, sign in (("min", -1.0), ("max", 1.0), ("min_annual", -1.0), ("max_annual", 1.0)):
             if key in v:
                 val = float(v[key]) / (12.0 if key.endswith("_annual") else 1.0)
                 val = float(np.clip(val, lo, hi))
+                binding = sign * (prior_mean - val) > 0
+                used = prior_mean + lam * (val - prior_mean) if binding else val
                 A_in.append(sign * x)
-                b_in.append(sign * val)
-                entry.update({"kind": key.split("_")[0], "target": val})
+                b_in.append(sign * used)
+                entry.update({"kind": key.split("_")[0], "target": val, "target_used": used})
 
         if "vol_mult" in v:
             m = means.get(col, prior_mean)
-            target_var = (float(v["vol_mult"]) * prior_sd) ** 2
-            A_eq.append((x - m) ** 2)
-            b_eq.append(target_var)
+            k2 = float(v["vol_mult"]) ** 2
+            if f"{col}__sq" in frame.columns:
+                sq = view_column(frame, f"{col}__sq")
+                base = float(sq @ p)
+                target = m * m + k2 * max(base - prior_mean * prior_mean, 0.0)
+                A_eq.append(sq)
+            else:
+                sq = (x - m) ** 2
+                base = float(sq @ p)
+                target = k2 * prior_sd * prior_sd
+                A_eq.append(sq)
+            b_eq.append(base + lam * (target - base))
             entry.update({"vol_mult": float(v["vol_mult"])})
         report.append(entry)
 
@@ -161,13 +195,31 @@ def apply_views(frame: pd.DataFrame, views: list[dict], p: np.ndarray | None = N
     if confidence < 1.0:
         q = confidence * q + (1.0 - confidence) * p
     for entry in report:
-        x = frame[entry["var"]].to_numpy(dtype=float)
-        x = np.where(np.isnan(x), np.nanmean(x), x)
+        x = view_column(frame, entry["var"])
         entry["posterior_mean"] = float(x @ q)
         entry["posterior_sd"] = float(np.sqrt(((x - x @ q) ** 2) @ q))
     ens = effective_number(q)
     return EPResult(q=q, converged=ok, max_violation=viol, ens=ens, ens_ratio=ens / T,
                     kl=kl_divergence(q, p), views=report)
+
+
+def blend(res: EPResult, frame: pd.DataFrame, p: np.ndarray, confidence: float) -> EPResult:
+    """Opinion pooling after the fact: confidence * posterior + (1 - confidence) * prior.
+
+    Same as apply_views(..., confidence=c) without solving twice (the views'
+    posterior moments are recomputed on `frame`).
+    """
+    if confidence >= 1.0:
+        return res
+    p = np.asarray(p, float) / np.sum(p)
+    q = confidence * res.q + (1.0 - confidence) * p
+    views = []
+    for entry in res.views:
+        x = view_column(frame, entry["var"])
+        views.append({**entry, "posterior_mean": float(x @ q), "posterior_sd": float(np.sqrt(((x - x @ q) ** 2) @ q))})
+    ens = effective_number(q)
+    return EPResult(q=q, converged=res.converged, max_violation=res.max_violation, ens=ens, ens_ratio=ens / len(q),
+                    kl=kl_divergence(q, p), views=views)
 
 
 def weighted_corr(X: np.ndarray, w: np.ndarray) -> np.ndarray:

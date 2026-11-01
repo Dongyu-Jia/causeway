@@ -1,11 +1,14 @@
 """Run one scenario spec through the real engine.
 
-spec -> validate_spec -> per-phase entropy pooling -> simulate -> chart-ready
-detail JSON (fans, monthly and yearly K-lines, macro paths, posterior
-correlations, the evidence behind the weights). Used for the built-in library,
+spec -> validate_spec -> per-phase entropy pooling over block starts ->
+simulate -> chart-ready detail JSON (fans, monthly and yearly K-lines, macro
+paths, posterior correlations, the evidence behind the weights, and each
+asset's return attribution per phase). Used for the built-in library,
 LLM-translated scenarios and user-edited specs alike.
 """
 from __future__ import annotations
+
+import weakref
 
 import numpy as np
 import pandas as pd
@@ -13,19 +16,104 @@ import pandas as pd
 from .. import config
 from ..context import EngineContext
 from ..engine import summary
-from ..engine.ep import apply_views, weighted_corr
-from ..engine.simulate import SimOutput, simulate
+from ..engine.ep import weighted_corr
+from ..engine.pooling import BLOCK, MIN_ENS, MIN_EPISODES, PhasePool, pool_phase
+from ..engine.sampler import BlockProbs
+from ..engine.simulate import (MonthDB, SimOutput, ValuationModel, fit_valuation, simulate, valuation_settings,
+                               valuation_setup, with_oil_lock)
 from .schema import validate_spec
 
-MIN_ENS = 20.0          # below this many effective months a view set is too extreme
 MACRO_VARS = ("cpi_yoy", "ff", "y10", "unrate", "oil", "spread")
+VALUATION_MACRO = ("pd", "pd_fair")     # fanned when the simulation pulls toward the fair value
+TRACKED_MACRO = ("pd",)                 # fanned when the state is only tracked (kappa 0: no fair value in use)
+RESIDUALS = dict(config.RESIDUALS)      # simulate()'s residual draw (swapped by analysis.ablation)
+VALUATION = dict(config.VALUATION)      # valuation-state mode (swapped by analysis.valuation); on if "enabled"
+# run_spec adds assets[a].attribution (a study that only needs the returns may switch it off; it changes no
+# simulated number either way and adds about 30 ms to a 600-path scenario run)
+ATTRIBUTION = True
+ATTRIBUTION_UNITS = "年化：每月算术回报的均值 ×12（小数），各项相加 = arithmetic；cagr_p50 = 各路径几何年化总回报的中位数"
+ATTRIBUTION_BAND = (10, 90)             # percentiles over paths of the factor part
+_VALUATION_CACHE: "weakref.WeakKeyDictionary[MonthDB, dict]" = weakref.WeakKeyDictionary()
+
+
+def valuation_for(ctx: EngineContext) -> tuple[dict, ValuationModel | None]:
+    """(CMA, ValuationModel or None) the runner simulates with (cached per month database and settings).
+
+    Mode on: the mode's CMA and the fair value estimated on ctx.db. Mode off with "track": ctx.cma and
+    the state at kappa 0, which leaves every return as without it and records the P/D the paths imply;
+    a panel without the valuation columns then simply runs untracked. Otherwise (ctx.cma, None).
+    """
+    s = valuation_settings(VALUATION)
+    if not s and not VALUATION.get("track"):
+        return ctx.cma, None
+    key = (ctx.anchor.date, tuple(sorted((k, str(v)) for k, v in (s or {"track": True}).items())))
+    cache = _VALUATION_CACHE.setdefault(ctx.db, {})
+    if key not in cache:
+        if s:
+            cache[key] = valuation_setup(ctx.db, ctx.anchor, s)
+        else:
+            # only the kappa-0 state is cached: it depends on the month database alone, while the CMA is
+            # the caller's (two contexts can share a db with different CMAs, e.g. the ablation's
+            # historical-CMA scenario run)
+            try:
+                cache[key] = None, fit_valuation(ctx.db, ctx.anchor, kappa=0.0, income="constant")
+            except (KeyError, ValueError, np.linalg.LinAlgError):
+                cache[key] = None, None
+    cma, vm = cache[key]
+    return (cma if s else ctx.cma), vm
 
 
 def _top_months(dates: pd.DatetimeIndex, q: np.ndarray, p: np.ndarray, k: int = 10) -> list[dict]:
-    ratio = q / p
+    ratio = np.divide(q, p, out=np.zeros_like(q), where=p > 0)
     order = np.argsort(-q)[:k]
     return [{"date": dates[i].strftime("%Y-%m"), "weight_ratio": float(ratio[i]), "weight": float(q[i])}
             for i in order]
+
+
+def ep_report(db: MonthDB, pool: PhasePool) -> dict:
+    """What a phase's weights rest on: effective months, era mix, top months, per-view targets.
+
+    Views are reported on the pooling frame (block means), so prior_sd is the
+    spread of what a phase can average, and posterior_mean is the expected
+    mean of the drawn months.
+    """
+    res = pool.ep
+    rep = {"ens": pool.ens, "ens_ratio": pool.ens / len(db), "block": pool.blocks.block, "episodes": pool.episodes,
+           "shrink": pool.shrink, "shrink_reason": pool.shrink_reason, "ens_requested": pool.ens_requested,
+           "kl": res.kl if res else 0.0, "converged": res.converged if res else True,
+           "max_violation": res.max_violation if res else 0.0, "views": res.views if res else []}
+    rep["era_weights"] = db.era_weights(pool.month_weights)
+    rep["top_months"] = _top_months(db.dates, pool.month_weights, pool.prior_month_weights)
+    return rep
+
+
+def phase_pools(ctx: EngineContext, spec: dict, warnings: list[str]) -> list[PhasePool]:
+    """Per phase of a validated spec: block-start weights whose drawn months honour the views."""
+    db = ctx.db
+    prior = db.prior()
+    pools = []
+    for k, ph in enumerate(spec["phases"]):
+        pool = pool_phase(db.frame, ph["views"], prior, ph["months"], BLOCK, ph.get("confidence", 1.0), rare=db.rare)
+        if pool.shrink < 1.0:
+            why = (f"在历史上找不到能同时满足的 {pool.blocks.block} 个月区块组合" if pool.shrink_reason == "infeasible"
+                   else f"在历史上的支撑太薄（约 {pool.ens_requested:.0f} 个有效月份；要求至少 {MIN_ENS:.0f} 个有效月份、"
+                   f"{MIN_EPISODES:.0f} 段不同的 12 个月历史片段）")
+            warnings.append(f"阶段 {k + 1}「{ph['name']}」的视图组合{why}，已把所有视图按 λ={pool.shrink:.2f} "
+                            f"向历史均值收缩（λ=1 为原样，0 为不加视图），以免模拟只重复少数几段历史")
+        pools.append(pool)
+    return pools
+
+
+def phase_weights(ctx: EngineContext, spec: dict, warnings: list[str]) -> tuple[list[BlockProbs], list[dict]]:
+    """(what simulate() draws from, per-phase reports) for a validated spec."""
+    pools = phase_pools(ctx, spec, warnings)
+    reports, start = [], 0
+    for ph, pool in zip(spec["phases"], pools):
+        reports.append({"name": ph["name"], "start_month": start, "months": ph["months"],
+                        "views": ph["views"], "overrides": ph.get("overrides", {}),
+                        "confidence": ph.get("confidence", 1.0), "ep": ep_report(ctx.db, pool)})
+        start += ph["months"]
+    return [p.blocks for p in pools], reports
 
 
 def yearly_candles(monthly: list[list]) -> list[list]:
@@ -43,37 +131,9 @@ def yearly_candles(monthly: list[list]) -> list[list]:
     return out
 
 
-def phase_weights(ctx: EngineContext, spec: dict, warnings: list[str]) -> tuple[list[np.ndarray], list[dict]]:
-    db = ctx.db
-    prior = db.prior()
-    weights, reports = [], []
-    start = 0
-    for k, ph in enumerate(spec["phases"]):
-        if ph["views"]:
-            res = apply_views(db.frame, ph["views"], p=prior, confidence=ph.get("confidence", 1.0))
-            if res.ens < MIN_ENS and ph.get("confidence", 1.0) > 0.7:
-                warnings.append(f"阶段 {k + 1}「{ph['name']}」的视图组合在历史上只有约 {res.ens:.0f} 个有效月份支撑，"
-                                f"已把置信度降到 0.7 以免过拟合少数月份")
-                res = apply_views(db.frame, ph["views"], p=prior, confidence=0.7)
-            q = res.q
-            ep = {"ens": res.ens, "ens_ratio": res.ens_ratio, "kl": res.kl, "converged": res.converged,
-                  "max_violation": res.max_violation, "views": res.views}
-        else:
-            q = prior
-            ep = {"ens": float(len(prior)), "ens_ratio": 1.0, "kl": 0.0, "converged": True,
-                  "max_violation": 0.0, "views": []}
-        ep["era_weights"] = db.era_weights(q)
-        ep["top_months"] = _top_months(db.dates, q, prior)
-        weights.append(q)
-        reports.append({"name": ph["name"], "start_month": start, "months": ph["months"],
-                        "views": ph["views"], "overrides": ph.get("overrides", {}),
-                        "confidence": ph.get("confidence", 1.0), "ep": ep})
-        start += ph["months"]
-    return weights, reports
-
-
-def summarize(ctx: EngineContext, sim: SimOutput) -> dict:
-    """Chart-ready summaries of a simulation (shared with backtests)."""
+def summarize(ctx: EngineContext, sim: SimOutput, valuation_macro: tuple[str, ...] = VALUATION_MACRO) -> dict:
+    """Chart-ready summaries of a simulation (shared with backtests); `valuation_macro` are the valuation
+    paths fanned when the simulation has them."""
     T = sim.total.shape[1]
     labels = summary.month_labels(sim.start, T)
     W = summary.wealth_paths(sim.total)                                  # (n, T+1, A)
@@ -106,7 +166,7 @@ def summarize(ctx: EngineContext, sim: SimOutput) -> dict:
             },
         }
     macro = {}
-    for m in MACRO_VARS:
+    for m in MACRO_VARS + tuple(valuation_macro):
         if m in sim.macro:
             macro[m] = {"fan": summary.fan(sim.macro[m].astype(float))}
     eras = ctx.db.eras[sim.idx.ravel()]
@@ -117,6 +177,75 @@ def summarize(ctx: EngineContext, sim: SimOutput) -> dict:
             "representative_path": k}
 
 
+def _attr_terms(att, kind: str, j: int) -> list[str]:
+    """The terms that apply to one asset, in display order. Scenario overrides, income and the floor are
+    listed only when they move this asset at all (no asset_drift, no income source, no floored month)."""
+    if kind == "model":
+        keep = list(att.factor_terms) + [t for t in ("intercept", "unattributed", "cma", "overrides",
+                                                     "valuation_pull", "residual", "income") if t in att.terms]
+    elif kind == "cash":
+        keep = ["income"]
+    else:
+        keep = ["y10" if kind == "treasury" else "oil", "income"]
+    keep.append("floor")
+    optional = {"overrides", "income", "floor"} - ({"income"} if kind == "cash" else set())
+    return [t for t in keep if t not in optional or np.any(att.get(t)[:, :, j] != 0.0)]
+
+
+def _attr_block(vals: np.ndarray, total: np.ndarray, terms: list[str], ti: dict, factor: list[str],
+                cagr: np.ndarray | float) -> dict:
+    """Means over paths of one asset's terms (vals: (n, K) per path), with the factor part's band and the
+    reconciliation from the arithmetic sum to the median CAGR."""
+    out = {"terms": {t: float(vals[:, ti[t]].mean()) for t in terms}}
+    if factor:
+        f = vals[:, [ti[t] for t in factor]].sum(axis=1)
+        lo, hi = np.percentile(f, ATTRIBUTION_BAND)
+        out.update({"factor_sum": float(f.mean()), "factor_band": [float(lo), float(hi)]})
+    arith = float(total.mean())
+    med = float(np.percentile(cagr, 50)) if isinstance(cagr, np.ndarray) else float(cagr)
+    out.update({"arithmetic": arith, "cagr_p50": med, "reconciliation": med - arith})
+    return out
+
+
+def attribution_summary(sim: SimOutput, phases: list[dict], assets: dict) -> dict[str, dict]:
+    """{asset: assets[a].attribution} from sim.attribution: per phase and over the whole path, the mean over
+    paths of every term (annualized arithmetic contributions that add up to `arithmetic`), the 10-90% band
+    of the factor part, and `reconciliation` = median CAGR - arithmetic (compounding, volatility drag and
+    median vs mean), so the parts add up to the median CAGR the page shows (`total.cagr_p50` is the
+    stats' cagr_p50)."""
+    att = sim.attribution
+    if att is None:
+        return {}
+    months = np.asarray(att.phase_months, float)
+    T = float(months.sum())
+    w = months / T if T else months
+    W = summary.wealth_paths(sim.total)                                  # as summarize() builds it
+    starts = np.concatenate([[0], np.cumsum(att.phase_months)[:-1]]).astype(int)
+    ti = {t: k for k, t in enumerate(att.terms)}
+    out = {}
+    for j, a in enumerate(att.assets):
+        kind = att.kinds[a]
+        terms = _attr_terms(att, kind, j)
+        factor = (list(att.factor_terms) if kind == "model" else
+                  [] if kind == "cash" else ["y10" if kind == "treasury" else "oil"])
+        rows = []
+        for p, (ph, s0) in enumerate(zip(phases, starts)):
+            m = int(att.phase_months[p])
+            growth = W[:, s0 + m, j] / W[:, s0, j]
+            block = _attr_block(att.values[:, p, j, :], att.total[:, p, j], terms, ti, factor,
+                                growth ** (12.0 / m) - 1.0)
+            rows.append({"name": ph.get("name", f"阶段{p + 1}"), "start_month": int(s0), "months": m, **block})
+        whole = (att.values[:, :, j, :] * w[None, :, None]).sum(axis=1)
+        total = _attr_block(whole, (att.total[:, :, j] * w[None, :]).sum(axis=1), terms, ti, factor,
+                            assets[a]["stats"]["cagr_p50"])
+        method = "structural" if kind != "model" else att.method
+        out[a] = {"kind": kind, "method": method, "units": ATTRIBUTION_UNITS, "phases": rows,
+                  "total": {"months": int(T), **total}}
+        if method == "unattributed" and att.reason:
+            out[a]["reason"] = att.reason
+    return out
+
+
 def prior_correlation(ctx: EngineContext) -> dict:
     cols = [f"r_{a}" for a in config.ASSET_IDS]
     X = ctx.db.frame[cols].to_numpy(float)
@@ -125,13 +254,16 @@ def prior_correlation(ctx: EngineContext) -> dict:
 
 
 def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
-             source: str = "builtin") -> tuple[dict, SimOutput]:
+             source: str = "builtin", attribution: bool | None = None) -> tuple[dict, SimOutput]:
+    """(detail, SimOutput) of one spec; attribution (default ATTRIBUTION) adds assets[a].attribution."""
+    attribution = ATTRIBUTION if attribution is None else bool(attribution)
     clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)
     weights, phase_reports = phase_weights(ctx, clean, report["warnings"])
+    overrides = with_oil_lock([p["views"] for p in clean["phases"]], [p.get("overrides", {}) for p in clean["phases"]])
+    cma, vm = valuation_for(ctx)
     sim = simulate(ctx.db, ctx.anchor, weights, [p["months"] for p in clean["phases"]],
-                   n_paths=n_paths, seed=seed, cma=ctx.cma,
-                   overrides=[p.get("overrides", {}) for p in clean["phases"]],
-                   reversion=clean.get("reversion") or None)
+                   n_paths=n_paths, seed=seed, block=BLOCK, cma=cma, overrides=overrides,
+                   reversion=clean.get("reversion") or None, valuation=vm, attribution=attribution, **RESIDUALS)
     nodes, seen = [], set()
     for e in clean["causal_chain"]:
         for n in (e["from"], e["to"]):
@@ -148,7 +280,9 @@ def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
         "start": sim.start, "n_paths": n_paths,
         "corr_prior": prior_correlation(ctx),
     }
-    detail.update(summarize(ctx, sim))
+    detail.update(summarize(ctx, sim, TRACKED_MACRO if vm is not None and vm.kappa == 0 else VALUATION_MACRO))
+    for a, att in attribution_summary(sim, phase_reports, detail["assets"]).items():
+        detail["assets"][a]["attribution"] = att
     return detail, sim
 
 
@@ -156,7 +290,8 @@ def headline(detail: dict) -> dict:
     eq = detail["assets"]["us_equity"]["stats"]
     cpi = detail["macro"].get("cpi_yoy", {}).get("fan", {}).get("p50", [])
     ff = detail["macro"].get("ff", {}).get("fan", {}).get("p50", [])
+    pdp = detail["macro"].get("pd", {}).get("fan", {}).get("p50", [])
     return {"us_equity_cagr_p50": eq["cagr_p50"], "us_equity_real_cagr_p50": eq["real_cagr_p50"],
             "cpi_avg": float(np.mean(cpi[1:])) if cpi else None,
-            "ff_end_p50": ff[-1] if ff else None,
+            "ff_end_p50": ff[-1] if ff else None, "pd_end_p50": pdp[-1] if pdp else None,
             "ens_min": min(p["ep"]["ens"] for p in detail["phases"])}

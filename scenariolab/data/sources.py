@@ -1,22 +1,23 @@
 """Downloaders for the public data sources, with a plain-file cache.
 
 No API keys are needed: FRED's graph CSV endpoint, Ken French's data library,
-Nareit's monthly workbook and the datasets/gold-prices CSV are all open.
-Every download is cached under data/raw/<source>/ and reused unless
-`refresh=True`.
+Nareit's monthly workbook, the datasets/gold-prices CSV and Shiller's ie_data.xls
+are all open. Every download is cached under data/raw/<source>/: a missing file
+is downloaded, a cached one is reused unless `refresh=True`.
 """
 from __future__ import annotations
 
-import io
 import re
 import time
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import requests
 
+from .. import __version__
 from ..config import RAW_DIR
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -24,26 +25,36 @@ FRENCH_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/{name}
 NAREIT_URL = "https://www.reit.com/sites/default/files/returns/MonthlyHistoricalReturns.xls"
 GOLD_URL = "https://raw.githubusercontent.com/datasets/gold-prices/main/data/monthly.csv"
 
-USER_AGENT = "macro-scenario-lab/0.1 (+https://github.com)"
+REPO_URL = "https://github.com/Dongyu-Jia/causeway"
+USER_AGENT = f"causeway/{__version__} (+{REPO_URL})"
 
 
-def _download(url: str, dest: Path, refresh: bool, params: dict | None = None) -> Path:
+def _download(url: str, dest: Path, refresh: bool, params: dict | None = None, attempts: int = 4,
+              timeout: float = 90, check: Callable[[bytes], bool] | None = None) -> Path:
+    """dest, downloaded from url unless it is already cached (non-empty) and refresh is False.
+
+    `check(content)` must accept the body before it is cached (a rejected body counts as a failed
+    attempt); after `attempts` failures a RuntimeError is raised and nothing is written.
+    """
     if dest.exists() and dest.stat().st_size > 0 and not refresh:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
     last_err: Exception | None = None
-    for attempt in range(4):
+    for attempt in range(attempts):
         try:
-            resp = requests.get(url, params=params, timeout=90,
+            resp = requests.get(url, params=params, timeout=timeout,
                                 headers={"User-Agent": USER_AGENT})
             resp.raise_for_status()
+            if check is not None and not check(resp.content):
+                raise ValueError("unexpected content")
             tmp = dest.with_suffix(dest.suffix + ".part")
             tmp.write_bytes(resp.content)
             tmp.replace(dest)
             return dest
         except Exception as err:  # network hiccups are common on FRED
             last_err = err
-            time.sleep(1.5 * (attempt + 1))
+            if attempt + 1 < attempts:
+                time.sleep(1.5 * (attempt + 1))
     raise RuntimeError(f"download failed: {url} ({last_err})")
 
 
@@ -188,6 +199,55 @@ def gold(refresh: bool = False) -> pd.Series:
     s = s.dropna()
     s.index = _to_month_start(s.index)
     return s[~s.index.duplicated(keep="last")]
+
+
+# ---------------------------------------------------------------- Shiller
+
+SHILLER_URL = "http://www.econ.yale.edu/~shiller/data/ie_data.xls"
+SHILLER_COLUMNS = {"P": "price", "D": "dividend", "E": "earnings", "CPI": "cpi", "CAPE": "cape"}
+XLS_MAGIC = bytes.fromhex("d0cf11e0a1b11ae1")      # an Excel 97-2003 workbook (OLE2 compound file)
+SHILLER_ATTEMPTS, SHILLER_TIMEOUT = 2, 60          # optional source: give up sooner than the required ones
+
+
+def shiller(refresh: bool = False, download: bool = True) -> pd.DataFrame | None:
+    """Shiller's monthly S&P composite data (price, dividend, earnings, CPI, CAPE), or None.
+
+    Read from data/raw/shiller/ie_data.xls. Like every other source, the file is downloaded when
+    it is not cached yet (so a first build gets CAPE) and re-downloaded only with refresh=True;
+    download=False reads the cache only (analysis code that must never go online). It is an
+    optional source: any failure (no network, a body that is not an .xls workbook, a changed
+    layout) returns None and the panel is built without CAPE instead of failing; nothing is
+    cached then, so the next build tries again.
+    """
+    dest = RAW_DIR / "shiller" / "ie_data.xls"
+    if download:
+        try:
+            _download(SHILLER_URL, dest, refresh, attempts=SHILLER_ATTEMPTS, timeout=SHILLER_TIMEOUT,
+                      check=lambda body: body[:8] == XLS_MAGIC)
+        except RuntimeError:
+            pass
+    if not dest.exists() or dest.stat().st_size == 0:
+        return None
+    try:
+        raw = pd.read_excel(dest, sheet_name="Data", header=None, engine="xlrd")
+        head = next(i for i in range(min(len(raw), 40)) if str(raw.iat[i, 0]).strip() == "Date")
+        cols = {}
+        for c in range(raw.shape[1]):
+            name = str(raw.iat[head, c]).strip()
+            if name in SHILLER_COLUMNS and SHILLER_COLUMNS[name] not in cols:
+                cols[SHILLER_COLUMNS[name]] = c
+        body = raw.iloc[head + 1:]
+        stamp = pd.to_numeric(body[0], errors="coerce")
+        body, stamp = body[stamp.notna()], stamp[stamp.notna()].to_numpy(float)
+        year = np.floor(stamp).astype(int)
+        month = np.rint((stamp - year) * 100).astype(int)     # 1871.01 = January, 1871.1 = October
+        index = pd.to_datetime(pd.DataFrame({"year": year, "month": month, "day": 1}))
+        out = pd.DataFrame({k: pd.to_numeric(body[c], errors="coerce").to_numpy(float) for k, c in cols.items()},
+                           index=pd.DatetimeIndex(index))
+        out = out[~out.index.duplicated(keep="last")].sort_index()
+        return out if {"price", "earnings", "cpi", "cape"} <= set(out.columns) else None
+    except Exception:  # noqa: BLE001 - optional source: a layout change must not break the panel
+        return None
 
 
 def interp_quarterly_to_monthly(q: pd.Series) -> pd.Series:

@@ -20,9 +20,8 @@ def load_panel_with_shocks() -> pd.DataFrame:
     if SHOCKS_PATH.exists():
         shocks = pd.read_csv(SHOCKS_PATH, index_col="date", parse_dates=["date"])
         shocks.index = shocks.index.to_period("M").to_timestamp()
-        for col in shocks.columns:
-            if col.startswith("e_"):
-                panel[col] = shocks[col].reindex(panel.index)
+        cols = [c for c in shocks.columns if c.startswith("e_")]
+        panel = pd.concat([panel.drop(columns=cols, errors="ignore"), shocks[cols].reindex(panel.index)], axis=1)
     return panel
 
 

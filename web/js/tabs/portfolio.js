@@ -1,4 +1,398 @@
-// Placeholder: this tab is implemented in its own module.
-export async function render(root, { ui }) {
-  root.append(ui.notice('此页面正在建设中。', 'info'));
+// Portfolio evaluation: one set of weights run through every scenario's simulated paths, the
+// scenarios mixed by probability (weighted aggregate), next to the worst / best scenario ranked
+// in real terms. Inputs come from _weights.js and are shared with the withdrawal tab.
+// Deep links: #portfolio?all_weather, #portfolio?preset=income&rebalance=annual&scenario=ai_bust,
+// #portfolio?w=us_equity:50,gold:50
+import {
+  shared, weightsEditor, probEditor, customPicker, statusPill, liveRequest, errorNotice, parseParam,
+  parseWeightsParam, scenarioRows, rangeChart, rowsHeight, rankColor, shortName, fmtMult, weightsLabel, isNum, esc,
+  signOf, plainNote, FALLBACK_PRESETS, injectStyle,
+} from './_weights.js';
+
+const REBALANCE = [
+  { value: 'monthly', label: '每月再平衡', help: '每个月末把各资产调回目标权重：纪律最强，组合波动最低。' },
+  { value: 'annual', label: '每年再平衡', help: '每满 12 个月调回一次目标权重，年内随涨跌漂移。' },
+  { value: 'none', label: '不再平衡', help: '期初买入后一直持有：涨得多的资产权重越来越大，组合会向赢家集中。' },
+];
+const SORTS = [{ value: 'prob', label: '按概率' }, { value: 'real', label: '按实际回报' }, { value: 'sharpe', label: '按夏普' }];
+
+// view state kept while the page is open
+let rebalance = 'monthly';
+let wealthView = 'real';
+let sortBy = 'prob';
+
+// Short chart labels, falling back to the full name where two scenarios would share one.
+function labelsOf(per) {
+  const count = {};
+  per.forEach(e => { const s = shortName(e.name); count[s] = (count[s] || 0) + 1; });
+  return Object.fromEntries(per.map(e => [e.id, count[shortName(e.name)] > 1 ? e.name : shortName(e.name)]));
+}
+
+export async function render(root, { api, charts, ui, meta, param }) {
+  injectStyle();
+  const { h, card } = ui;
+  const pct = (v, d = 1) => ui.fmtPct(v, d);
+  const q = parseParam(param);
+  const tokens = [...q.tokens];
+  const take = (pred) => { const i = tokens.findIndex(pred); return i < 0 ? null : tokens.splice(i, 1)[0]; };
+  const reb = q.kv.rebalance || take(t => REBALANCE.some(r => r.value === t));
+  if (REBALANCE.some(r => r.value === reb)) rebalance = reb;
+
+  // `root` (#view) is reused by whichever tab opens next, so "is this page still showing" is
+  // checked on a node of our own: the lead paragraph, later the results container.
+  const lead = h('p', { class: 'lead' },
+    '把同一个组合放进每个情景的全部模拟路径里逐月计算，再按情景概率把所有路径混合成“加权汇总”：',
+    '它回答“综合所有可能的未来，这个组合大概会怎样”。最坏 / 最好情景按扣除通胀后的实际年化回报排序，',
+    '因为高通胀情景的名义收益会显得很好看。所有数字都由引擎在同一批路径上算出，改动权重或概率后自动重算。');
+  root.append(lead);
+
+  const defaultsP = api.get('portfolio_default').catch(err => ({ error: err }));
+  const scenP = api.get('scenarios').catch(err => ({ error: err }));
+  const presetsOf = (d) => (d && !d.error && Array.isArray(d.presets) && d.presets.length ? d.presets : FALLBACK_PRESETS);
+  // a preset named in the link needs the preset list before the editor starts
+  const defaults = tokens.length || q.kv.preset ? await defaultsP : null;
+  if (!lead.isConnected) return;       // the user moved on while the preset list loaded
+  const presetId = q.kv.preset || take(t => presetsOf(defaults).some(p => p.id === t));
+  let initial = presetsOf(defaults).find(p => p.id === presetId)?.weights || null;
+  if (q.kv.w && Object.keys(parseWeightsParam(q.kv.w)).length) initial = parseWeightsParam(q.kv.w);
+  let focus = q.kv.scenario || null;
+
+  // ---- inputs (built before any data arrives)
+  let scen = null, probInfo = {};
+  const pill = statusPill();
+  const editor = weightsEditor({ assets: meta?.assets, presets: presetsOf(defaults), initial, cls: 'span-2',
+    onChange: () => refresh() });
+  const probs = probEditor({ onChange: () => refresh() });
+  const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); refresh(); } });
+
+  const rebHelp = h('div', { class: 'portfolio-help' });
+  const paintReb = () => { rebHelp.textContent = REBALANCE.find(r => r.value === rebalance)?.help || ''; };
+  const probState = h('span', { class: 'muted' });
+  const paintProbState = () => { probState.textContent = probs.label(); };   // posterior, calibrated or hand-set
+  const horizonNote = h('div', { class: 'portfolio-help' });
+  paintReb();
+  paintProbState();
+  root.append(h('div', { class: 'grid cols-3' }, editor.el,
+    card({ title: '计算设置', sub: '再平衡方式、纳入哪些情景、按什么概率混合', cls: 'weights-side' },
+      h('div', { class: 'portfolio-label' }, '再平衡方式'),
+      ui.seg(REBALANCE.map(r => ({ value: r.value, label: r.label })), rebalance, (v) => { rebalance = v; paintReb(); refresh(); }),
+      rebHelp,
+      h('div', { class: 'portfolio-label' }, '纳入已保存的自定义情景'), picker.el,
+      h('div', { class: 'portfolio-label' }, '情景概率'),
+      h('div', { class: 'row' }, probState,
+        h('button', { class: 'btn', onclick: () => probs.el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '调整情景概率')),
+      horizonNote)));
+
+  const errBox = h('div', { class: 'weights-err' });
+  const results = h('div', { class: 'weights-results' }, ui.loading('正在用全部情景的路径计算组合…'));
+  const alive = () => results.isConnected;
+  const notesList = h('ul', { class: 'list' }, h('li', { class: 'muted' }, '计算完成后，这里列出本次结果的计算口径。'));
+  const notesStale = h('p', { class: 'muted', style: { display: 'none', margin: 0 } }, '组合权重合计为 0：没有结果，也就没有计算口径。');
+  root.append(errBox, results,
+    h('div', { class: 'section-title' }, '调整情景概率'), probs.el,
+    h('div', { class: 'section-title' }, '计算口径'), card({}, notesList, notesStale),
+    pill.el);
+
+  // ---- results view (built on the first result, refilled on every later one)
+  let view = null, shown = null, scrolled = false;
+  function buildView() {
+    const v = {
+      summary: h('div', { class: 'portfolio-summary' }), kpis: h('div', { class: 'grid cols-4' }),
+      compare: h('div', { class: 'portfolio-compare' }), rank: ui.chartBox('tall'), fan: ui.chartBox('tall'), lines: ui.chartBox('tall'),
+      table: h('div', { class: 'portfolio-table' }),
+    };
+    const fanCard = card({ title: '加权财富扇形图',
+      sub: '期初 1 元在所有情景按概率混合后的分布（深色带 25%–75%、浅色带 5%–95% 的路径，灰线是期初 1 元），红绿虚线是最差 / 最好情景的中位数，两者的差距就是宏观情景经通胀和资产回报传导出来的影响。',
+      actions: ui.seg([{ value: 'real', label: '实际购买力' }, { value: 'nominal', label: '名义' }], wealthView,
+        (x) => { wealthView = x; if (shown) drawWealth(shown); }) }, v.fan);
+    v.fanTitle = fanCard.querySelector('.card-title');
+    const linesCard = card({ title: '各情景的中位数财富路径',
+      sub: '每条线是一个情景的中位数路径，颜色由绿到红 = 实际回报由高到低（与排名图一致），粗黑线是加权中位数，线尾标出最好 / 最差情景、悬停可逐条查看：线与线的距离就是宏观情景对这个组合的影响。' }, v.lines);
+    v.linesTitle = linesCard.querySelector('.card-title');
+    results.replaceChildren(
+      h('div', { class: 'section-title' }, '加权汇总：按情景概率把全部路径混合'), v.summary, v.kpis,
+      h('div', { class: 'section-title' }, '最坏 / 最好情景（按实际年化回报排序）'),
+      h('div', { class: 'weights-pair' },
+        card({ title: '加权平均 vs 等权 vs 最坏 / 最好',
+          sub: '加权 = 各情景的路径按概率混合后再取分位数、等权 = 每个情景一样重要（均为中位数，实际亏损 = 期末购买力低于期初的概率），两者差得越多，结论越依赖你对情景概率的判断。' }, v.compare),
+        card({ title: '情景排名：扣除通胀后的年化回报',
+          sub: '点 = 实际 CAGR 中位数、色带 = 5%–95% 的路径区间、点越大情景概率越高；宏观冲击经通胀、利率和盈利传导到各类资产，排在最下面的就是这个组合最怕的宏观环境。' }, v.rank)),
+      h('div', { class: 'section-title' }, '财富路径'),
+      h('div', { class: 'weights-pair' }, fanCard, linesCard),
+      h('div', { class: 'section-title' }, '各情景明细'),
+      card({ title: '每个情景下的组合表现',
+        sub: 'CAGR = 年化复合增长率；p5 / p50 / p95 是该情景全部路径的 5% / 50% / 95% 分位；实际 = 按各路径自己的 CPI 扣除通胀；夏普 = 相对现金的超额收益 ÷ 波动；回撤坏尾部 = 只有 5% 的路径比它更深；点击情景名可查看它的宏观设定与传导链。',
+        actions: ui.seg(SORTS, sortBy, (x) => { sortBy = x; if (shown) drawTable(shown); }) }, v.table));
+    return v;
+  }
+
+  function kpis(res) {
+    const a = res.aggregate?.weighted || {};
+    const yrs = Math.round((res.horizon_months || 180) / 12);
+    return [
+      ui.kpi('名义年化回报 CAGR（中位数）', pct(a.cagr_p50, 2), `5%–95% 路径：${pct(a.cagr_p5)} ~ ${pct(a.cagr_p95)}`, signOf(a.cagr_p50, 2)),
+      ui.kpi('实际年化回报（扣除通胀，中位数）', pct(a.real_cagr_p50, 2), `5%–95% 路径：${pct(a.real_cagr_p5)} ~ ${pct(a.real_cagr_p95)}`, signOf(a.real_cagr_p50, 2)),
+      ui.kpi('年化波动率', pct(a.vol), '月度收益的标准差 × √12，各路径平均'),
+      ui.kpi('夏普比率', ui.fmtNum(a.sharpe, 2), '相对现金的年化超额收益 ÷ 年化波动（中位数）'),
+      ui.kpi('索提诺比率', ui.fmtNum(a.sortino, 2), '分母只计跑输现金的月份（下行波动）'),
+      ui.kpi('最大回撤（中位数）', pct(a.max_dd_p50), `坏尾部：5% 的路径深于 ${pct(a.max_dd_p95)}`, signOf(a.max_dd_p50)),
+      ui.kpi(`${yrs} 年后实际亏损概率`, pct(a.prob_loss_real), '期末购买力低于期初的路径占比', a.prob_loss_real > 0.25 ? 'is-bad' : ''),
+      ui.kpi('CVaR 5%：最差 5% 路径的期末财富', fmtMult(a.cvar5_terminal),
+        `期初 = 1 倍（名义）；扣除通胀后 ${fmtMult(a.cvar5_terminal_real)}`, isNum(a.cvar5_terminal) && a.cvar5_terminal < 1 ? 'is-bad' : ''),
+    ];
+  }
+
+  function compare(res) {
+    const agg = res.aggregate || {};
+    const rows = [
+      { label: '加权汇总', s: agg.weighted },
+      { label: '等权汇总', s: agg.equal_weight },
+      { label: `最差：${shortName(agg.worst?.name) || '—'}`, s: agg.worst, cls: 'portfolio-row-worst' },
+      { label: `最好：${shortName(agg.best?.name) || '—'}`, s: agg.best, cls: 'portfolio-row-best' },
+    ].filter(r => r.s);
+    const signed = (k) => ({ value: (r) => r.s[k], fmt: (v) => pct(v), cls: (v) => signOf(v) });
+    const tbl = ui.table([
+      { key: 'label', label: '口径', fmt: (v, r) => h('span', { title: r.s.name || v }, v) },
+      { label: '名义 CAGR', ...signed('cagr_p50') },
+      { label: '实际 CAGR', ...signed('real_cagr_p50') },
+      { label: '波动率', value: (r) => r.s.vol, fmt: (v) => pct(v) },
+      { label: '夏普', value: (r) => r.s.sharpe, fmt: (v) => ui.fmtNum(v, 2) },
+      { label: '最大回撤', ...signed('max_dd_p50') },
+      { label: '实际亏损', value: (r) => r.s.prob_loss_real, fmt: (v) => pct(v) },
+    ], rows);
+    tbl.querySelectorAll('tbody tr').forEach((tr, i) => { if (rows[i].cls) tr.classList.add(rows[i].cls); });
+
+    const w = agg.weighted || {};
+    const yrs = Math.round((res.horizon_months || 180) / 12);
+    const callout = (e, kind, title) => {
+      if (!e) return null;
+      const d = isNum(e.real_cagr_p50) && isNum(w.real_cagr_p50) ? (e.real_cagr_p50 - w.real_cagr_p50) * 100 : null;
+      const vs = d === null ? '' : `，比加权汇总${d < 0 ? '低' : '高'} ${Math.abs(d).toFixed(1)} 个百分点`;
+      return h('div', { class: `portfolio-callout ${kind}` }, h('b', {}, `${title}「${e.name}」`),
+        `（概率 ${pct(e.prob)}）：实际年化回报中位数 ${pct(e.real_cagr_p50, 2)}${vs}；`,
+        `${pct(e.prob_loss_real, 0)} 的路径 ${yrs} 年后跑输通胀，最大回撤中位数 ${pct(e.max_dd_p50)}，夏普 ${ui.fmtNum(e.sharpe, 2)}。`);
+    };
+    return [tbl, callout(agg.worst, 'bad', '最差情景'), callout(agg.best, 'good', '最好情景')];
+  }
+
+  // Scenarios sorted by real median CAGR, best first; the colour of each follows its rank.
+  const ranked = (res) => (res.per_scenario || []).slice()
+    .sort((a, b) => (isNum(b.real_cagr_p50) ? b.real_cagr_p50 : -Infinity) - (isNum(a.real_cagr_p50) ? a.real_cagr_p50 : -Infinity));
+  const colorsOf = (list) => Object.fromEntries(list.map((e, i) => [e.id, rankColor(i, list.length)]));
+
+  function drawRank(res) {
+    const per = ranked(res), colors = colorsOf(per), labels = labelsOf(per);
+    const wid = res.aggregate?.worst?.id, bid = res.aggregate?.best?.id;
+    rangeChart(view.rank, {
+      height: rowsHeight(per.length),
+      fmt: (v) => `${+(v * 100).toFixed(1)}%`,
+      rows: per.map(e => ({ label: labels[e.id], lo: e.real_cagr_p5, mid: e.real_cagr_p50, hi: e.real_cagr_p95,
+        color: colors[e.id], size: 7 + 28 * Math.sqrt(Math.max(0, e.prob || 0)),
+        tip: `<b>${esc(e.name)}</b>${e.id === wid ? '（最差）' : e.id === bid ? '（最好）' : ''}<br/>概率 ${pct(e.prob)}`
+          + `<br/>实际 CAGR 中位数 <b>${pct(e.real_cagr_p50, 2)}</b><br/>5%–95%：${pct(e.real_cagr_p5)} ~ ${pct(e.real_cagr_p95)}`
+          + `<br/>名义 CAGR 中位数 ${pct(e.cagr_p50, 2)}` })),
+      marks: [{ x: 0, color: '#adb5bd', type: 'solid' },
+        { x: res.aggregate?.weighted?.real_cagr_p50, label: '加权中位数', color: '#3b5bdb' }],
+    });
+  }
+
+  function drawWealth(res) {
+    const real = wealthView === 'real';
+    const key = real ? 'fan_real' : 'fan';
+    const x = res.dates || res.years || [];
+    const agg = res.aggregate || {};
+    const per = ranked(res), colors = colorsOf(per), labels = labelsOf(per);
+    view.fanTitle.textContent = `加权财富扇形图（${real ? '实际购买力' : '名义'}）`;
+    const bands = agg.weighted?.[key];
+    if (bands) {
+      charts.fan(view.fan, { x, bands, fmt: 'x', name: '加权中位数',
+        extra: [
+          agg.worst?.[key] ? { name: `最差：${labels[agg.worst.id] || shortName(agg.worst.name)}`, data: agg.worst[key].p50, dashed: true, color: '#d9363e' } : null,
+          agg.best?.[key] ? { name: `最好：${labels[agg.best.id] || shortName(agg.best.name)}`, data: agg.best[key].p50, dashed: true, color: '#1a9c5b' } : null,
+          { name: '期初 1 元', data: x.map(() => 1), dashed: true, color: '#adb5bd' },
+        ].filter(Boolean) });
+    }
+    // 13+ near-identical shades make a legend useless: label the best / worst / weighted lines at
+    // their ends and list every scenario, highest first, in the tooltip.
+    view.linesTitle.textContent = `各情景的中位数财富路径（${real ? '实际购买力' : '名义'}）`;
+    const tagged = { [agg.best?.id]: '最好', [agg.worst?.id]: '最差' };
+    const clip = (s) => (s.length > 8 ? `${s.slice(0, 8)}…` : s);
+    const lines = [
+      ...per.map(e => ({ name: labels[e.id], data: e[key]?.p50 || [], color: colors[e.id],
+        width: tagged[e.id] ? 2.4 : 1.3, end: tagged[e.id] ? `${tagged[e.id]}：${clip(labels[e.id])}` : null })),
+      { name: '加权中位数', data: bands?.p50 || [], color: '#1d2433', width: 3, end: '加权中位数' },
+    ];
+    const chart = charts.line(view.lines, { x, yFmt: 'x', legend: false, series: lines });
+    const textW = (s) => [...s].reduce((t, c) => t + (c.charCodeAt(0) > 255 ? 11 : 6.5), 0);   // 11px labels
+    const endW = Math.round(Math.max(72, ...lines.filter(l => l.end).map(l => textW(l.end) + 16)));
+    chart.setOption({
+      grid: { top: 16, right: endW },
+      tooltip: { formatter: (ps) => [`<b>${esc(ps[0]?.axisValue)}</b>`,
+        ...ps.filter(p => isNum(p.value)).sort((a, b) => b.value - a.value)
+          .map(p => `${p.marker}${esc(p.seriesName)}：${charts.fmtValue(p.value, 'x')}`)].join('<br/>') },
+      series: lines.map(l => ({ endLabel: l.end ? { show: true, formatter: l.end, color: l.color, fontSize: 11, distance: 6 } : { show: false },
+        labelLayout: { moveOverlap: 'shiftY' }, emphasis: { focus: 'series' } })),
+    });
+  }
+
+  function drawTable(res) {
+    const wid = res.aggregate?.worst?.id, bid = res.aggregate?.best?.id;
+    const by = { prob: (e) => e.prob, real: (e) => e.real_cagr_p50, sharpe: (e) => e.sharpe }[sortBy] || ((e) => e.prob);
+    const per = (res.per_scenario || []).slice().sort((a, b) => (isNum(by(b)) ? by(b) : -Infinity) - (isNum(by(a)) ? by(a) : -Infinity));
+    const signed = (key, label) => ({ key, label, fmt: (v) => pct(v), cls: (v) => signOf(v) });
+    const tbl = ui.table([
+      { key: 'name', label: '情景', wrap: true, fmt: (v, r) => h('span', {},
+        r.source === 'custom' ? r.name : h('a', { href: `#scenarios?${r.id}`, title: '查看这个情景的宏观设定与传导链' }, r.name),
+        r.id === wid ? [' ', ui.chip('最差', 'bad')] : null, r.id === bid ? [' ', ui.chip('最好', 'good')] : null,
+        r.source === 'custom' ? [' ', ui.chip('自定义', 'accent')] : null) },
+      { key: 'prob', label: '概率', fmt: (v) => pct(v) },
+      signed('cagr_p5', '名义 p5'), signed('cagr_p50', '名义 p50'), signed('cagr_p95', '名义 p95'),
+      signed('real_cagr_p50', '实际 p50'),
+      { key: 'vol', label: '波动率', fmt: (v) => pct(v) },
+      { key: 'sharpe', label: '夏普', fmt: (v) => ui.fmtNum(v, 2) },
+      signed('max_dd_p50', '最大回撤 p50'), signed('max_dd_p95', '回撤坏尾部'),
+      { key: 'prob_loss_real', label: '实际亏损概率', fmt: (v) => pct(v), cls: (v) => (v > 0.25 ? 'is-bad' : '') },
+    ], per);
+    tbl.querySelectorAll('tbody tr').forEach((tr, i) => {
+      const id = per[i].id;
+      if (id === wid) tr.classList.add('portfolio-row-worst');
+      if (id === bid) tr.classList.add('portfolio-row-best');
+      if (id === focus) tr.classList.add('weights-focus');
+    });
+    view.table.replaceChildren(tbl);
+  }
+
+  // adjusted: which scenario probabilities the request that produced `res` carried: 'calibrated' (the set
+  // calibrated to the one-year forecast), true (hand-set) or false (none: the model posterior)
+  function show(res, { adjusted = false } = {}) {
+    if (!view) view = buildView();
+    shown = res;
+    const per = res.per_scenario || [];
+    const yrs = Math.round((res.horizon_months || 180) / 12);
+    const dates = res.dates || [];
+    const custom = per.filter(e => e.source === 'custom').length;
+    view.summary.textContent = [
+      weightsLabel(res.weights), REBALANCE.find(r => r.value === res.rebalance)?.label || res.rebalance,
+      `${yrs} 年${dates.length ? `（${dates[0]} → ${dates[dates.length - 1]}）` : ''}`,
+      `${per.length} 个情景${custom ? `（含 ${custom} 个自定义）` : ''}`,
+      adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : '模型后验概率',
+    ].join(' · ');
+    view.kpis.replaceChildren(...kpis(res));
+    view.compare.replaceChildren(...compare(res).filter(Boolean));
+    notesList.replaceChildren(...(res.notes || []).map(n => h('li', { class: 'muted' }, plainNote(n))));
+    drawTable(res);
+    drawRank(res);
+    drawWealth(res);
+  }
+
+  // ---- requests
+  function body() {
+    const weights = editor.get();
+    if (!weights) return null;
+    const b = { weights, rebalance };
+    if (shared.include.length) b.include_custom = shared.include.slice();
+    const sp = probs.overrides();
+    if (sp) b.scenario_probs = sp;
+    return b;
+  }
+  // probability-editor rows from a response, when scenarios.json could not be read
+  const per0 = (res) => (res.per_scenario || []).map(e => ({ id: e.id, name: e.name, prior: null, likelihood: null,
+    post: e.prob, def: e.prob, custom: e.source === 'custom' }));
+  // ---- every weight cleared (清零, or each input set to 0). The editor sends no change for a portfolio it
+  // cannot evaluate, so the page watches the editor itself: the previous portfolio's numbers are hidden
+  // (not shown as if they were this one's) until a valid portfolio is computed, or until the inputs are
+  // back to exactly the request whose result is hidden.
+  const ZERO = '组合权重合计为 0：请至少给一个资产设置权重。上一个组合的结果已隐藏，设置权重后会自动重算。';
+  let stale = false, shownKey = null, pendingKey = null, staleTimer = 0;
+  const keyOf = (b) => (b ? JSON.stringify(b) : null);
+  function setStale(on) {
+    stale = on;
+    results.style.display = on ? 'none' : '';
+    notesList.style.display = on ? 'none' : '';
+    notesStale.style.display = on ? '' : 'none';
+  }
+  function watchWeights() {
+    if (!alive()) return;
+    if (!editor.get()) { if (!stale) refresh(); return; }
+    if (!stale) return;
+    errBox.replaceChildren();
+    clearTimeout(staleTimer);
+    const key = keyOf(body());
+    if (shown && key === shownKey) { setStale(false); pill.done('已恢复'); return; }
+    if (key === pendingKey) return;        // the editor's own change already asked for exactly this
+    // the editor fires its own change ~0.4 s after the last edit unless the weights equal the last ones it
+    // sent (then another input, e.g. the rebalancing, may have moved meanwhile): recompute in that case too
+    staleTimer = setTimeout(refresh, 450);
+  }
+  editor.el.addEventListener('input', watchWeights);
+  editor.el.addEventListener('click', watchWeights);
+
+  let live = false;
+  const go = liveRequest(async ({ b, adjusted }) => ({ res: await api.post('portfolio/evaluate', b), adjusted, key: keyOf(b) }), {
+    start: () => { pill.busy(); results.classList.add('weights-busy'); },
+    done: ({ res, adjusted, key }) => {
+      if (!alive()) return;
+      pendingKey = null;
+      results.classList.remove('weights-busy');
+      live = true;
+      if (!probs.hasRows()) probs.setRows(per0(res), probInfo);
+      show(res, { adjusted });
+      shownKey = key;
+      probs.sync(res.per_scenario);
+      if (!editor.get()) { setStale(true); pill.fail('权重合计为 0：未计算'); return; }   // cleared while it ran
+      errBox.replaceChildren();
+      setStale(false);
+      pill.done('已更新');
+      if (focus && !scrolled) { scrolled = true; view.table.querySelector('.weights-focus')?.scrollIntoView({ block: 'center' }); }
+    },
+    error: async (err) => {
+      if (!alive()) return;
+      pendingKey = null;
+      results.classList.remove('weights-busy');
+      pill.fail('计算失败：见页面上方提示');
+      errBox.replaceChildren(errorNotice(err, () => refresh()));
+      if (live) return;                    // keep the last good result on screen
+      const d = defaults || await defaultsP;
+      if (!alive()) return;
+      if (d && !d.error && d.portfolio) {
+        errBox.append(ui.notice('下面先显示构建时预先计算的默认组合（60/40、模型后验概率、每月再平衡），实时计算恢复后会自动替换。', 'info'));
+        show(d.portfolio);
+        shownKey = null;
+        setStale(!editor.get());
+      } else if (!view) {
+        results.replaceChildren();
+      }
+    },
+  });
+  function refresh() {
+    if (!alive()) return;                  // a timer from a page the user has left
+    clearTimeout(staleTimer);
+    paintProbState();
+    const b = body();
+    if (!b) {
+      setStale(true);
+      errBox.replaceChildren(ui.notice(ZERO, 'error'));
+      pill.fail('权重合计为 0：未计算');
+      return;
+    }
+    pendingKey = keyOf(b);
+    go({ b, adjusted: !b.scenario_probs ? false : probs.mode() === 'calibrated' ? 'calibrated' : probs.adjusted() });
+  }
+
+  // ---- scenario list + saved custom scenarios, then the first evaluation; presets fill in later
+  const [s, items] = await Promise.all([scenP, picker.load()]);
+  if (!alive()) return;
+  scen = s && !s.error ? s : null;
+  probInfo = { method: scen?.probability_method, gamma: scen?.probability?.gamma };
+  probs.setRows(scenarioRows(scen, items), probInfo);
+  if (scen) {
+    horizonNote.textContent = `期限 ${Math.round((scen.horizon_months || 180) / 12)} 年（${scen.start || '—'} 起），每个情景 ${scen.n_paths || '—'} 条模拟路径，`
+      + '与「未来情景」页是同一批路径。';
+    const ids = (scen.scenarios || []).map(x => x.id);
+    if (!focus) focus = take(t => ids.includes(t));
+  }
+  if (tokens.length) root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id 或 monthly / annual / none）。`, 'info'), errBox);
+  refresh();
+  const d = defaults || await defaultsP;
+  if (alive() && d && !d.error) editor.setPresets(presetsOf(d));
 }

@@ -1,0 +1,57 @@
+id: k_shaped
+name: K 型 AI 经济：资本繁荣 + 白领收入被压制
+summary: AI 让利润和股票财富继续集中到少数人手里，入门级和中层白领的岗位与工资被压制；前 10% 的财富效应撑住总消费，失业率七年升到 5.6% 左右，劳动收入占比继续创新低，增长越来越依赖股市。
+narrative: |-
+  起点：劳动收入占比（指数 93.4）是有记录以来最低，利润占 GDP 约 13% 是最高，前 10% 的家庭贡献了约一半的消费支出（Moody's：2025 年约 49.7%），并持有约 87% 的股票（美联储分布式金融账户 DFA）。
+  本情景假设 AI 主要以“替代”而非“扩张”的方式进入白领工作：收入 50-90% 的中层白领四年内劳动收入累计下降约 5%、前 10% 中的专业岗位下降约 3%，而 AI 带来的利润继续推高股票财富。
+  “人员收入对宏观经济的影响”计算器给出这一组冲击的宏观含义：劳动收入渠道使总消费下降约 0.8%，股票财富的财富效应（每 1 美元约 3 美分）使消费增加约 2%，合计总消费仍增加，实际增长一阶影响为正；白领失业使失业率累计上升约 1.15 个百分点（奥肯部分抵消约 0.4），劳动收入占比累计下降约 4%。
+  需求效应变成第一阶段的工业产出、服务通胀视图，失业率和劳动收入占比的趋势视图让抽到的月份（权重最高的是 2009-14 年的复苏月份）不带自己的失业率下降和劳动收入占比下降；白领失业和劳动收入占比的直接效应在历史上没有对应月份，作为有界的因子漂移叠加上去，引擎模拟的失业率四年升到 5% 左右、劳动收入占比下降约 4.5%。
+  第二阶段劳动收入继续受压（后 50% 也开始受影响），财富效应仍能抵消劳动收入的拖累，但总消费增速更慢，计算器给出失业率再升约 0.7 个百分点；这时失业率已在 5% 以上，引擎的均值回归会把它拉向 4.8%，而被替代的白领岗位不会随周期恢复，所以这一阶段另加每年 +0.13 个百分点的失业率漂移抵消这部分回归（这一阶段失业率平均约 5.45%，回归每年约拉回 0.12），模拟的失业率在第七年末升到 5.6% 左右。
+  增长越来越依赖股市，一旦股市回落（见“AI 泡沫破裂”情景），高收入消费会同步走弱，这正是 K 型结构的脆弱之处；之后回到无视图的历史常态。
+  计算器只是一阶会计推算，资产价格仍由引擎从历史月份生成；详情页列出计算器的每个中间数字，并对照引擎模拟出的同期股票回报、失业率和劳动收入占比变化。
+tags: [AI, 收入分配, K 型, 白领, 财富效应]
+prior_prob: 0.10
+analogs: ["2003-06:2007-06", "2010-01:2014-12", "2023-01:2026-09"]
+calibration:
+  - kind: distribution
+    phase: 0
+    params:
+      labor_income_shock: {bottom50: 0.0, mid40: -0.05, top10: -0.03}
+      equity_wealth_change: 0.25
+  - kind: distribution
+    phase: 1
+    params:
+      labor_income_shock: {bottom50: -0.01, mid40: -0.03, top10: -0.02}
+      equity_wealth_change: 0.15
+causal_chain:
+  - {from: AI 替代白领任务, to: 中层白领劳动收入, sign: "-", lag: "0-48月", mechanism: "入门级和中层岗位减少、工资被压制，50-90% 组四年累计约 −5%"}
+  - {from: AI 利润, to: 股票财富, sign: "+", lag: "0-48月", mechanism: "利润集中在少数公司，推高股票财富"}
+  - {from: 股票财富, to: 前 10% 消费, sign: "+", lag: "6-24月", mechanism: "前 10% 持有约 87% 的股票，财富效应每 1 美元约 3 美分"}
+  - {from: 中层白领劳动收入, to: 中层消费, sign: "+", lag: "0-12月", mechanism: "边际消费倾向约 0.4"}
+  - {from: 前 10% 消费, to: 总消费, sign: "+", lag: "0-12月", mechanism: "前 10% 约占总消费的一半，财富效应使总消费增加约 2%，抵消劳动收入渠道的约 −0.8%"}
+  - {from: 白领失业, to: 失业率, sign: "+", lag: "6-84月", mechanism: "直接失业约 1.15 个百分点、奥肯部分抵消约 0.4，失业率四年升到 5% 左右，七年升到 5.6% 左右"}
+  - {from: 利润占比, to: 劳动收入占比, sign: "-", lag: "持续", mechanism: "劳动收入占比四年再降约 4.5%，继续创新低"}
+  - {from: 股市, to: 总需求, sign: "+", lag: "0-12月", mechanism: "增长越来越依赖股票财富，股市回落时消费同步走弱"}
+phases:
+  - name: 资本繁荣与白领收入压制
+    months: 48
+    views:
+      - {var: f_profit_share, mean_annual: 0.3, why: "AI 利润：利润占 GDP 继续上升（2003-06 年每年约 +0.9，2023 年以来约 +0.5）"}
+      - {var: s_cpi_yoy, mean: 3.0, why: "通胀温和"}
+    confidence: 1.0
+  - name: 消费分化与放缓
+    months: 36
+    views:
+      - {var: s_cpi_yoy, mean: 2.7, why: "需求放缓，通胀回落"}
+    overrides:
+      # added to the calculator's own unrate drift (library.resolve_calibration): unemployment is above the
+      # engine's 4.8% anchor in this phase (the mean path averages about 5.45%), whose reversion (0.015 a month of
+      # the gap) takes back about 0.18 x (5.45 - 4.8) = 0.12 pp a year, a little more once this drift lifts the
+      # level; 0.13 makes the engine's expected change over the phase equal the calculator's +0.74 pp (mean over
+      # 8 seeds; the library seed draws fewer recession blocks: +0.63 mean, +0.50 median). Displaced
+      # white-collar jobs do not return with the cycle.
+      factor_drift: {unrate: 0.13}
+    confidence: 1.0
+  - name: 回归常态
+    months: 96
+    views: []

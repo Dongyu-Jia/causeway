@@ -1,17 +1,20 @@
-# data is downloaded and derived locally; sources have their own licenses
-data/raw/
-data/processed/
-data/results/
+# data is downloaded and derived locally and never published; sources have their own licenses.
+# The leading slash anchors it to the repo root: a bare "data/" would also hide the scenariolab/data/ package.
+/data/
 
-# secrets
+# secrets: .env holds the API key; only the .env.example template is published
 .env
+.env.*
+!.env.example
 
 # python
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 build/
 dist/
 
@@ -19,3 +22,6 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# local tooling
+.claude/
