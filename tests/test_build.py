@@ -66,6 +66,57 @@ def test_an_ordinary_error_fails_the_build(fake_build, capsys):
     assert "eras FAILED" in capsys.readouterr().out
 
 
+@pytest.fixture
+def step_calls(fake_build, monkeypatch):
+    """The step modules build.main() runs, in order (meta, which is built in place, is faked too)."""
+    calls: list[str] = []
+    inner = build._run
+
+    def run(module, ctx, **kw):
+        calls.append(module)
+        return inner(module, ctx, **kw)
+
+    monkeypatch.setattr(build, "_run", run)
+    monkeypatch.setattr(build, "build_meta", lambda ctx: {})
+    return calls
+
+
+def test_regimes_runs_after_scenarios_and_before_forecast_and_two_steps_are_opt_in():
+    s = build.STEPS
+    assert s.index("scenarios") < s.index("regimes") < s.index("forecast") < s.index("llm")
+    assert build.OPT_IN == {"ablation", "regime_forecast"}
+    assert s[-2:] == ["ablation", "regime_forecast"]
+
+
+def test_the_default_build_runs_regimes_but_not_the_opt_in_steps(step_calls):
+    assert build.main(["--skip", "panel"]) == 0
+    assert "analysis.regimes" in step_calls
+    assert step_calls.index("scenarios.library") < step_calls.index("analysis.regimes") < step_calls.index("analysis.forecast")
+    assert "analysis.ablation" not in step_calls and "analysis.regime_forecast" not in step_calls
+
+
+def test_all_includes_both_opt_in_steps(step_calls, tmp_path):
+    assert build.main(["--all", "--skip", "panel"]) == 0
+    assert step_calls[-2:] == ["analysis.ablation", "analysis.regime_forecast"]
+    assert {"analysis.regimes", "analysis.forecast"} <= set(step_calls)
+    assert (tmp_path / "regimes.json").exists() and (tmp_path / "regime_forecast.json").exists()
+
+
+def test_only_regime_forecast_runs_that_step_alone(step_calls):
+    assert build.main(["--only", "regime_forecast"]) == 0
+    assert step_calls == ["analysis.regime_forecast"]
+
+
+def test_rebuilding_scenarios_alone_reminds_to_rebuild_regimes(step_calls, tmp_path, capsys):
+    assert build.main(["--only", "scenarios"]) == 0
+    assert "--only regimes" not in capsys.readouterr().out          # nothing to be stale yet
+    (tmp_path / "regimes.json").write_text("{}", encoding="utf-8")
+    assert build.main(["--only", "scenarios"]) == 0
+    assert "--only regimes" in capsys.readouterr().out
+    assert build.main(["--only", "scenarios", "regimes"]) == 0
+    assert "--only regimes" not in capsys.readouterr().out
+
+
 def test_optional_missing_names_only_the_llm_extra():
     assert build.optional_missing(ModuleNotFoundError(name="anthropic"))
     assert build.optional_missing(ModuleNotFoundError(name="anthropic.lib.credentials"))

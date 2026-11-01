@@ -5,16 +5,19 @@
     python -m scenariolab.build --only scenarios meta
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~6 min, not run by default)
-    python -m scenariolab.build --all           # every step, the ablation included
+    python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
+    python -m scenariolab.build --all           # every step, the opt-in ones included
 
 Order matters: causality writes the structural shock series that later steps
 can use; diagnostics writes model_selection.json, which backtest, scenarios
-and the server then load as "today's transmission"; forecast scores rolling
-one-year-ahead forecasts and needs the scenario paths; valuation tests the
-valuation state on the backtest windows and the forecast and checks itself
-against backtest.json, scenarios.json and forecast.json; portfolio evaluates
-the preset portfolios on the scenario paths; llm writes what the translator
-would send the model (no API key needed).
+and the server then load as "today's transmission"; regimes reuses the engine's
+unconditional reference run that the scenario readouts computed (rebuild it
+after --only scenarios); forecast scores rolling one-year-ahead forecasts and
+needs the scenario paths; valuation tests the valuation state on the backtest
+windows and the forecast and checks itself against backtest.json,
+scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
+the scenario paths; llm writes what the translator would send the model (no
+API key needed; its regime section reads regimes.json).
 """
 from __future__ import annotations
 
@@ -28,9 +31,9 @@ from . import config, jsonio
 from .context import EngineContext
 from .data.panel import load_meta, meta_sources, save_panel
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "backtest", "scenarios", "forecast", "valuation", "portfolio",
-         "llm", "meta", "ablation"]
-OPT_IN = {"ablation"}          # slow; run with --only ablation (or list it in --only)
+STEPS = ["panel", "causality", "eras", "diagnostics", "backtest", "scenarios", "regimes", "forecast", "valuation",
+         "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
 
@@ -72,7 +75,8 @@ def main(argv=None) -> int:
     ap.add_argument("--refresh", action="store_true", help="re-download all source data")
     ap.add_argument("--only", nargs="*", choices=STEPS, help="run only these steps")
     ap.add_argument("--skip", nargs="*", choices=STEPS, default=[], help="skip these steps")
-    ap.add_argument("--all", action="store_true", help="run every step, the opt-in ones (ablation) included")
+    ap.add_argument("--all", action="store_true",
+                    help="run every step, the opt-in ones (ablation, regime_forecast) included")
     ap.add_argument("--paths", type=int, default=600, help="simulated paths per scenario")
     args = ap.parse_args(argv)
     default = STEPS if args.all else [s for s in STEPS if s not in OPT_IN]
@@ -117,13 +121,19 @@ def main(argv=None) -> int:
     ctx = EngineContext.load(selection=True)           # today's transmission = selected model
     step("backtest", lambda: jsonio.dump(_run("analysis.backtest", ctx), out / "backtest.json"))
     step("scenarios", lambda: _run("scenarios.library", ctx, n_paths=args.paths))
+    step("regimes", lambda: jsonio.dump(_run("analysis.regimes", ctx), out / "regimes.json"))
     step("forecast", lambda: jsonio.dump(_run("analysis.forecast", ctx), out / "forecast.json"))
     step("valuation", lambda: jsonio.dump(_run("analysis.valuation", ctx), out / "valuation.json"))
     step("portfolio", lambda: _run("portfolio.service", ctx))
     step("llm", lambda: _run("llm.translator", ctx))
     step("meta", lambda: jsonio.dump(build_meta(ctx), out / "meta.json"))
     step("ablation", lambda: jsonio.dump(_run("analysis.ablation", ctx), out / "ablation.json"))
+    step("regime_forecast", lambda: jsonio.dump(_run("analysis.regime_forecast", ctx), out / "regime_forecast.json"))
 
+    if "scenarios" in steps and "regimes" not in steps and (out / "regimes.json").exists():
+        # the scenario readouts and regimes.json share the engine's reference run; the regimes tab warns
+        # when they come from different builds
+        print("[build] note: scenarios were rebuilt without regimes; run --only regimes too", flush=True)
     print(f"[build] finished in {time.time() - t_all:.1f}s" + (f"; failed: {failures}" if failures else ""))
     return 1 if failures else 0
 

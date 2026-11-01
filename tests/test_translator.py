@@ -8,6 +8,7 @@ import pytest
 from scenariolab import config, jsonio
 from scenariolab.llm import translator as tr
 from scenariolab.engine.pooling import view_support
+from scenariolab.scenarios import regime_views
 from scenariolab.scenarios.schema import SPEC_JSON_SCHEMA, allowed_variables, validate_spec
 
 anthropic = pytest.importorskip("anthropic")
@@ -434,3 +435,97 @@ def test_cli(ctx, monkeypatch, capsys, tmp_path):
     printed = capsys.readouterr().out
     assert json.loads(printed.split("\n\n模型")[0])["id"] == "llm_oil_war"
     assert "美股大盘" in printed and out_yaml.exists()
+
+
+# ---------------------------------------------------------------- macro regimes: the regime key (18)
+
+REGIME_IDS = ["expansion", "inflation", "deflation", "recession", "depression", "stagflation", "contraction",
+              "high_infl"]
+
+
+def test_phase_schema_requires_the_regime_list():
+    phase = SPEC_JSON_SCHEMA["properties"]["phases"]["items"]
+    assert "regime" in phase["required"]
+    reg = phase["properties"]["regime"]
+    assert reg["type"] == "array" and reg["items"]["additionalProperties"] is False
+    assert reg["items"]["required"] == ["id", "share", "why"]
+    assert reg["items"]["properties"]["id"]["enum"] == REGIME_IDS
+    assert reg["items"]["properties"]["share"] == {"type": "number"}
+
+
+def test_repair_maps_chinese_regime_ids_and_drops_unknown_ones():
+    raw = {"id": "x", "phases": [{"name": "滞胀期", "months": 12, "views": [], "regime": [
+        {"id": "萧条", "share": 0.5, "why": "a"}, {"id": "stagflation", "share": 0.3, "why": "b"},
+        {"id": "大萧条", "share": 0.2, "why": "c"}, "滞胀"]}]}
+    spec, notes = tr.repair(raw)
+    assert spec["phases"][0]["regime"] == [{"id": "depression", "share": 0.5, "why": "a"},
+                                           {"id": "stagflation", "share": 0.3, "why": "b"}]
+    assert "阶段 1：宏观体制「萧条」已按深度衰退处理" in notes
+    assert ("阶段 1：未知的宏观体制 大萧条，已忽略（可用：扩张、通胀、物价负增长、衰退、深度衰退、滞胀、收缩、高通胀）"
+            in notes)
+    assert raw["phases"][0]["regime"][0]["id"] == "萧条"                 # input untouched
+
+
+def test_prompt_has_the_regime_section_and_quotes_only_this_builds_studies(ctx, tmp_path, monkeypatch):
+    head = "## 宏观体制（regime 字段）"
+    monkeypatch.setattr(tr, "REGIMES_PATH", tmp_path / "missing.json")
+    plain = tr.build_system_prompt(ctx)
+    assert plain == tr.build_system_prompt(ctx) and plain.count(head) == 1
+    assert plain.index("## 历史时期") < plain.index(head) < plain.index("## 覆盖项")
+    section = plain[plain.index(head):plain.index("## 覆盖项")]
+    assert all(rid in section for rid in REGIME_IDS) and "| rg_" not in plain     # no rg_ rows in the tables
+    support = regime_views.support_rows(ctx.db)
+    rec = support["recession"]
+    assert f"衰退（recession）{rec['max_delivered']:.0%}，{rec['runs']} 段" in section
+    assert f"depression 最多约 {support['depression']['max_delivered']:.2f}" in section
+    for block in plain.split("```json\n")[1:]:                       # the examples carry the key in every phase
+        example = json.loads(block.split("\n```")[0])
+        assert all(p["regime"] == [] for p in example["phases"])
+    studies = {"drawn_vs_simulated": [
+        {"case": "a", "views": [{"var": "rg_stagflation", "mean": 0.8}], "months": 12, "simulated_share": 0.6},
+        {"case": "b", "views": [{"var": "rg_stagflation", "mean": 0.8}], "months": 48, "simulated_share": 0.7},
+        {"case": "c", "views": [{"var": "f_cpi", "mean_annual": -0.01}, {"var": "rg_contraction", "mean": 0.0}],
+         "months": 48, "unrate_end_p50": 2.3}],
+        "conflict_example": {"spec": "stagflation", "phase": 0, "lambda": 0.65}}
+    today = ctx.anchor.date.strftime("%Y-%m")
+    same = tmp_path / "regimes.json"
+    same.write_text(json.dumps({"data_end": today, "engine": {"studies": studies}}), encoding="utf-8")
+    monkeypatch.setattr(tr, "REGIMES_PATH", same)
+    quoted = tr.build_system_prompt(ctx)
+    for text in ("12 个月阶段里 stagflation 0.8 只有 60% 的模拟月份是滞胀", "只加这两项时 48 个月后失业率中位数是 2.3%",
+                 "会互相冲突（λ 0.65）"):
+        assert text in quoted and text not in plain
+    other = tmp_path / "other.json"
+    other.write_text(json.dumps({"data_end": "1999-12", "engine": {"studies": studies}}), encoding="utf-8")
+    monkeypatch.setattr(tr, "REGIMES_PATH", other)
+    assert tr.build_system_prompt(ctx) == plain                      # another data month: no study number
+
+
+def test_regime_key_round_trips_through_the_llm_form(ctx):
+    spec = {"name": "测试", "phases": [{"name": "滞胀期", "months": 12, "regime": {"滞胀": 0.7},
+                                       "views": [{"var": "f_oil", "mean_annual": 0.15, "why": "油价"}]}]}
+    clean, _ = validate_spec(spec, ctx.db.frame)
+    form = tr.llm_form(clean)
+    ph = form["phases"][0]
+    assert ph["regime"] == [{"id": "stagflation", "share": 0.7, "why": "宏观体制：滞胀占抽中月份的 70%"}]
+    assert [v["var"] for v in ph["views"]] == ["f_oil"]                 # the key's own views are not repeated
+    assert all(p["regime"] == [] for p in form["phases"][1:])
+    assert json.loads(tr.example_json(form)) == form
+    assert validate_spec(form, ctx.db.frame)[0]["phases"] == clean["phases"]
+
+
+def test_translation_with_a_regime_key_is_checked_against_the_month_database(ctx):
+    raw = copy.deepcopy(tr.INLINE_EXAMPLE)
+    raw["phases"][1]["regime"] = [{"id": "萧条", "share": 0.9, "why": "叙事写的是萧条"}]
+    out = tr.translate(NARRATIVE, ctx, client=FakeClient(message(spec_json(raw))))
+    assert out["spec"]["phases"][1]["regime"] == {"depression": 0.9}
+    assert out["spec"]["phases"][1]["views"][0]["var"] == "rg_depression"
+    warnings = out["validation"]["warnings"]
+    assert "阶段 2：宏观体制「萧条」已按深度衰退处理" in warnings
+    assert any(w.startswith("阶段 2：深度衰退 最多只能占抽中月份的 ") and w.endswith("（要求 90%）") for w in warnings)
+    assert any(w.startswith("阶段 2：深度衰退 在 ") and "段历史（" in w for w in warnings)
+    saved = tr.run(ctx, write=False)
+    assert list(saved["regime_support"]) == list(regime_views.SUPPORT_IDS)
+    row = saved["regime_support"]["depression"]
+    assert {"months", "runs", "episodes", "max_delivered", "shrink", "reason", "ens", "engine_episodes",
+            "regime_effective_episodes", "weights"} <= set(row)

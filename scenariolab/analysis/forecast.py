@@ -12,17 +12,25 @@ total return of every asset:
   analog   the years that followed historical starting points whose state
            (KEY_STATES, standardized on the training months) resembled the
            state at the origin: kernel weights on block starts, bandwidth set
-           so the weights rest on a given number of starting months. That
-           number is itself chosen walk-forward: the ENS_GRID value with the
-           best CRPS on origins up to SPLIT, then checked on the later ones
+           so the weights rest on a given share of the starts available at
+           the origin. That share is itself chosen walk-forward: the
+           ANALOG_SHARES value with the best CRPS on origins up to SPLIT, then
+           checked on the later ones. Every share is at most half the pool, so
+           the kernel can reach it at every origin; a kernel that cannot (its
+           bandwidth at the bisection cap) is flat, and the analog is then the
+           unconditional draw itself
   naive    benchmark: a normal distribution with the training mean and sd of
            12-month returns
 
 Draws go through the full engine (re-anchoring, rate scaling, reversion,
-today's transmission, residuals, CMA). Scores per asset: 90% coverage, PIT,
-CRPS (a proper score for the whole distribution, lower is better), error of
-the median, the hit rate of the sign of the excess return over cash, and the
-cross-sectional rank correlation of predicted vs realized returns (IC).
+today's transmission, residuals, CMA). uncond and analog draw with the same
+seed (common random numbers), so they differ only by their weights. Scores
+per asset: 90% coverage, PIT, CRPS (a proper score for the whole
+distribution, lower is better), error of the median, the hit rate of the sign
+of the excess return over cash, and the cross-sectional rank correlation of
+predicted vs realized returns (IC). Generated text calls one method better or
+worse than another only when the CRPS skill is beyond CLAIM_SKILL and the
+paired t of the per-origin differences reaches CLAIM_T.
 
 Years containing a config.EXOGENOUS_SHOCKS event are flagged and every score
 is also reported without them. Each large miss is attributed: exogenous
@@ -87,10 +95,18 @@ HORIZON = 12
 FIRST_ORIGIN = "1984-12"
 ORIGIN_MONTH = 12
 KEY_STATES = ("cpi_yoy", "unrate", "real_ff", "term_spread", "spread", "div_yield", "ip_yoy", "oil_yoy")
-ANALOG_ENS = 72.0          # default when no selection runs (e.g. a custom set of origins)
-ENS_GRID = (36, 72, 144, 288, 576)
+ANALOG_ENS = 72.0          # effective number of starts of a call that gives neither an ENS nor a share
+# The analog kernel's concentration: a share of the starts available at the origin (every block start with an
+# origin month in the database). At most half the pool, so every value is reachable at every origin.
+ANALOG_SHARES = (1 / 32, 1 / 16, 1 / 8, 1 / 4, 1 / 2)
+ANALOG_SHARE = 1 / 4       # default when no selection runs (e.g. a custom set of origins)
+FLAT_BANDWIDTH = 999.0     # a bandwidth at the bisection cap (1e3): the kernel is flat (analog = uncond)
 SPLIT = "2004-12"          # the analog bandwidth is chosen on origins up to here and checked after
 DISPLAY_ENS = 72.0         # narrow kernel used only to list the closest historical starting points
+# Generated text calls a CRPS difference better or worse only beyond this skill and with a paired |t| of at
+# least CLAIM_T over the origins; anything less is within the noise of 42 origins and 1000 paths.
+CLAIM_SKILL = 0.005
+CLAIM_T = 2.0
 N_PATHS = 1000
 SEED = 23
 PCTS = (5, 25, 50, 75, 95)
@@ -117,10 +133,11 @@ LEDGER_METHODS = ("analog", "uncond", "scenarios", "scenarios_calibrated", "naiv
 # (the panel's last month is usually 1-2 months old when the build runs).
 LEDGER_MAX_DELAY_MONTHS = 3
 METHODS = {
-    "uncond": {"name": "无条件（随机历史年份）", "description": "从训练期所有历史月份里随机抽一段连续 12 个月，经引擎重新锚定到起点水平"},
-    "analog": {"name": "相似起点（类比法）", "description": "按起点宏观状态（通胀、失业、实际利率、期限利差、信用利差、估值、增长、油价）"
-               "与当时的相似度给历史起点加权，抽它们之后的 12 个月，经引擎重新锚定；加权的集中程度由滚动验证选出"},
-    "naive": {"name": "朴素基准（历史均值）", "description": "训练期 12 个月收益的均值和标准差构成的正态分布，不看任何宏观信息"},
+    "uncond": {"name": "无条件抽样", "description": "从训练期所有历史月份里随机抽一段连续 12 个月，经引擎重新锚定到起点水平"},
+    "analog": {"name": "相似起点法", "description": "按起点宏观状态（通胀、失业、实际利率、期限利差、信用利差、估值、增长、油价）"
+               "与当时的相似度给历史起点加权，抽它们之后的 12 个月，经引擎重新锚定；加权的集中程度（占当时可用起点的比例）"
+               "由滚动验证选出；与无条件抽样用同一组随机数，两者的差别只来自权重"},
+    "naive": {"name": "历史均值基准", "description": "训练期 12 个月收益的均值和标准差构成的正态分布，不看任何宏观信息"},
     "scenarios": {"name": "情景加权（仅今天）", "description": "情景库每个情景前 12 个月的路径，按情景后验概率加权"},
 }
 NOTES = [
@@ -188,26 +205,43 @@ def state_at(panel: pd.DataFrame, date) -> np.ndarray:
     return panel.loc[:date, cols].ffill().iloc[-1].to_numpy(float)
 
 
-def analog_weights(db: MonthDB, state: np.ndarray, block: int = HORIZON, ens: float = ANALOG_ENS) -> tuple[np.ndarray, dict]:
-    """Kernel weights over block starts s by how close the state at s - 1 (the origin) is to `state`.
+def available_starts(db: MonthDB, block: int = HORIZON) -> int:
+    """Block starts that have an origin month inside the database: every start but the first."""
+    return max(len(db) - block, 0)
 
-    Distances are mean squared z-scores over KEY_STATES (standardized on the
-    database months); the Gaussian bandwidth is set by bisection so the
-    weights rest on about `ens` starting months. Start 0 has no origin.
+
+def share_label(share: float) -> str:
+    """A share of the available starts as text: 0.25 -> "1/4" (a percentage when it is no unit fraction)."""
+    k = 1.0 / share if share > 0 else 0.0
+    return f"1/{round(k)}" if k >= 1 and abs(k - round(k)) < 1e-9 else f"{share:.0%}"
+
+
+def kernel_weights(db: MonthDB, X: np.ndarray, x_now: np.ndarray, ens: float, block: int = HORIZON,
+                   mult: np.ndarray | None = None) -> tuple[np.ndarray, float, dict]:
+    """Gaussian kernel weights over the block starts s of `db` by how close row s - 1 of X (the start's origin
+    month) is to `x_now`.
+
+    X has one row per database month; distances are mean squared z-scores (columns standardized on the
+    database months). `mult` (length n_starts) optionally scales the block-start prior. The bandwidth is set
+    by bisection so the weights rest on about `ens` starts; start 0 has no origin. A target the kernel cannot
+    reach leaves the bandwidth at the cap (FLAT_BANDWIDTH): the weights are then flat, the (scaled) prior's.
+    Returns (weights, bandwidth, {raw: mean squared z distance per start, mu, sd}).
     """
-    X = db.frame[[f"s_{k}" for k in KEY_STATES]].to_numpy(float)
     mu, sd = np.nanmean(X, axis=0), np.nanstd(X, axis=0)
     sd = np.where(sd > 0, sd, 1.0)
     Z = np.nan_to_num((X - mu) / sd)
-    z_now = np.nan_to_num((state - mu) / sd)
+    z_now = np.nan_to_num((x_now - mu) / sd)
     n_starts = len(db) - block + 1
     d2 = np.full(n_starts, np.inf)
     d2[1:] = ((Z[: n_starts - 1] - z_now) ** 2).mean(axis=1)          # origin of start s is month s - 1
     base = start_prior(db.prior(), block, db.rare)
     base[0] = 0.0
+    if mult is not None:
+        base = base * mult
     finite = np.isfinite(d2)
     raw = d2.copy()                                                  # mean squared z distance
-    d2 = np.where(finite, d2 - d2[finite].min(), np.inf)             # shifted: avoids underflow at small bandwidths
+    pos = finite & (base > 0)                                        # = finite without a multiplier
+    d2 = np.where(finite, d2 - d2[pos].min(), np.inf)                # shifted: avoids underflow at small bandwidths
 
     def weights(h: float) -> np.ndarray:
         w = base * np.exp(-d2 / (2.0 * h * h))
@@ -221,12 +255,33 @@ def analog_weights(db: MonthDB, state: np.ndarray, block: int = HORIZON, ens: fl
         else:
             hi = mid
     h = float(np.exp(hi))
-    w = weights(h)
+    return weights(h), h, {"raw": raw, "mu": mu, "sd": sd}
+
+
+def analog_weights(db: MonthDB, state: np.ndarray, block: int = HORIZON, ens: float = ANALOG_ENS,
+                   share: float | None = None) -> tuple[np.ndarray, dict]:
+    """Kernel weights over block starts s by how close the state at s - 1 (the origin) is to `state`.
+
+    Distances are mean squared z-scores over KEY_STATES (standardized on the database months); the Gaussian
+    bandwidth is set by bisection so the weights rest on about `ens` starting months, or on `share` of the
+    starts available at the origin when it is given. Start 0 has no origin. A flat kernel (the target is not
+    below what the prior itself rests on, so the bandwidth ends at the cap) returns the unconditional prior
+    itself, start 0 included: drawn with the same seed, the analog forecast is then the unconditional one.
+    """
+    X = db.frame[[f"s_{k}" for k in KEY_STATES]].to_numpy(float)
+    n_avail = available_starts(db, block)
+    target = float(share) * n_avail if share is not None else float(ens)
+    w, h, parts = kernel_weights(db, X, state, target, block)
+    raw, mu, sd = parts["raw"], parts["mu"], parts["sd"]
     order = np.argsort(-w)
     top = [{"date": db.dates[s - 1].strftime("%Y-%m"), "weight": float(w[s]), "distance": float(np.sqrt(raw[s]))}
            for s in order[:8] if s > 0 and w[s] > 0]
+    flat = h >= FLAT_BANDWIDTH
+    if flat:
+        w = start_prior(db.prior(), block, db.rare)
     z_today = {k: float(z) for k, z in zip(KEY_STATES, (state - mu) / sd)}
-    return w, {"bandwidth": h, "ens": effective_number(w), "top": top, "z_today": z_today}
+    return w, {"bandwidth": h, "ens": effective_number(w), "target_ens": target, "share": share, "n_starts": n_avail,
+               "flat": bool(flat), "top": top, "z_today": z_today}
 
 
 def simulate_year(db: MonthDB, anchor, cma: dict, probs: np.ndarray, n_paths: int, seed: int,
@@ -280,10 +335,11 @@ def naive_macro(panel: pd.DataFrame, t: pd.Timestamp) -> dict[str, tuple[float, 
 
 # ---------------------------------------------------------------- one origin
 
-def forecast_origin(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, n_paths: int = N_PATHS,
-                    seed: int = SEED, cma_method: str = "valuation_adjusted", analog_ens: float = ANALOG_ENS,
-                    valuation: dict | None = None) -> dict:
-    """Both engine forecasts made at origin t with data up to t only, and what happened.
+def origin_engine(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, cma_method: str = "valuation_adjusted",
+                  valuation: dict | None = None) -> dict:
+    """The engine as it stood at origin t, from data up to t only: the refitted model, the MonthDB of the
+    months up to t, the anchor at t, the CMA (or the valuation state's, with its model `vm`) and the
+    block-start prior of the unconditional draw.
 
     `valuation` (engine/simulate.valuation_settings; None = config.VALUATION): with the valuation
     state on, its CMA and pull (fair value and kappa estimated on the months up to t) replace
@@ -297,13 +353,15 @@ def forecast_origin(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, n_pat
         cma, vm = valuation_setup(db, anchor, vset)
     else:
         cma = capital_market_assumptions(db, anchor, method=cma_method)
-    prior = start_prior(db.prior(), HORIZON, db.rare)
-    w, info = analog_weights(db, state_at(panel, t), ens=analog_ens)
-    runs = {"uncond": simulate_year(db, anchor, cma, prior, n_paths, seed, valuation=vm),
-            "analog": simulate_year(db, anchor, cma, w, n_paths, seed + 1, valuation=vm)}
+    return {"model": model, "db": db, "anchor": anchor, "cma": cma, "vm": vm,
+            "prior": start_prior(db.prior(), HORIZON, db.rare)}
+
+
+def score_runs(panel: pd.DataFrame, t: pd.Timestamp, runs: dict) -> tuple[dict, dict, dict]:
+    """What happened in the 12 months after t, and per asset and macro change every run's bands, PIT and CRPS
+    against it plus the naive benchmark's: (realized year, assets, macro) in forecast_origin's row format."""
     real = realized_year(panel, t)
     naive = naive_forecast(panel, t)
-    flags = shock_names(t + pd.DateOffset(months=1), real["end"])
     assets = {}
     for j, a in enumerate(ASSETS):
         y = real["growth"][a]
@@ -330,8 +388,29 @@ def forecast_origin(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, n_pat
         if np.isfinite(mu) and sd > 0 and np.isfinite(y):
             macro[k]["naive"] = {"p5": mu - 1.645 * sd, "p50": mu, "p95": mu + 1.645 * sd, "mean": mu,
                                  "pit": float(norm.cdf((y - mu) / sd)), "crps": crps_normal(mu, sd, y)}
-    out = {"date": t.strftime("%Y-%m"), "end": real["end"].strftime("%Y-%m"), "shocks": flags,
+    return real, assets, macro
+
+
+def forecast_origin(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, n_paths: int = N_PATHS,
+                    seed: int = SEED, cma_method: str = "valuation_adjusted", analog_ens: float = ANALOG_ENS,
+                    valuation: dict | None = None, analog_share: float | None = None) -> dict:
+    """Both engine forecasts made at origin t with data up to t only, and what happened.
+
+    The analog kernel rests on `analog_share` of the starts available at t when it is given, else on
+    `analog_ens` starts. Both methods draw with `seed` (common random numbers): they differ only by their
+    weights, and a flat kernel (`flat` in the row) gives the unconditional forecast itself.
+    `cma_method` and `valuation` set up the engine as origin_engine does.
+    """
+    eng = origin_engine(panel, spec, t, cma_method, valuation)
+    db, anchor, cma, vm = eng["db"], eng["anchor"], eng["cma"], eng["vm"]
+    w, info = analog_weights(db, state_at(panel, t), ens=analog_ens, share=analog_share)
+    runs = {"uncond": simulate_year(db, anchor, cma, eng["prior"], n_paths, seed, valuation=vm),
+            "analog": simulate_year(db, anchor, cma, w, n_paths, seed, valuation=vm)}
+    real, assets, macro = score_runs(panel, t, runs)
+    out = {"date": t.strftime("%Y-%m"), "end": real["end"].strftime("%Y-%m"),
+           "shocks": shock_names(t + pd.DateOffset(months=1), real["end"]),
            "inflation": real["inflation"], "analogs": info["top"][:6], "bandwidth": info["bandwidth"],
+           "flat": info["flat"], "analog_ens": info["ens"], "n_starts": info["n_starts"],
            "assets": assets, "macro": macro}
     if vm is not None:
         out["valuation"] = vm.today()
@@ -396,19 +475,47 @@ def _avg(scores: dict, assets: list[str], key: str) -> float | None:
     return float(np.mean(vals)) if vals else None
 
 
+def per_origin_crps(rows: list[dict], method: str, assets: list[str] = RISK_ASSETS) -> np.ndarray:
+    """Per origin: the mean CRPS of `method` over the `assets` that have a realized value (NaN when none)."""
+    out = []
+    for r in rows:
+        v = [r["assets"][a][method]["crps"] for a in assets
+             if r["assets"][a]["realized"] is not None and "crps" in (r["assets"][a].get(method) or {})]
+        out.append(float(np.mean(v)) if v else np.nan)
+    return np.array(out, float)
+
+
+def paired_crps(rows: list[dict], a: str, b: str, assets: list[str] = RISK_ASSETS) -> dict:
+    """Method a against method b on the origins both scored: the mean per-origin CRPS gain b - a (positive =
+    a better), its paired t statistic and n. The t is what the text needs before it calls a difference."""
+    d = per_origin_crps(rows, b, assets) - per_origin_crps(rows, a, assets)
+    d = d[np.isfinite(d)]
+    n = int(d.size)
+    if n < 2:
+        return {"diff": float(d.mean()) if n else None, "t": None, "n": n}
+    sd = float(d.std(ddof=1))
+    return {"diff": float(d.mean()), "t": float(d.mean() / sd * np.sqrt(n)) if sd > 0 else None, "n": n}
+
+
+def method_scores(rows: list[dict], method: str) -> dict:
+    """The scores of one method (any key the rows carry per asset): per asset, the risk-asset and all-asset
+    averages, the direction hit rate and the rank IC."""
+    per = _score(rows, method, ASSETS)
+    return {"assets": per,
+            "risk_avg": {k: _avg(per, RISK_ASSETS, k) for k in ("coverage90", "pit_mad", "crps", "mae_p50")},
+            "all_avg": {k: _avg(per, RANKED_ASSETS, k) for k in ("coverage90", "pit_mad", "crps", "mae_p50")},
+            "direction": _hit_rate(rows, method), "rank_ic": _rank_ic(rows, method)}
+
+
 def scores(rows: list[dict]) -> dict:
-    out = {}
-    for method in ("uncond", "analog", "naive"):
-        per = _score(rows, method, ASSETS)
-        out[method] = {"assets": per,
-                       "risk_avg": {k: _avg(per, RISK_ASSETS, k) for k in ("coverage90", "pit_mad", "crps", "mae_p50")},
-                       "all_avg": {k: _avg(per, RANKED_ASSETS, k) for k in ("coverage90", "pit_mad", "crps", "mae_p50")},
-                       "direction": _hit_rate(rows, method), "rank_ic": _rank_ic(rows, method)}
-    skill = {}
+    out = {method: method_scores(rows, method) for method in ("uncond", "analog", "naive")}
+    skill, paired = {}, {}
     for a, b in (("analog", "uncond"), ("analog", "naive"), ("uncond", "naive")):
         num, den = out[a]["risk_avg"]["crps"], out[b]["risk_avg"]["crps"]
         skill[f"{a}_vs_{b}"] = (1.0 - num / den) if num is not None and den else None
+        paired[f"{a}_vs_{b}"] = paired_crps(rows, a, b)
     out["crps_skill_risk"] = skill
+    out["crps_paired_risk"] = paired       # per-origin gains behind each skill: {diff, t, n}
     return out
 
 
@@ -511,19 +618,21 @@ def macro_skill(rows: list[dict], split: str = SPLIT, min_t: float = SKILL_MIN_T
 
 
 def _skill_verdicts(skill: dict) -> str:
-    """Why each macro change did or did not pass, in one sentence: 'CPI 同比胜过无条件抽样（+1.3%），但比历史均值基准差 45%（…）'."""
+    """Why each macro change did or did not pass, in one sentence: 'CPI 同比胜过无条件抽样（+31.8%，…），与历史均值基准差不多
+    （…）'. 胜过 = passes the skill rule; 不如 only for a loss beyond the claim rule (`_verdict`); else 差不多."""
     out = []
     for k, v in (skill.get("vars") or {}).items():
         u, n = v.get("all") or {}, (v.get("naive") or {}).get("all") or {}
         beats = v.get("beats") or {}
 
         def part(ref, s):
-            x = s.get("skill")
+            x, t, name = s.get("skill"), s.get("t"), SKILL_REF_CN[ref]
             if x is None:
-                return f"没有{SKILL_REF_CN[ref]}的成绩"
-            word = "胜过" if beats.get(ref) else ("略好于" if x > 0 else "不如")
-            return f"{word}{SKILL_REF_CN[ref]}（CRPS 技能 {x:+.1%}，t = {s['t']:.1f}）" if s.get("t") is not None \
-                else f"{word}{SKILL_REF_CN[ref]}（CRPS 技能 {x:+.1%}）"
+                return f"没有{name}的成绩"
+            nums = f"（CRPS 技能 {x:+.1%}" + (f"，t = {t:.1f}）" if t is not None else "）")
+            if beats.get(ref):
+                return f"胜过{name}{nums}"
+            return f"不如{name}{nums}" if _verdict(x, t) < 0 else f"与{name}差不多{nums}"
         out.append(f"{v.get('name', k)}{part('uncond', u)}、{part('naive', n)}")
     return "；".join(out)
 
@@ -603,7 +712,8 @@ def scenario_year_one_macro(ctx: EngineContext, year_one: dict, results_dir=None
     for s, sid in enumerate(year_one["ids"]):
         try:
             spec = jsonio.load(rdir / "scenarios" / f"{sid}.json")["spec"]
-            _, sim = runner.run_spec(ctx, spec, n_paths=year_one["n_paths"], seed=library.seed_for(sid))
+            # only the paths are needed: no regime readout (it changes no simulated number)
+            _, sim = runner.run_spec(ctx, spec, n_paths=year_one["n_paths"], seed=library.seed_for(sid), regimes=False)
         except (OSError, KeyError, TypeError, ValueError):
             missing.append(sid)
             continue
@@ -890,34 +1000,36 @@ def _reconcile_text(rec: dict, cal: dict, skill: dict | None, calibrated: bool) 
                    + ("相似起点法对失业率有预测能力，校准已经包含它。" if u_ok else
                       "相似起点法对失业率的预测没有通过检验，一年期打分因此不足以支持据此下调衰退类情景的概率。"))
     if not rec["paths_reproduced"]:
-        out.append("注意：重跑情景得到的路径与 scenario_paths.npz 不完全一致（情景结果与当前引擎不是同一次构建），"
+        out.append("注意：重跑情景得到的路径与情景结果里存的路径不完全一致（情景结果与当前引擎不是同一次构建），"
                    "请运行 python -m scenariolab.build --only scenarios forecast。")
     return out
 
 
 def live_forecast(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, analog_ens: float = ANALOG_ENS,
                   valuation: dict | None = None, skill: dict | None = None, results_dir=None,
-                  ledger: dict | None = None) -> dict:
+                  ledger: dict | None = None, analog_share: float | None = None) -> dict:
     """The forecast from today: uncond and analog, the scenario library's first year, its reconciliation with
     the analog forecast and the calibrated scenario probabilities (`skill` = macro_skill of the track record).
+    The analog kernel rests on `analog_share` of today's available starts when given (else `analog_ens`);
+    both methods draw with `seed`, as at every scored origin.
     `ledger`, when a dict, receives what a ledger entry needs (quantiles of every method)."""
     db, panel = ctx.db, ctx.panel
     state = state_at(panel, ctx.anchor.date)
-    w, info_sel = analog_weights(db, state, ens=analog_ens)
+    w, info_sel = analog_weights(db, state, ens=analog_ens, share=analog_share)
     _, info = analog_weights(db, state, ens=DISPLAY_ENS)
     vset, cma, vm = valuation_settings(valuation), ctx.cma, None
     if vset:
         cma, vm = valuation_setup(db, ctx.anchor, vset)
     runs = {"uncond": simulate_year(db, ctx.anchor, cma, start_prior(db.prior(), HORIZON, db.rare), n_paths, seed,
                                     valuation=vm),
-            "analog": simulate_year(db, ctx.anchor, cma, w, n_paths, seed + 1, valuation=vm)}
+            "analog": simulate_year(db, ctx.anchor, cma, w, n_paths, seed, valuation=vm)}
     year_one = year_one_paths(results_dir)
     origin = ctx.anchor.date.strftime("%Y-%m")
     stale = None
     if year_one is not None and year_one.get("start") not in (None, origin):
         # paths of another start month (e.g. the scenarios step failed after a data update): their first year is
         # not the next 12 months, so they are neither shown as today's, reconciled, calibrated nor recorded
-        stale = (f"情景路径（scenario_paths.npz）从 {year_one['start']} 出发，不是这次的起点 {origin}："
+        stale = (f"情景路径从 {year_one['start']} 出发，不是这次的起点 {origin}："
                  "情景结果与这次的数据不是同一次构建，请运行 python -m scenariolab.build --only scenarios forecast")
         print(f"[forecast] scenario mixture skipped: paths start {year_one['start']}, origin {origin}", file=sys.stderr)
         year_one = None
@@ -944,6 +1056,7 @@ def live_forecast(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, 
     macro = {k: {key: _macro_bands(run["macro"][k]) for key, run in runs.items()} for k in MACRO}
     out = {"origin": origin, "state": dict(zip(KEY_STATES, map(float, state))),
            "z_today": info["z_today"], "analog_ens": info_sel["ens"], "bandwidth": info_sel["bandwidth"],
+           "analog_share": analog_share, "flat": info_sel["flat"], "n_starts": info_sel["n_starts"],
            "display_ens": info["ens"],
            "analogs": analogs, "assets": assets, "macro": macro,
            "scenario_medians": mix["per_scenario"] if mix else None,
@@ -1222,15 +1335,23 @@ def summary_text(sc_all: dict, sc_ex: dict, rows: list[dict], misses: list[dict]
     n_shock = sum(1 for r in rows if r["shocks"])
     causes = {c: sum(1 for m in misses if m["cause"] == c) for c in ("shock", "macro", "pricing")}
     skill = sc_all["crps_skill_risk"]
+    paired = sc_all.get("crps_paired_risk") or {}
     ic = an["rank_ic"]
     d = an["direction"]
+    n, flat = len(rows), sum(1 for r in rows if r.get("flat"))
+    if 2 * flat >= n:              # mostly the same weights: the difference is not the analog's doing
+        vs_uncond = f"与无条件抽样相当（{n} 个起点中 {flat} 个两者权重相同）"
+    else:
+        vs_uncond = _versus(skill["analog_vs_uncond"], (paired.get("analog_vs_uncond") or {}).get("t"), "无条件抽样")
+        if flat:
+            vs_uncond += f"（{n} 个起点中 {flat} 个两者权重相同）"
     txt = [
-        f"{len(rows)} 个起点（{rows[0]['date']} 至 {rows[-1]['date']}），每次只用当时的数据预测下一年。",
+        f"{n} 个起点（{rows[0]['date']} 至 {rows[-1]['date']}），每次只用当时的数据预测下一年。",
         f"风险资产（股票、REITs、黄金）的 90% 区间覆盖率：相似起点法 {pct(an['risk_avg']['coverage90'])}，"
         f"无条件 {pct(un['risk_avg']['coverage90'])}（理想值 90%）；剔除 {n_shock} 个外生冲击年份后相似起点法为 "
         f"{pct(sc_ex['analog']['risk_avg']['coverage90'])}。",
-        f"按 CRPS（整个分布的准确度）：相似起点法{_versus(skill['analog_vs_uncond'], '无条件')}，"
-        f"{_versus(skill['analog_vs_naive'], '只用历史均值的朴素基准')}。",
+        f"按 CRPS（整个分布的准确度）：相似起点法{vs_uncond}，"
+        f"{_versus(skill['analog_vs_naive'], (paired.get('analog_vs_naive') or {}).get('t'), '只用历史均值的朴素基准')}。",
         f"超额收益方向命中率 {pct(d['hit_rate'])}（同期上涨年份占比 {pct(d['base_rate_up'])}，"
         "只猜“涨”就能达到这个比例）；跨资产排序相关 IC 平均 "
         + ("—" if ic["mean"] is None else f"{ic['mean']:.2f}")
@@ -1242,51 +1363,111 @@ def summary_text(sc_all: dict, sc_ex: dict, rows: list[dict], misses: list[dict]
     return "".join(txt)
 
 
-def _better(s: float | None) -> str:
-    """A CRPS skill as 好 x% / 差 x% / 差不多 (the phrase that follows a period: 检验期好 3%)."""
+def _verdict(s: float | None, t: float | None) -> int:
+    """+1 (better), -1 (worse) or 0 for a CRPS skill `s` whose per-origin gains have the paired t `t`: a
+    difference counts only beyond ±CLAIM_SKILL and with |t| of at least CLAIM_T."""
+    if s is None or t is None or not (np.isfinite(s) and np.isfinite(t)):
+        return 0
+    if s > CLAIM_SKILL and t >= CLAIM_T:
+        return 1
+    if s < -CLAIM_SKILL and t <= -CLAIM_T:
+        return -1
+    return 0
+
+
+def _better(s: float | None, t: float | None = None) -> str:
+    """A CRPS skill as the phrase that follows a period (检验期好 3.0%（t = 2.4）): 好 / 差 only when `_verdict`
+    says so, else 差不多, with the numbers and 「在随机误差之内」 when the skill itself is not negligible."""
     if s is None:
         return "—"
-    return f"好 {s:.0%}" if s > 0.005 else (f"差 {-s:.0%}" if s < -0.005 else "差不多")
+    v = _verdict(s, t)
+    if v:
+        return f"{'好' if v > 0 else '差'} {abs(s):.1%}（t = {t:.1f}）"
+    if abs(s) > CLAIM_SKILL:
+        return f"差不多（技能 {s:+.1%}" + (f"，t = {t:.1f}" if t is not None else "") + "，在随机误差之内）"
+    return "差不多"
 
 
-def _versus(s: float | None, ref: str) -> str:
+def _versus(s: float | None, t: float | None, ref: str) -> str:
     """A CRPS skill against `ref`: 比{ref}好 x% / 比{ref}差 x% / 与{ref}差不多 (never 比…差不多)."""
     if s is None:
         return f"与{ref}相比 —"
-    return f"比{ref}{_better(s)}" if abs(s) > 0.005 else f"与{ref}差不多"
+    return f"{'比' if _verdict(s, t) else '与'}{ref}{_better(s, t)}"
+
+
+def selection_text(table: list[dict], best: dict, split: str, n: int, flat: int) -> tuple[str, str]:
+    """(selection text, the current forecast's short name), generated from the numbers: no gain of the
+    analog over the unconditional draw is claimed when half the origins or more have a flat kernel, and none
+    beyond the noise (`_verdict`) otherwise."""
+    label = best["label"]
+    shares = "、".join(r["label"] for r in table)
+    head = (f"相似起点的加权集中度在 {split} 及以前的起点上选（验证期 CRPS 最低），之后的起点只用来检验。"
+            f"候选是每个起点可用起点数的 {shares}（最多一半，每个起点都够用），选中 {label}"
+            f"（第一个起点约 {best['ens_first']:.0f} 个有效起点，最近一个约 {best['ens_last']:.0f} 个）。"
+            "相似起点法和无条件抽样用同一组随机数，差别只来自权重：")
+    gv, gt, tv, tt = best["gain_val"], best["gain_test"], best["val_t"], best["test_t"]
+    if 2 * flat >= n:
+        body = (f"相对无条件抽样的 CRPS 技能验证期 {gv:+.1%}、检验期 {gt:+.1%}，但 {n} 个起点中有 {flat} 个的相似起点权重"
+                "其实是平的（带宽碰到上限），相似起点法在这些起点上就是无条件抽样，所以这个差别不能算作“相似”的功劳。")
+        verdict = 0
+    else:
+        body = f"验证期 CRPS {_versus(gv, tv, '无条件抽样')}，检验期{_better(gt, tt)}。"
+        body += (f"{n} 个起点中有 {flat} 个的相似起点权重是平的（带宽碰到上限），在这些起点上相似起点法就是无条件抽样。" if flat
+                 else f"{n} 个起点的相似起点权重都不是平的（带宽都没有碰到上限）。")
+        verdict = _verdict(gt, tt)
+    cover = "、".join(f"{r['label']} 为 {r['test_coverage']:.0%}" for r in table if r.get("test_coverage") is not None)
+    cover = f"检验期风险资产 90% 区间的覆盖率（理想值 90%）：{cover}。" if cover else ""
+    if verdict > 0:
+        end = f"结论：一年期里，按“今天像哪段历史”加权在检验期有可验证的改进（CRPS 好 {gt:.1%}，t = {tt:.1f}）。"
+    elif verdict < 0:
+        end = f"结论：一年期里，按“今天像哪段历史”加权在检验期反而更差（CRPS 差 {-gt:.1%}，t = {tt:.1f}）。"
+    else:
+        end = "结论：一年期里，按“今天像哪段历史”加权还没有带来可验证的改进。"
+    name = f"现行一年期预测（相似起点法，可用起点的 {label}；{n} 个起点中 {flat} 个等于无条件抽样）"
+    return head + body + cover + end, name
 
 
 def select_analog_ens(panel: pd.DataFrame, spec: ModelSpec, dates: list[pd.Timestamp], n_paths: int, seed: int,
-                      grid=ENS_GRID, split: str = SPLIT, valuation: dict | None = None) -> tuple[float, list[dict], dict]:
-    """Walk-forward choice of the analog bandwidth: best risk-asset CRPS on origins up to `split`.
+                      grid=ANALOG_SHARES, split: str = SPLIT,
+                      valuation: dict | None = None) -> tuple[float, list[dict], dict]:
+    """Walk-forward choice of the analog kernel's concentration (a share of the starts available at each
+    origin, ANALOG_SHARES): the best risk-asset CRPS on origins up to `split`; the later origins only test it.
 
-    Returns (chosen ENS, the forecast rows made with it, the selection report). The
-    unconditional forecasts use the same seeds in every trial, so they are identical.
+    Returns (chosen share, the forecast rows made with it, the selection report). Every trial draws both
+    methods with the same seeds, so the unconditional forecasts are identical across trials and each analog
+    differs from them only by its weights. `flat_origins` counts the origins whose kernel is flat (analog =
+    uncond there).
     """
     cut = pd.Timestamp(split)
     trials, table = {}, []
-    for ens in grid:
-        rows = [forecast_origin(panel, spec, t, n_paths, seed + i, analog_ens=ens, valuation=valuation)
+    for share in grid:
+        rows = [forecast_origin(panel, spec, t, n_paths, seed + i, valuation=valuation, analog_share=share)
                 for i, t in enumerate(dates)]
-        val = scores([r for r in rows if pd.Timestamp(r["date"]) <= cut])
-        test = scores([r for r in rows if pd.Timestamp(r["date"]) > cut])
-        trials[ens] = rows
-        table.append({"ens": float(ens),
+        val_rows = [r for r in rows if pd.Timestamp(r["date"]) <= cut]
+        test_rows = [r for r in rows if pd.Timestamp(r["date"]) > cut]
+        val, test = scores(val_rows), scores(test_rows)
+        trials[share] = rows
+        table.append({"share": float(share), "label": share_label(share),
+                      "ens_first": rows[0]["analog_ens"], "ens_last": rows[-1]["analog_ens"],
+                      "flat_origins": sum(1 for r in rows if r["flat"]),
                       "val_crps_analog": val["analog"]["risk_avg"]["crps"], "val_crps_uncond": val["uncond"]["risk_avg"]["crps"],
                       "val_crps_naive": val["naive"]["risk_avg"]["crps"], "val_coverage": val["analog"]["risk_avg"]["coverage90"],
+                      "val_t": val["crps_paired_risk"]["analog_vs_uncond"]["t"],
                       "test_crps_analog": test["analog"]["risk_avg"]["crps"], "test_crps_uncond": test["uncond"]["risk_avg"]["crps"],
                       "test_crps_naive": test["naive"]["risk_avg"]["crps"], "test_coverage": test["analog"]["risk_avg"]["coverage90"],
-                      "test_rank_ic": test["analog"]["rank_ic"]["mean"]})
+                      "test_rank_ic": test["analog"]["rank_ic"]["mean"],
+                      "test_t": test["crps_paired_risk"]["analog_vs_uncond"]["t"]})
     best = min(table, key=lambda r: r["val_crps_analog"])
     gain_val = 1.0 - best["val_crps_analog"] / best["val_crps_uncond"]
     gain_test = 1.0 - best["test_crps_analog"] / best["test_crps_uncond"]
-    text = (f"相似起点的加权集中度在 {split} 及以前的起点上选（CRPS 最低），之后的起点只用来检验："
-            f"选中有效起点数 {best['ens']:.0f}，验证期 CRPS {_versus(gain_val, '无条件')}，检验期{_better(gain_test)}。"
-            f"加权越集中（有效起点越少），区间越窄、越容易被现实打穿：有效起点 {table[0]['ens']:.0f} 时检验期覆盖率只有 "
-            f"{table[0]['test_coverage']:.0%}。结论：一年期里，“今天像哪段历史”只能轻微调整预测，强行押注少数相似年份反而更差。")
-    report = {"grid": table, "chosen": best["ens"], "split": split, "rule": "验证期（起点 ≤ split）风险资产平均 CRPS 最低",
-              "gain_val": gain_val, "gain_test": gain_test, "text": text}
-    return best["ens"], trials[best["ens"]], report
+    flat = best["flat_origins"]
+    text, name = selection_text(table, {**best, "gain_val": gain_val, "gain_test": gain_test}, split, len(dates), flat)
+    report = {"grid": table, "chosen": best["share"], "chosen_label": best["label"], "unit": "可用起点的比例",
+              "split": split, "rule": f"验证期（起点 ≤ {split}）风险资产平均 CRPS 最低", "common_random_numbers": True,
+              "gain_val": gain_val, "gain_test": gain_test, "t_val": best["val_t"], "t_test": best["test_t"],
+              "flat_origins": flat, "n_origins": len(dates),
+              "claim": {"min_skill": CLAIM_SKILL, "min_t": CLAIM_T}, "baseline_name": name, "text": text}
+    return best["share"], trials[best["share"]], report
 
 
 def run(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, origins: list | None = None,
@@ -1298,18 +1479,18 @@ def run(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, origins: l
     dates = [pd.Timestamp(t) for t in (origins or forecast_origins(panel))]
     cut = pd.Timestamp(SPLIT)
     if any(d <= cut for d in dates) and any(d > cut for d in dates):
-        ens, rows, selection = select_analog_ens(panel, ctx.spec, dates, n_paths, seed, valuation=valuation)
+        share, rows, selection = select_analog_ens(panel, ctx.spec, dates, n_paths, seed, valuation=valuation)
     else:
-        ens, selection = ANALOG_ENS, None
-        rows = [forecast_origin(panel, ctx.spec, t, n_paths, seed + i, analog_ens=ens, valuation=valuation)
+        share, selection = ANALOG_SHARE, None
+        rows = [forecast_origin(panel, ctx.spec, t, n_paths, seed + i, valuation=valuation, analog_share=share)
                 for i, t in enumerate(dates)]
     calm = [r for r in rows if not r["shocks"]]
     sc_all, sc_ex = scores(rows), scores(calm)
     misses = attribute_misses(rows)
     skill = macro_skill(rows)
     quant: dict = {}
-    live = live_forecast(ctx, n_paths, seed, analog_ens=ens, valuation=valuation, skill=skill,
-                         results_dir=results_dir, ledger=quant)
+    live = live_forecast(ctx, n_paths, seed, valuation=valuation, skill=skill, results_dir=results_dir, ledger=quant,
+                         analog_share=share)
     ledger = None
     if ledger_dir is not None:
         # only the build's own forecast is recorded: default origins, paths, seed, engine and scenario paths
@@ -1327,7 +1508,8 @@ def run(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, origins: l
         ledger = ledger_report(entries, errors + read_errors, panel, appended, ledger_dir)
         ledger["skipped"] = skipped
     return {
-        "horizon_months": HORIZON, "n_paths": n_paths, "key_states": list(KEY_STATES), "analog_ens": ens,
+        "horizon_months": HORIZON, "n_paths": n_paths, "key_states": list(KEY_STATES),
+        "analog_share": share, "analog_ens": live["analog_ens"],     # the share every origin used; today's ENS
         "methods": METHODS, "assets": ASSETS, "asset_names": NAMES, "risk_assets": RISK_ASSETS,
         "shocks": config.EXOGENOUS_SHOCKS, "notes": NOTES, "selection": selection,
         "origins": rows, "scores": {"all": sc_all, "ex_shock": sc_ex}, "n_shock_years": len(rows) - len(calm),

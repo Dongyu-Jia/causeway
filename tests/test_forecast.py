@@ -2,11 +2,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scenariolab import config
+from scenariolab import config, jsonio
 from scenariolab.analysis import forecast as fc
 from scenariolab.engine.factor_model import ModelSpec
 
 needs_panel = pytest.mark.skipif(not config.PANEL_PATH.exists(), reason="panel not built")
+FORECAST_JSON = config.RESULTS_DIR / "forecast.json"
+needs_forecast = pytest.mark.skipif(not FORECAST_JSON.exists(), reason="forecast.json not built")
 
 
 def test_crps_of_samples_matches_the_normal_closed_form():
@@ -61,6 +63,111 @@ def test_analog_weights_rest_on_the_requested_number_of_starts():
     assert w[0] == 0.0 and w.sum() == pytest.approx(1.0)
     assert effective_number(w) == pytest.approx(fc.ANALOG_ENS, rel=0.01)
     assert info["top"] and all(pd.Timestamp(x["date"]) < ctx.anchor.date - pd.DateOffset(months=11) for x in info["top"])
+    # a share is of the starts with an origin month in the database; every grid value is reachable
+    assert info["n_starts"] == len(ctx.db) - fc.HORIZON
+    for share in fc.ANALOG_SHARES:
+        ws, si = fc.analog_weights(ctx.db, fc.state_at(ctx.panel, ctx.anchor.date), share=share)
+        assert not si["flat"] and effective_number(ws) == pytest.approx(share * si["n_starts"], rel=0.01)
+    assert max(fc.ANALOG_SHARES) <= 0.5
+
+
+# ---------------------------------------------------------------- F0a / F0b: flat kernels, common random numbers, text
+
+@needs_panel
+def test_a_flat_kernel_is_the_unconditional_draw_itself():
+    """Both methods draw with the same seed (common random numbers), so a kernel at the bandwidth cap gives the
+    unconditional forecast bit for bit and a feasible one differs from it only by its weights."""
+    from scenariolab.context import load_panel_with_shocks
+    panel = load_panel_with_shocks()
+    t = pd.Timestamp("1990-12-01")
+    flat = fc.forecast_origin(panel, ModelSpec(), t, n_paths=200, seed=5, analog_ens=1e6)
+    assert flat["flat"] is True and flat["bandwidth"] >= fc.FLAT_BANDWIDTH
+    assert all(flat["assets"][a]["analog"] == flat["assets"][a]["uncond"] for a in fc.ASSETS)
+    assert all(flat["macro"][k]["analog"] == flat["macro"][k]["uncond"] for k in fc.MACRO)
+    half = fc.forecast_origin(panel, ModelSpec(), t, n_paths=200, seed=5, analog_share=0.5)
+    assert half["flat"] is False and half["bandwidth"] < fc.FLAT_BANDWIDTH
+    assert half["analog_ens"] == pytest.approx(0.5 * half["n_starts"], rel=0.01)
+    assert half["assets"]["us_equity"]["uncond"] == flat["assets"]["us_equity"]["uncond"]       # same seed, same prior
+    assert half["assets"]["us_equity"]["analog"] != half["assets"]["us_equity"]["uncond"]
+
+
+def test_claims_need_both_a_material_skill_and_a_paired_t():
+    assert fc._verdict(0.03, 2.5) == 1 and fc._verdict(-0.03, -2.5) == -1
+    assert fc._verdict(0.03, 1.9) == 0 and fc._verdict(0.004, 5.0) == 0 and fc._verdict(0.03, None) == 0
+    assert fc._better(0.012, 2.43) == "好 1.2%（t = 2.4）"
+    assert fc._better(0.012, 1.3) == "差不多（技能 +1.2%，t = 1.3，在随机误差之内）" and fc._better(0.002, 0.4) == "差不多"
+    assert fc._versus(0.012, 1.3, "无条件抽样").startswith("与无条件抽样差不多")
+    assert fc._versus(-0.02, -2.2, "无条件抽样") == "比无条件抽样差 2.0%（t = -2.2）"
+
+
+def _grid(test_gain: float, test_t: float, flat: int) -> list[dict]:
+    rows = []
+    for k, share in enumerate(fc.ANALOG_SHARES):
+        un = 0.1
+        rows.append({"share": share, "label": fc.share_label(share), "ens_first": 131 * share, "ens_last": 620 * share,
+                     "flat_origins": flat, "val_crps_analog": 0.12 - 0.002 * k, "val_crps_uncond": 0.112, "val_t": -1.0,
+                     "test_crps_analog": un * (1 - test_gain), "test_crps_uncond": un, "test_t": test_t,
+                     "test_coverage": 0.8 + 0.02 * k})
+    return rows
+
+
+def _text(test_gain: float, test_t: float, flat: int, n: int = 42) -> str:
+    table = _grid(test_gain, test_t, flat)
+    best = {**table[-1], "gain_val": 1 - table[-1]["val_crps_analog"] / table[-1]["val_crps_uncond"], "gain_test": test_gain}
+    return fc.selection_text(table, best, fc.SPLIT, n, flat)[0]
+
+
+def test_selection_text_never_claims_a_gain_within_noise_or_on_flat_kernels():
+    noise = _text(0.012, 1.3, flat=0)                    # +1.2% on the test half, but t 1.3
+    assert "检验期好" not in noise and "在随机误差之内" in noise and "还没有带来可验证的改进" in noise
+    flat = _text(0.0117, 2.43, flat=38)                  # the previous build: t 2.43, but 38 of 42 kernels flat
+    assert "检验期好" not in flat and "不能算作“相似”的功劳" in flat and "还没有带来可验证的改进" in flat
+    real = _text(0.02, 2.5, flat=0)
+    assert "检验期好 2.0%（t = 2.5）" in real and "有可验证的改进" in real
+    worse = _text(-0.02, -2.6, flat=0)
+    assert "检验期差 2.0%" in worse and "反而更差" in worse
+    assert "选中 1/2" in noise and "1/32 为 80%" in noise and "_" not in noise     # numbers from the table, no code ids
+
+
+def test_summary_text_follows_the_same_rule():
+    sc = {"analog": {"risk_avg": {"coverage90": 0.9}, "rank_ic": {"mean": 0.2, "t": 3.0},
+                     "direction": {"hit_rate": 0.7, "base_rate_up": 0.7}},
+          "uncond": {"risk_avg": {"coverage90": 0.9}},
+          "crps_skill_risk": {"analog_vs_uncond": 0.0066, "analog_vs_naive": 0.029},
+          "crps_paired_risk": {"analog_vs_uncond": {"t": 2.43}, "analog_vs_naive": {"t": 1.2}}}
+    ex = {"analog": {"risk_avg": {"coverage90": 0.9}}}
+    rows = [{"date": "1984-12", "shocks": [], "flat": i < 38} for i in range(42)]
+    txt = fc.summary_text(sc, ex, rows, [])
+    assert "与无条件抽样相当（42 个起点中 38 个两者权重相同）" in txt and "比无条件" not in txt
+    assert "与只用历史均值的朴素基准差不多（技能 +2.9%，t = 1.2，在随机误差之内）" in txt
+    # the same numbers with real kernels everywhere: +0.66% with t 2.43 passes the rule and is said
+    txt = fc.summary_text(sc, ex, [{**r, "flat": False} for r in rows], [])
+    assert "相似起点法比无条件抽样好 0.7%（t = 2.4）" in txt
+    weak = {**sc, "crps_paired_risk": {"analog_vs_uncond": {"t": 1.6}, "analog_vs_naive": {"t": 1.2}}}
+    txt = fc.summary_text(weak, ex, [{**r, "flat": False} for r in rows], [])
+    assert "相似起点法与无条件抽样差不多（技能 +0.7%，t = 1.6，在随机误差之内）" in txt
+
+
+@needs_forecast
+def test_f0a_flat_origins_and_the_text_rule_on_the_build():
+    """Test 19, after F0b: flat_origins is whatever the corrected selection gives, so the test checks the rule:
+    the count matches the rows, every share is reachable, the choice is the validation half's, and no text
+    claims a gain when the kernels are mostly flat or the comparison is within noise."""
+    fj = jsonio.load(FORECAST_JSON)
+    sel, rows = fj["selection"], fj["origins"]
+    n, flat = len(rows), sum(1 for r in rows if r["flat"])
+    assert sel["flat_origins"] == flat and sel["n_origins"] == n
+    assert all(r["flat"] == (r["bandwidth"] >= fc.FLAT_BANDWIDTH) for r in rows)
+    assert max(g["share"] for g in sel["grid"]) <= 0.5
+    assert all(r["analog_ens"] <= 0.5 * r["n_starts"] + 1e-3 for r in rows)
+    assert sel["chosen"] == min(sel["grid"], key=lambda g: g["val_crps_analog"])["share"] == fj["analog_share"]
+    assert next(g for g in sel["grid"] if g["share"] == sel["chosen"])["flat_origins"] == flat
+    if 2 * flat >= n or fc._verdict(sel["gain_test"], sel["t_test"]) <= 0:
+        assert "检验期好" not in sel["text"] and "有可验证的改进" not in sel["text"]
+    paired = fj["scores"]["all"]["crps_paired_risk"]["analog_vs_uncond"]
+    if 2 * flat >= n or fc._verdict(fj["scores"]["all"]["crps_skill_risk"]["analog_vs_uncond"], paired["t"]) <= 0:
+        assert "相似起点法比无条件" not in fj["text"]
+    assert f"{n} 个起点中 {flat} 个" in sel["baseline_name"]
 
 
 # ---------------------------------------------------------------- the live forecast ledger

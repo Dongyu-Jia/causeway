@@ -2,12 +2,14 @@
 
 spec -> validate_spec -> per-phase entropy pooling over block starts ->
 simulate -> chart-ready detail JSON (fans, monthly and yearly K-lines, macro
-paths, posterior correlations, the evidence behind the weights, and each
-asset's return attribution per phase). Used for the built-in library,
-LLM-translated scenarios and user-edited specs alike.
+paths, posterior correlations, the evidence behind the weights, each asset's
+return attribution per phase, and the macro regimes of the simulated paths
+next to the engine's own unconditional reference run). Used for the built-in
+library, LLM-translated scenarios and user-edited specs alike.
 """
 from __future__ import annotations
 
+import threading
 import weakref
 
 import numpy as np
@@ -15,12 +17,13 @@ import pandas as pd
 
 from .. import config
 from ..context import EngineContext
-from ..engine import summary
+from ..engine import regimes, summary
 from ..engine.ep import weighted_corr
 from ..engine.pooling import BLOCK, MIN_ENS, MIN_EPISODES, PhasePool, pool_phase
 from ..engine.sampler import BlockProbs
 from ..engine.simulate import (MonthDB, SimOutput, ValuationModel, fit_valuation, simulate, valuation_settings,
                                valuation_setup, with_oil_lock)
+from . import regime_views
 from .schema import validate_spec
 
 MACRO_VARS = ("cpi_yoy", "ff", "y10", "unrate", "oil", "spread")
@@ -31,6 +34,10 @@ VALUATION = dict(config.VALUATION)      # valuation-state mode (swapped by analy
 # run_spec adds assets[a].attribution (a study that only needs the returns may switch it off; it changes no
 # simulated number either way and adds about 30 ms to a 600-path scenario run)
 ATTRIBUTION = True
+# run_spec adds detail["regimes"] (regime_views.readout: the macro regimes of the paths, about 0.25 s per 600
+# paths plus one cached reference run). It only reads the simulated arrays; studies that need only the
+# returns pass regimes=False.
+REGIME_READOUT = True
 ATTRIBUTION_UNITS = "年化：每月算术回报的均值 ×12（小数），各项相加 = arithmetic；cagr_p50 = 各路径几何年化总回报的中位数"
 ATTRIBUTION_BAND = (10, 90)             # percentiles over paths of the factor part
 _VALUATION_CACHE: "weakref.WeakKeyDictionary[MonthDB, dict]" = weakref.WeakKeyDictionary()
@@ -107,13 +114,17 @@ def phase_pools(ctx: EngineContext, spec: dict, warnings: list[str]) -> list[Pha
 def phase_weights(ctx: EngineContext, spec: dict, warnings: list[str]) -> tuple[list[BlockProbs], list[dict]]:
     """(what simulate() draws from, per-phase reports) for a validated spec."""
     pools = phase_pools(ctx, spec, warnings)
+    return [p.blocks for p in pools], _phase_reports(ctx, spec, pools)
+
+
+def _phase_reports(ctx: EngineContext, spec: dict, pools: list[PhasePool]) -> list[dict]:
     reports, start = [], 0
     for ph, pool in zip(spec["phases"], pools):
         reports.append({"name": ph["name"], "start_month": start, "months": ph["months"],
                         "views": ph["views"], "overrides": ph.get("overrides", {}),
                         "confidence": ph.get("confidence", 1.0), "ep": ep_report(ctx.db, pool)})
         start += ph["months"]
-    return [p.blocks for p in pools], reports
+    return reports
 
 
 def yearly_candles(monthly: list[list]) -> list[list]:
@@ -254,11 +265,20 @@ def prior_correlation(ctx: EngineContext) -> dict:
 
 
 def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
-             source: str = "builtin", attribution: bool | None = None) -> tuple[dict, SimOutput]:
-    """(detail, SimOutput) of one spec; attribution (default ATTRIBUTION) adds assets[a].attribution."""
+             source: str = "builtin", attribution: bool | None = None,
+             regimes: bool | None = None) -> tuple[dict, SimOutput]:
+    """(detail, SimOutput) of one spec; attribution (default ATTRIBUTION) adds assets[a].attribution, regimes
+    (default REGIME_READOUT) adds detail["regimes"]. Neither changes a simulated number.
+
+    The regime checks of the pooled phases (regime_views.spec_checks: what the month database can deliver
+    for a regime request, and runs of contraction-heavy phases) are appended to validation.warnings.
+    """
     attribution = ATTRIBUTION if attribution is None else bool(attribution)
+    readout = REGIME_READOUT if regimes is None else bool(regimes)
     clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)
-    weights, phase_reports = phase_weights(ctx, clean, report["warnings"])
+    pools = phase_pools(ctx, clean, report["warnings"])
+    report["warnings"].extend(regime_views.spec_checks(ctx.db, clean, pools, report["clipped"]))
+    weights, phase_reports = [p.blocks for p in pools], _phase_reports(ctx, clean, pools)
     overrides = with_oil_lock([p["views"] for p in clean["phases"]], [p.get("overrides", {}) for p in clean["phases"]])
     cma, vm = valuation_for(ctx)
     sim = simulate(ctx.db, ctx.anchor, weights, [p["months"] for p in clean["phases"]],
@@ -283,7 +303,75 @@ def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
     detail.update(summarize(ctx, sim, TRACKED_MACRO if vm is not None and vm.kappa == 0 else VALUATION_MACRO))
     for a, att in attribution_summary(sim, phase_reports, detail["assets"]).items():
         detail["assets"][a]["attribution"] = att
+    if readout and regime_views.available(ctx):
+        detail["regimes"] = regime_views.readout(ctx, sim, clean, reference_simulation(ctx), report["clipped"])
     return detail, sim
+
+
+# the engine's unconditional reference run, per month database (reference_simulation); at most
+# _REFERENCE_KEEP settings per database, the least recently used going first (each run holds about 72 MB)
+_REFERENCE_CACHE: "weakref.WeakKeyDictionary[MonthDB, dict]" = weakref.WeakKeyDictionary()
+_REFERENCE_LOCK = threading.Lock()
+_REFERENCE_KEEP = 2
+
+
+def reference_simulation(ctx: EngineContext) -> dict:
+    """The engine's own unconditional run: the spec {phases: [{name: 回归常态, months: HORIZON_MONTHS,
+    views: []}]} simulated exactly as run_spec simulates it, with config.REGIMES["reference"] paths and
+    seed, and without a detail, a readout or attribution (which change no simulated number).
+
+    Scenario regime mixes are compared with it rather than with history, since the engine's own CPI drift
+    and contraction dynamics are in both. Cached through a weakref to ctx.db and keyed by the anchor date,
+    the CMA, the paths and seed and this module's RESIDUALS and VALUATION, so a study that swaps them gets
+    its own reference; repeated calls return the same dict (one run per process, about 1 s). A database
+    keeps the references of its _REFERENCE_KEEP most recently used settings.
+
+    Returns a dict to treat as read-only (its arrays are not writeable):
+      sim      SimOutput, (n_paths, months) returns and (n_paths, months + 1) macro paths
+      regimes  the label, flag and episode arrays (regimes.LABEL_KEYS) of regimes.classify_sim of the
+               paths with the panel history before the anchor: (n_paths, months + 1), column 0 = the
+               anchor month (the continuous indicators are left out; they follow from sim.macro)
+      drawn    (n_paths, months) ex-post label codes of the historical month each simulated month was drawn
+               from (regimes.label_codes of ctx.db.frame at sim.idx; -1 where unknown)
+      n_paths, seed, months, spec (the validated spec)
+    """
+    ref = config.REGIMES["reference"]
+    n_paths, seed = int(ref["n_paths"]), int(ref["seed"])
+    cma = ctx.cma or {}
+    key = (ctx.anchor.date, n_paths, seed, config.HORIZON_MONTHS,
+           tuple(sorted((k, str(v)) for k, v in RESIDUALS.items())),
+           tuple(sorted((k, str(v)) for k, v in VALUATION.items())),
+           cma.get("method"), tuple(sorted((cma.get("adjustment") or {}).items())))
+    with _REFERENCE_LOCK:
+        cache = _REFERENCE_CACHE.setdefault(ctx.db, {})
+        if key in cache:
+            cache[key] = cache.pop(key)                 # most recently used last
+            return cache[key]
+        spec = {"id": "reference", "name": "引擎无条件抽样", "prior_prob": 0.0,
+                "phases": [{"name": "回归常态", "months": config.HORIZON_MONTHS, "views": []}]}
+        clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)
+        weights, _ = phase_weights(ctx, clean, report["warnings"])
+        months = [p["months"] for p in clean["phases"]]
+        overrides = with_oil_lock([p["views"] for p in clean["phases"]],
+                                  [p.get("overrides", {}) for p in clean["phases"]])
+        sim_cma, vm = valuation_for(ctx)
+        sim = simulate(ctx.db, ctx.anchor, weights, months, n_paths=n_paths, seed=seed, block=BLOCK, cma=sim_cma,
+                       overrides=overrides, reversion=clean.get("reversion") or None, valuation=vm,
+                       attribution=False, **RESIDUALS)
+        full = regimes.classify_sim(sim.macro, ctx.panel, anchor=ctx.anchor.date)
+        r = {k: full[k] for k in regimes.LABEL_KEYS}
+        frame = ctx.db.frame
+        codes = (regimes.label_codes(frame) if all(f"rg_{i}" in frame.columns for i in regimes.LABEL_IDS)
+                 else np.full(len(frame), -1, np.int8))
+        drawn = codes[sim.idx]
+        for a in (sim.total, sim.income, sim.idx, drawn, *sim.macro.values(), *r.values()):
+            a.flags.writeable = False
+        out = {"sim": sim, "regimes": r, "drawn": drawn, "n_paths": n_paths, "seed": seed,
+               "months": int(sum(months)), "spec": clean}
+        while len(cache) >= _REFERENCE_KEEP:
+            del cache[next(iter(cache))]
+        cache[key] = out
+        return out
 
 
 def headline(detail: dict) -> dict:

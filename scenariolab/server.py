@@ -31,27 +31,37 @@ RESULTS = config.RESULTS_DIR
 CUSTOM = RESULTS / "custom"
 ID_RE = re.compile(r"^[a-z0-9_]{1,60}$")
 RESULT_NAMES = {"eras", "causality", "backtest", "diagnostics", "scenarios", "forecast", "ablation",
-                "portfolio_default", "llm_translator", "valuation"}
+                "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast"}
 # Which command writes each result file (a 404 names it). Default-build steps can also be rebuilt alone.
 BUILD = "python -m scenariolab.build"
 BUILD_STEP = {"meta": "meta", "eras": "eras", "causality": "causality", "backtest": "backtest",
               "diagnostics": "diagnostics", "scenarios": "scenarios", "forecast": "forecast",
-              "valuation": "valuation", "portfolio_default": "portfolio", "llm_translator": "llm"}
+              "valuation": "valuation", "portfolio_default": "portfolio", "llm_translator": "llm",
+              "regimes": "regimes"}
 BUILD_HINT = {
     "ablation": f"{BUILD} --only ablation（引擎消融约需 6 分钟，默认构建不包含这一步）",
+    "regime_forecast": f"{BUILD} --only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）",
 }
 NO_CACHE_PREFIXES = ("/js/", "/css/")
 
 
 def _warm() -> None:
-    """Fit the engine and load the scenario paths in the background, so first requests are fast."""
+    """Fit the engine, run the engine's unconditional reference simulation (every scenario's regime readout
+    compares with it; about 1 s, cached and locked, so a request that arrives meanwhile waits for this copy)
+    and load the scenario paths in the background, so first requests are fast."""
     try:
         from .context import get_context
         from .portfolio import service
-        get_context()
-        service.warm()
+        from .scenarios import runner
+        ctx = get_context()
     except Exception as err:  # noqa: BLE001 - a cold start is only slower
         print(f"[server] warm-up skipped: {err}")
+        return
+    for name, fn in (("reference run", lambda: runner.reference_simulation(ctx)), ("scenario paths", service.warm)):
+        try:
+            fn()
+        except Exception as err:  # noqa: BLE001 - each part only makes its first request slower
+            print(f"[server] warm-up of the {name} skipped: {err}")
 
 
 @asynccontextmanager

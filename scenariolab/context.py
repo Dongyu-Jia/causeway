@@ -8,6 +8,7 @@ import pandas as pd
 
 from . import config, jsonio
 from .data.panel import load_meta, load_panel
+from .engine import regimes
 from .engine.factor_model import AssetFactorModel, ModelSpec
 from .engine.simulate import Anchor, MonthDB, capital_market_assumptions, make_anchor
 
@@ -16,12 +17,21 @@ SELECTION_PATH = config.RESULTS_DIR / "model_selection.json"
 
 
 def load_panel_with_shocks() -> pd.DataFrame:
+    """The panel, the structural shocks (e_ columns) and the macro regime columns (rg_).
+
+    The rg_ columns are computed here on every load and never written to panel_monthly.csv: the ex-post
+    label of a month depends on later data, so a stored column would be right only for windows that end
+    today (a MonthDB that ends early recomputes them as of its end), and a classifier parameter change
+    needs no panel rebuild."""
     panel = load_panel()
     if SHOCKS_PATH.exists():
         shocks = pd.read_csv(SHOCKS_PATH, index_col="date", parse_dates=["date"])
         shocks.index = shocks.index.to_period("M").to_timestamp()
         cols = [c for c in shocks.columns if c.startswith("e_")]
         panel = pd.concat([panel.drop(columns=cols, errors="ignore"), shocks[cols].reindex(panel.index)], axis=1)
+    if regimes.has_inputs(panel):
+        stale = [c for c in panel.columns if c.startswith("rg_")]
+        panel = pd.concat([panel.drop(columns=stale), regimes.regime_columns(panel)], axis=1)
     return panel
 
 

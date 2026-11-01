@@ -29,6 +29,7 @@ from .. import config, jsonio
 from ..engine.factor_model import STRUCTURAL_ASSETS, base_columns
 from ..engine.simulate import DEFAULT_REVERSION
 from ..env import load_dotenv
+from ..scenarios import regime_views
 from ..scenarios.schema import (ASSET_DRIFT_BOUND, MAX_PHASES, MAX_VIEWS_PER_PHASE, SPEC_JSON_SCHEMA,
                                 allowed_variables, factor_drift_bounds, slugify, validate_spec)
 
@@ -51,6 +52,7 @@ SPECS_DIR = Path(__file__).resolve().parent.parent / "scenarios" / "specs"
 PREFERRED_EXAMPLES = ("oil_war", "k_shaped")
 EXAMPLE_NARRATIVE_CHARS = 1200
 RESULT_PATH = config.RESULTS_DIR / "llm_translator.json"
+REGIMES_PATH = config.RESULTS_DIR / "regimes.json"           # engine studies the regime section quotes
 VIEW_KEYS = ("mean", "mean_annual", "shift_sd", "min", "max", "vol_mult")
 TARGETS = ("mean", "mean_annual", "shift_sd")       # ep.apply_views uses the first one present
 REFERENCE_FACTORS = ("f_oil", "f_ip", "f_cpi", "f_ff", "f_y10", "f_spread", "f_unrate")
@@ -215,16 +217,34 @@ def _override_whys(spec: dict) -> dict:
     return out
 
 
+def _regime_items(ph: dict, source_ph) -> list[dict]:
+    """A clean phase's regime key in the list form, with the source's own why where it gave one."""
+    whys = {}
+    raw = source_ph.get("regime") if isinstance(source_ph, dict) else None
+    for d in raw if isinstance(raw, list) else []:
+        rid = regime_views.regime_id(d.get("id")) if isinstance(d, dict) else None
+        if rid and str(d.get("why") or "").strip():
+            whys.setdefault(rid, str(d["why"]))
+    return [{"id": r, "share": x, "why": whys.get(r) or regime_views.why_text(r, x)}
+            for r, x in (ph.get("regime") or {}).items()]
+
+
 def llm_form(spec: dict, source: dict | None = None, narrative_chars: int | None = EXAMPLE_NARRATIVE_CHARS) -> dict:
-    """A validated spec in the structured-output shape: every view key present, overrides as lists.
+    """A validated spec in the structured-output shape: every view key present, overrides and the regime
+    key as lists (the views the regime key expands to are not repeated as views).
 
     The narrative is cut to `narrative_chars` (the prompt's examples); None keeps all of it.
     """
     whys = _override_whys(source or spec)
+    source_phases = (source or spec).get("phases") or []
     phases = []
     for k, ph in enumerate(spec.get("phases") or []):
+        regime = _regime_items(ph, source_phases[k] if k < len(source_phases) else None)
+        from_regime = {f"rg_{d['id']}" for d in regime}
         views = []
         for v in ph.get("views") or []:
+            if v["var"] in from_regime:
+                continue
             item = {"var": v["var"], **{key: v.get(key) for key in VIEW_KEYS}}
             for key in ("min", "max"):
                 if item[key] is None and v.get(f"{key}_annual") is not None:
@@ -235,7 +255,8 @@ def llm_form(spec: dict, source: dict | None = None, narrative_chars: int | None
         drift = {key: [{item_key: i, "annual": a, "why": whys.get((k, key, i), DEFAULT_OVERRIDE_WHY)}
                        for i, a in (ov.get(key) or {}).items()]
                  for key, item_key in (("factor_drift", "factor"), ("asset_drift", "asset"))}
-        phases.append({"name": ph.get("name", ""), "months": int(ph.get("months", 0)), "views": views,
+        phases.append({"name": ph.get("name", ""), "months": int(ph.get("months", 0)), "regime": regime,
+                       "views": views,
                        "overrides": {**drift, "resid_scale": ov.get("resid_scale"), "r_star": ov.get("r_star")},
                        "confidence": ph.get("confidence", 1.0)})
     narrative = str(spec.get("narrative") or "")
@@ -364,7 +385,8 @@ def example_json(ex: dict) -> str:
     for ph in ex["phases"]:
         views = ",\n".join(f"    {d(v)}" for v in ph["views"])
         views = f"[\n{views}\n   ]" if views else "[]"
-        phases.append(f'  {{"name": {d(ph["name"])}, "months": {d(ph["months"])},\n'
+        regime = f', "regime": {d(ph["regime"])}' if "regime" in ph else ""
+        phases.append(f'  {{"name": {d(ph["name"])}, "months": {d(ph["months"])}{regime},\n'
                       f'   "views": {views},\n'
                       f'   "overrides": {d(ph["overrides"])}, "confidence": {d(ph["confidence"])}}}')
     body = head + [f' "causal_chain": [\n{chain}\n ]', ' "phases": [\n' + ",\n".join(phases) + "\n ]"]
@@ -393,6 +415,40 @@ def _drift_rows(frame) -> list[str]:
     return out
 
 
+_STUDIES: dict = {}
+
+
+def regime_studies(ctx: "EngineContext") -> dict | None:
+    """engine.studies of the build's regimes.json (what a regime request delivers in simulated paths, quoted
+    by the prompt's regime section), or None when the file is missing or is for another data month: the
+    clauses that quote a study then keep their rule without the number."""
+    try:
+        st = REGIMES_PATH.stat()
+    except OSError:
+        return None
+    key = (str(REGIMES_PATH), st.st_mtime_ns, st.st_size)
+    if key not in _STUDIES:
+        try:
+            res = jsonio.load(REGIMES_PATH)
+        except (OSError, ValueError):
+            res = None
+        _STUDIES.clear()
+        _STUDIES[key] = res if isinstance(res, dict) else None
+    res = _STUDIES[key]
+    if res is None or str(res.get("data_end")) != ctx.anchor.date.strftime("%Y-%m"):
+        return None
+    studies = (res.get("engine") or {}).get("studies")
+    return studies if isinstance(studies, dict) else None
+
+
+def regime_rule(ctx: "EngineContext") -> str:
+    """The prompt section 「## 宏观体制（regime 字段）」: the rules from config.REGIMES, the history from the
+    month database's support table, the study numbers from this build's regimes.json."""
+    if not any(c in ctx.db.frame.columns for c in regime_views.VIEW_IDS):
+        return ""
+    return regime_views.translator_rule(ctx.db, regime_studies(ctx))
+
+
 def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
                         examples: list[dict] | None = None) -> str:
     """Role, hard rules, engine semantics, variable support, today's state, eras, bounds and examples.
@@ -415,6 +471,7 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
         "劳动收入占比（f_labor_share）", "美元（f_usd）"])
     drift_assets = "、".join(f"{a['id']}（{a['name']}）" for a in config.ASSETS if a["id"] not in STRUCTURAL_ASSETS)
     years = f"{horizon_months / 12:g}"
+    regime = regime_rule(ctx)
 
     lines = [
         "你是「宏观情景实验室」的情景翻译器。用户用自然语言描述一个宏观叙事（战争、技术变革、政策转向、金融危机、收入分配变化……），"
@@ -505,6 +562,7 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
         "",
         *_era_lines(config.MODEL_START),
         "",
+        *([*regime.split("\n"), ""] if regime else []),
         "## 覆盖项 overrides（可选、有边界）",
         "",
         "- factor_drift：每年额外加到某个因子上的变化（单位同该因子，按年计），作用于该阶段的每个模拟月份，"
@@ -681,6 +739,20 @@ def repair(raw: dict) -> tuple[dict, list[str]]:
         if isinstance(conf, (int, float)) and 1.5 < conf <= 100:
             ph["confidence"] = conf / 100.0
             notes.append(f"阶段 {k}：confidence={conf:g} 看起来是百分数，已按 {conf / 100.0:g} 处理")
+        if isinstance(ph.get("regime"), list):
+            items = []
+            for item in ph["regime"]:
+                if not isinstance(item, dict):
+                    continue
+                raw_id = item.get("id")
+                rid = regime_views.regime_id(raw_id)
+                if rid is None:
+                    notes.append(regime_views.unknown_text(k, raw_id))
+                    continue
+                if rid != raw_id:
+                    notes.append(f"阶段 {k}：宏观体制「{raw_id}」已按{regime_views.NAMES[rid]}处理")
+                items.append({**item, "id": rid})
+            ph["regime"] = items
         merged: dict[str, dict] = {}
         for v in ph.get("views") or []:
             if not isinstance(v, dict) or not v.get("var"):
@@ -729,16 +801,18 @@ def drawn_weights(weights: np.ndarray, n_months: int, block: int) -> np.ndarray:
     return month_frequency(block_start_probs(weights, B), B, n_months, T)
 
 
-def preview(ctx: "EngineContext", spec: dict, warnings: list[str]) -> list[dict]:
+def preview(ctx: "EngineContext", spec: dict, warnings: list[str], clipped=()) -> list[dict]:
     """Per phase: which real months the views select and what the sampler draws on average.
 
     `drawn_mean` is the exact expectation over simulate()'s draws (runner.phase_pools ->
     block bootstrap); `realized_share` = (drawn - prior) / (target - prior), which equals
-    the phase's confidence unless its views were shrunk toward the prior.
+    the phase's confidence unless its views were shrunk toward the prior. The regime checks of
+    the pooled phases (as run_spec appends them) go to `warnings`; `clipped` is validate_spec's.
     """
     from ..scenarios.runner import ep_report, phase_pools
 
     pools = phase_pools(ctx, spec, warnings)
+    warnings.extend(regime_views.spec_checks(ctx.db, spec, pools, clipped))
     frame = ctx.db.frame
     out, start = [], 0
     for ph, pool in zip(spec["phases"], pools):
@@ -802,7 +876,7 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
     if not any(p["views"] or p["overrides"] for p in clean["phases"]):
         report["warnings"].append("规格中没有任何有效的视图或覆盖项，结果等同于无条件历史基准情景。")
     try:
-        phases_preview = preview(ctx, clean, report["warnings"])
+        phases_preview = preview(ctx, clean, report["warnings"], report["clipped"])
     except (ValueError, KeyError, TypeError, np.linalg.LinAlgError) as err:
         phases_preview = []
         report["warnings"].append(f"无法预览各阶段的历史月份权重：{err}")
@@ -835,6 +909,7 @@ def run(ctx: "EngineContext", narrative: str | None = None, horizon_months: int 
         "asset_drift": {"bound": ASSET_DRIFT_BOUND,
                         "assets": [a for a in config.ASSET_IDS if a not in STRUCTURAL_ASSETS]},
         "schema": SPEC_JSON_SCHEMA,
+        "regime_support": regime_views.support_rows(ctx.db),
         "examples": lab_examples(ctx, horizon_months),
         "translation": translate(narrative, ctx, horizon_months, client=client) if narrative else None,
     }

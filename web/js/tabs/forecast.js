@@ -13,9 +13,44 @@ const NEXT_ASSETS = ['us_equity', 'nasdaq', 'treasury_10y', 'gold', 'energy', 'r
 // label of the 12 months a forecast made at `origin` covers (Dec origins -> the next calendar year)
 const yearLabel = (o) => (o.date.endsWith('-12') ? String(Number(o.date.slice(0, 4)) + 1) : `${o.end}`);
 
+// Tables of this page: headers wrap and cells are a little denser (.fc-t); the widest ones stack into labelled
+// blocks below ~1000px of card width (.fc-wide), the mid-size ones below ~800px (.fc-mid), the rest at the
+// shared 480px (app.css), so no table scrolls sideways inside its card.
+// the shared phone layout of app.css (every row a block of labelled cells), for a wider container
+const stacked = (sel) => `
+  ${sel} table.tbl-stack thead { display: none; }
+  ${sel} table.tbl-stack, ${sel} table.tbl-stack tbody, ${sel} table.tbl-stack td { display: block; width: auto; }
+  ${sel} table.tbl-stack tr { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+    column-gap: 16px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+  ${sel} table.tbl-stack td { border: 0; padding: 2px 0; text-align: left !important; white-space: normal; }
+  ${sel} table.tbl-stack td:first-child { grid-column: 1 / -1; font-weight: 600; }
+  ${sel} table.tbl-stack td::before { content: attr(data-label); display: inline-block; min-width: 84px;
+    margin-right: 8px; font-size: 11px; color: var(--ink-3); vertical-align: top; }
+  ${sel} table.tbl-stack td:first-child::before { display: none; }`;
+const CSS = `
+.fc-t table.tbl th { white-space: normal; line-height: 1.35; vertical-align: bottom; }
+.fc-t table.tbl th, .fc-t table.tbl td { padding: 7px 8px; }
+.fc-t table.tbl td small { font-size: 11px; color: var(--ink-3); }
+@container (max-width: 1000px) {${stacked('.fc-wide')}
+}
+@container (max-width: 800px) {${stacked('.fc-mid')}
+}
+@container (max-width: 480px) { .fc-t table.tbl-stack td { padding: 2px 0; } }
+`;
+
+// ui.table's `stack` for this page: stacked below 480px (T), 800px (MID) or 1000px (WIDE) of card width
+const T = 'fc-t', MID = 'fc-t fc-mid', WIDE = 'fc-t fc-wide';
+
+function ensureStyle() {
+  let el = document.getElementById('style-forecast');
+  if (!el) { el = document.createElement('style'); el.id = 'style-forecast'; document.head.append(el); }
+  if (!el.textContent.includes('/* forecast */')) el.textContent += `/* forecast */\n${CSS}`;
+}
+
 export async function render(root, { api, charts, ui, alive = () => root.isConnected }) {
   const { h, card } = ui;
   const pct = (x, d = 1) => ui.fmtPct(x, d);
+  ensureStyle();
   root.append(h('p', { class: 'lead' },
     '多年期的路径只有在给出情景主题（以及因子方向）之后才有意义，见“未来情景”；没有主题时能认真打分的最长期限是下一年。',
     '这里每年年底只用当时能看到的数据预测下一年，统计区间准不准、为什么不准。战争、疫情这类外生冲击造成的偏差单独标出，不算模型错误。'));
@@ -54,7 +89,7 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
       ]),
       { value: (r) => r.analog?.real_p50, label: '相似起点 实际中位', fmt: (v) => pct(v), cls: (v) => ui.signCls(v) },
       { value: (r) => r.analog?.prob_loss, label: 'P(亏损)', fmt: (v) => pct(v, 0) },
-    ], liveRows, { stack: true })));
+    ], liveRows, { stack: WIDE })));
 
   const zEl = ui.chartBox();
   const macroLive = live.macro || {};
@@ -68,19 +103,20 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
           { value: (r) => r[m]?.p50, label: `${METHOD_CN[m]} 中位`, fmt: (v, r) => fmtMacro(v, r.kind) },
           { value: (r) => r[m], label: `${METHOD_CN[m]} 90% 区间`, fmt: (b, r) => (b ? `${fmtMacro(b.p5, r.kind)} ~ ${fmtMacro(b.p95, r.kind)}` : '—') },
         ]),
-      ], MACRO_ROWS.map(([k, label, kind]) => ({ label, kind, ...macroLive[k] })), { stack: true }))));
+      ], MACRO_ROWS.map(([k, label, kind]) => ({ label, kind, ...macroLive[k] })), { stack: T }))));
 
   if ((live.analogs || []).length) {
+    const share = isFin(live.analog_share) ? `可用起点的 ${shareText(live.analog_share)}，` : '';
     root.append(card({
       title: '今天最像的历史起点，以及之后一年发生了什么',
-      sub: `按 8 个状态的标准化距离排序（只用于展示的窄核，有效起点约 ${Math.round(live.display_ens || 0)}）；预测本身用的是滚动验证选出的较宽加权（有效起点约 ${Math.round(live.analog_ens || 0)}）`,
+      sub: `按 8 个状态的标准化距离排序（只用于展示的窄核，有效起点约 ${Math.round(live.display_ens || 0)}）；预测本身用的是滚动验证选出的较宽加权（${share}有效起点约 ${Math.round(live.analog_ens || 0)}）`,
     }, ui.table([
       { key: 'date', label: '起点' },
       { key: 'distance', label: '距离', fmt: (v) => ui.fmtNum(v, 2) },
       ...NEXT_ASSETS.map(a => ({ value: (r) => r.next12?.[a], label: assetName(a), fmt: (v) => pct(v), cls: (v) => ui.signCls(v) })),
       { value: (r) => r.macro?.unrate, label: '失业率变化', fmt: (v) => fmtMacro(v, 'pp') },
       { value: (r) => r.macro?.ff, label: '政策利率变化', fmt: (v) => fmtMacro(v, 'pp') },
-    ], live.analogs, { stack: true })));
+    ], live.analogs, { stack: MID })));
   }
 
   const scenMed = live.scenario_medians;
@@ -102,17 +138,24 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
   if (fc.text) root.append(h('p', { class: 'lead' }, fc.text));
   const kpiWrap = h('div', { class: 'grid cols-4' });
   let scope = 'all';
+  // a CRPS difference is called better / worse only beyond the module's claim rule (forecast.json selection.claim)
+  const claim = fc.selection?.claim || { min_skill: 0.005, min_t: 2 };
+  const verdict = (x, t) => (isFin(x) && isFin(t)
+    ? (x > claim.min_skill && t >= claim.min_t ? 1 : (x < -claim.min_skill && t <= -claim.min_t ? -1 : 0)) : 0);
   const renderKpis = () => {
     const s = fc.scores?.[scope] || {};
     const an = s.analog || {}, un = s.uncond || {}, nv = s.naive || {};
-    const sk = s.crps_skill_risk || {};
+    const sk = s.crps_skill_risk || {}, pr = s.crps_paired_risk || {};
     const cov = an.risk_avg?.coverage90;
+    const vNaive = verdict(sk.analog_vs_naive, pr.analog_vs_naive?.t);
     kpiWrap.innerHTML = '';
     kpiWrap.append(
       ui.kpi('90% 区间覆盖率（风险资产）', pct(cov, 0), `理想值 90%；无条件 ${pct(un.risk_avg?.coverage90, 0)}，历史均值 ${pct(nv.risk_avg?.coverage90, 0)}`,
         typeof cov === 'number' && Math.abs(cov - 0.9) > 0.08 ? 'is-bad' : ''),
-      ui.kpi('分布准确度 CRPS 技能', fmtSkill(sk.analog_vs_naive), `相对历史均值基准；相对无条件 ${fmtSkill(sk.analog_vs_uncond)}（正 = 更好）`,
-        typeof sk.analog_vs_naive === 'number' && Math.abs(sk.analog_vs_naive) >= 0.0005 ? ui.goodCls(sk.analog_vs_naive > 0) : ''),
+      ui.kpi('分布准确度 CRPS 技能', fmtSkill(sk.analog_vs_naive),
+        `相对历史均值基准（t ${ui.fmtNum(pr.analog_vs_naive?.t, 1)}）；相对无条件 ${fmtSkill(sk.analog_vs_uncond)}`
+        + `（t ${ui.fmtNum(pr.analog_vs_uncond?.t, 1)}）。正 = 更好；|t| 不到 ${claim.min_t} 时在随机误差之内`,
+        vNaive ? ui.goodCls(vNaive > 0) : ''),
       ui.kpi('超额收益方向命中率', pct(an.direction?.hit_rate, 0), `同期上涨年份占比 ${pct(an.direction?.base_rate_up, 0)}：只猜“涨”的水平`),
       ui.kpi('跨资产排序相关 IC', an.rank_ic?.mean === null || an.rank_ic?.mean === undefined ? '—' : an.rank_ic.mean.toFixed(2),
         an.rank_ic?.t ? `t = ${an.rank_ic.t.toFixed(1)}，${an.rank_ic.n} 个起点：预测能否排出明年哪类资产更好` : ''),
@@ -125,21 +168,30 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
   }, kpiWrap));
   renderKpis();
 
-  // selection of the analog bandwidth
+  // selection of the analog kernel's concentration (a share of the starts available at each origin)
   const sel = fc.selection;
   let selEl = null;
+  const gridLabel = (r) => r.label ?? String(r.ens ?? '—');           // older forecast.json: an ENS grid
   if (sel?.grid?.length) {
     selEl = ui.chartBox();
+    // the analog's CRPS on top; below in small type its skill against the unconditional draw and the paired t
+    const crpsCell = (a, u, t) => (isFin(a) ? h('span', {}, ui.fmtNum(a, 4), h('br'),
+      h('small', {}, `技能 ${fmtSkill(isFin(u) && u > 0 ? 1 - a / u : null)}，t ${ui.fmtNum(t, 1)}`)) : '—');
+    const g0 = sel.grid[0];
     root.append(card({ title: '“像哪段历史”该押多重：滚动验证的选择', sub: sel.text || '' }, selEl,
       ui.table([
-        { key: 'ens', label: '有效起点数', fmt: (v) => (v === sel.chosen ? `${v}（选中）` : String(v)) },
-        { key: 'val_crps_analog', label: `验证期 CRPS（≤${sel.split}）`, fmt: (v) => ui.fmtNum(v, 4) },
-        { key: 'val_crps_uncond', label: '验证期 无条件', fmt: (v) => ui.fmtNum(v, 4) },
-        { key: 'test_crps_analog', label: '检验期 CRPS', fmt: (v) => ui.fmtNum(v, 4) },
-        { key: 'test_crps_uncond', label: '检验期 无条件', fmt: (v) => ui.fmtNum(v, 4) },
+        { value: (r) => r, label: '集中度（占可用起点）', fmt: (r) => (r.share === sel.chosen ? `${gridLabel(r)}（选中）` : gridLabel(r)) },
+        { value: (r) => r, label: '有效起点（首个 → 最近）',
+          fmt: (r) => (isFin(r.ens_first) ? `${Math.round(r.ens_first)} → ${Math.round(r.ens_last)}` : '—') },
+        { value: (r) => r, label: `验证期 CRPS（≤${sel.split}）`, fmt: (r) => crpsCell(r.val_crps_analog, r.val_crps_uncond, r.val_t) },
+        { value: (r) => r, label: '检验期 CRPS', fmt: (r) => crpsCell(r.test_crps_analog, r.test_crps_uncond, r.test_t) },
         { key: 'test_coverage', label: '检验期覆盖率', fmt: (v) => pct(v, 0) },
         { key: 'test_rank_ic', label: '检验期 IC', fmt: (v) => ui.fmtNum(v, 2) },
-      ], sel.grid, { stack: true })));
+      ], sel.grid, { stack: T }),
+      h('p', { class: 'muted', style: { fontSize: '12px', margin: '6px 0 0' } },
+        `无条件抽样的 CRPS：验证期 ${ui.fmtNum(g0.val_crps_uncond, 4)}，检验期 ${ui.fmtNum(g0.test_crps_uncond, 4)}，每一行都一样`
+        + (sel.common_random_numbers ? '（与相似起点法用同一组随机数）' : '')
+        + '；小字是相似起点法相对它的 CRPS 技能（正 = 更好）和逐起点差别的配对 t 值。')));
   }
 
   // per-asset forecast vs realized
@@ -167,7 +219,7 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
       ...['analog', 'uncond'].map(m => ({ value: (r) => r[m]?.pit_mad, label: `${METHOD_CN[m]} PIT 偏离`, fmt: (v) => ui.fmtNum(v, 2) })),
       { value: (r) => r.analog?.bias_p50, label: '相似起点 中位数偏差', fmt: (v) => ui.fmtPct(v, 1, true),
         cls: (v) => (typeof v === 'number' && Math.abs(v) > 0.03 ? 'is-bad' : '') },
-    ], rows, { stack: true }));
+    ], rows, { stack: WIDE }));
   };
   renderScoreTable();
 
@@ -191,7 +243,7 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
       { value: (r) => `${pct(r.p5)} ~ ${pct(r.p95)}`, label: '90% 区间' },
       { key: 'cause', label: '原因', fmt: (v) => ui.chip(...(CAUSE[v] || [v, ''])) },
       { key: 'why', label: '说明', wrap: true },
-    ], misses, { stack: true })));
+    ], misses, { stack: T })));
   }
 
   if ((fc.notes || []).length) {
@@ -218,7 +270,7 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
   }
   if (selEl) {
     charts.line(selEl, {
-      x: sel.grid.map(r => String(r.ens)), yFmt: (v) => Number(v).toFixed(3),
+      x: sel.grid.map(gridLabel), yFmt: (v) => Number(v).toFixed(3),
       series: [
         { name: '验证期 相似起点', data: sel.grid.map(r => r.val_crps_analog), color: '#3b5bdb' },
         { name: '验证期 无条件', data: sel.grid.map(r => r.val_crps_uncond), color: '#3b5bdb', dashed: true },
@@ -236,6 +288,11 @@ export async function render(root, { api, charts, ui, alive = () => root.isConne
 }
 
 const isFin = (v) => typeof v === 'number' && Number.isFinite(v);
+// A share of the available starts as text, as forecast.share_label: 0.25 -> "1/4", else a percentage.
+const shareText = (s) => {
+  const k = 1 / s;
+  return k >= 1 && Math.abs(k - Math.round(k)) < 1e-9 ? `1/${Math.round(k)}` : `${Math.round(s * 100)}%`;
+};
 // Chinese text followed by a Latin word gets a space before it ("只对齐 CPI 同比").
 const latinGap = (t) => (/^[A-Za-z0-9]/.test(String(t)) ? ` ${t}` : String(t));
 const subHead = (ui, text) => ui.h('div', { style: { fontSize: '12px', fontWeight: 600, color: 'var(--ink-2)', margin: '14px 0 6px' } }, text);
@@ -288,7 +345,7 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
     { value: (r) => r.scenarios?.prob_loss, label: '情景加权 P(亏损)', fmt: (v) => pct(v, 0) },
     ...(calOk ? [{ value: (r) => r.calibrated?.prob_loss, label: '校准后 P(亏损)', fmt: (v) => pct(v, 0) }] : []),
     { key: 'gap_mean', label: '均值差距', fmt: (v) => ppText(v), cls: (v) => ui.signCls(v) },
-  ], rows, { stack: true })));
+  ], rows, { stack: T })));
 
   const heatBox = ui.chartBox('tall');
   root.append(h('div', { style: { height: '16px' } }), card({ title: '哪些情景造成了差距（按资产）',
@@ -314,7 +371,7 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
     { value: (r) => r.cagr15_p50?.us_equity, label: '美股 15 年年化', fmt: (v) => pct(v), cls: (v) => ui.signCls(v) },
     ...['unrate', 'cpi_yoy', 'ff', 'spread', 'oil'].map(k => ({ value: (r) => r.macro?.[k], label: MACRO_NAME[k],
       fmt: (v) => fmtMacro(v, k === 'oil' ? 'log' : 'pp') })),
-  ], [...scs, ...refs], { stack: true })));
+  ], [...scs, ...refs], { stack: MID })));
 
   // ---- calibration: only forecastable macro variables
   const sv = Object.entries(skill.vars || {}).map(([k, v]) => ({ k, ...v }));
@@ -337,7 +394,7 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
         { value: (r) => r, label: '对无条件抽样', fmt: (r) => skillCell(r), cls: (r) => passCls(r?.beats?.uncond), wrap: true },
         { value: (r) => r.naive, label: '对历史均值基准', fmt: (p) => skillCell(p), cls: (p, r) => passCls(r?.beats?.naive), wrap: true },
         { key: 'skilled', label: '用于校准', fmt: (v) => ui.chip(v ? '是' : '否', v ? 'good' : '') },
-      ], sv, { stack: true }),
+      ], sv, { stack: T }),
       h('p', { class: 'muted', style: { fontSize: '12px', margin: '6px 0 0' } },
         '历史均值基准 = 训练期 12 个月变化的均值和标准差构成的正态分布（约等于“不变”）。两种引擎方法都直接抽历史月份的通胀而不重新锚定，'
         + 'CPI 同比的预测因此一起偏高；只胜过无条件抽样不说明预测本身可信，所以两个基准都要胜过。'),
@@ -347,7 +404,7 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
           { key: 'target_used', label: '相似起点法（目标）', fmt: (v, r) => fmtMacro(v, r.var === 'oil' ? 'log' : 'pp') },
           { key: 'prior_mean', label: '情景加权·模型后验', fmt: (v, r) => fmtMacro(v, r.var === 'oil' ? 'log' : 'pp') },
           { key: 'posterior_mean', label: '校准后', fmt: (v, r) => fmtMacro(v, r.var === 'oil' ? 'log' : 'pp') },
-        ], cal.views || [], { stack: true })]
+        ], cal.views || [], { stack: T })]
         : ui.notice(`未校准：${cal.reason || '没有可用于校准的宏观变量'}。${cal.verdicts ? `逐个看：${cal.verdicts}。` : ''}`, 'info')),
     h('div', {},
       calOk ? [subHead(ui, `概率怎么变（${(cal.shifts || []).length} 个情景，按变化大小排序）`),
@@ -356,7 +413,7 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
           { key: 'prior', label: '模型后验', fmt: (v) => pct(v, 1) },
           { key: 'calibrated', label: '校准后', fmt: (v) => pct(v, 1) },
           { key: 'shift', label: '变化', fmt: (v) => ppText(v) },
-        ], cal.shifts || [], { stack: true })] : null,
+        ], cal.shifts || [], { stack: T })] : null,
       sens.length ? [subHead(ui, '对照：分别对齐每个宏观变量会怎样（没有预测能力的只作对照，不作为可选的概率）'),
         ui.table([
           { key: 'label', label: '对齐的变量' },
@@ -365,11 +422,11 @@ function renderReconciliation(root, { ui, charts, fc, pct, assetName }) {
           { key: 'ens', label: '有效情景数', fmt: (v) => ui.fmtNum(v, 1) },
           { value: (r) => r.us_equity?.p50, label: '美股中位数', fmt: (v) => pct(v), cls: (v) => ui.signCls(v) },
           { value: (r) => r.us_equity?.prob_loss, label: 'P(亏损)', fmt: (v) => pct(v, 0) },
-        ], sens, { stack: true })] : null)),
+        ], sens, { stack: T })] : null)),
   h('p', { class: 'muted', style: { fontSize: '12px', margin: '10px 0 0' } },
     calOk ? '「组合评估」和「提取与破产概率」的情景概率里可以选「按一年期预测校准」；默认仍是模型后验。'
       : '「组合评估」和「提取与破产概率」的情景概率里，「按一年期预测校准」这一项因此不可选（灰色），默认的模型后验不受影响。',
-    rec.paths_reproduced === false ? ' 注意：重跑情景得到的路径与 scenario_paths.npz 不一致，请重新运行 python -m scenariolab.build --only scenarios forecast。' : '')));
+    rec.paths_reproduced === false ? ' 注意：重跑情景得到的路径与情景结果里存的路径不一致，请重新运行 python -m scenariolab.build --only scenarios forecast。' : '')));
 
   return () => {
     const cols = (rec.assets || []).filter(a => a !== 'cash');
@@ -424,7 +481,7 @@ function renderLedger({ ui, fc, pct, assetName }) {
       { value: (r) => r.scores?.analog?.[asset], label: '落在 90% 区间', fmt: (s) => (s ? ui.chip(s.covered ? '是' : '否', s.covered ? 'good' : 'bad') : '—') },
       { value: (r) => r.scores?.analog?.[asset]?.pit, label: 'PIT', fmt: (v) => ui.fmtNum(v, 2) },
       { value: (r) => r.scores?.analog?.[asset]?.crps, label: 'CRPS', fmt: (v) => ui.fmtNum(v, 3) },
-    ], rows, { stack: true }) : ui.notice('账本里还没有记录。', 'info'));
+    ], rows, { stack: WIDE }) : ui.notice('账本里还没有记录。', 'info'));
   };
   const sel = ui.select(fc.assets.map(a => ({ value: a, label: assetName(a) })), asset, (v) => { asset = v; draw(); });
   draw();
@@ -445,10 +502,11 @@ function renderLedger({ ui, fc, pct, assetName }) {
     { key: 'crps', label: 'CRPS', fmt: (v) => ui.fmtNum(v, 3) },
     { key: 'pit_mad', label: 'PIT 偏离', fmt: (v) => ui.fmtNum(v, 2) },
     { key: 'mae_p50', label: '中位数误差', fmt: (v) => pct(v) },
-  ], scoreRows, { stack: true })] : null,
+  ], scoreRows, { stack: T })] : null,
   (led.errors || []).length ? ui.notice(`有 ${led.errors.length} 个账本文件读不了：${led.errors.join('；')}`, 'error') : null,
   h('p', { class: 'muted', style: { fontSize: '12px', margin: '10px 0 0' } },
-    `怎么记录：每次构建（完整构建或 --only forecast）把当时的一年期预测原样存进 ${led.dir || 'data/ledger'}/forecast_<起点>.json，`
+    '怎么记录：每次构建（完整构建或只重建一年期预测这一步）把当时的一年期预测原样存进账本目录（',
+    h('code', { class: 'mono' }, `${led.dir || 'data/ledger'}/forecast_<起点>.json`), '），'
     + '每个起点一个文件，只追加、不覆盖；同一份数据重复构建不会重复记录；只按时间顺序追加（不补记更早的起点），'
     + '起点之后 3 个月以上才做的预测也不记（那时要预测的月份已经部分知道了）。数据更新到起点之后 12 个月时，下一次构建用新数据给它打分'
     + '（覆盖率、PIT、CRPS，口径同下面的滚动成绩）。'));

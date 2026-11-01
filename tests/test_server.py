@@ -76,6 +76,47 @@ def test_missing_results_name_the_command_that_builds_them(monkeypatch, tmp_path
     assert r.status_code == 404 and "--only scenarios" in r.json()["detail"]
 
 
+def test_regime_results_are_served_and_a_missing_file_names_its_step(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "RESULTS", tmp_path)
+    r = client.get("/api/regimes")
+    assert r.status_code == 404
+    assert "regimes.json" in r.json()["detail"] and "--only regimes" in r.json()["detail"]
+    r = client.get("/api/regime_forecast")
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert "regime_forecast.json" in detail and "--only regime_forecast" in detail and "约需 2 分钟" in detail
+    (tmp_path / "regimes.json").write_text('{"version": 1, "data_end": "2026-09"}', encoding="utf-8")
+    r = client.get("/api/regimes")
+    assert r.status_code == 200 and r.json() == {"version": 1, "data_end": "2026-09"}
+
+
+def test_the_startup_thread_also_runs_the_reference_simulation(monkeypatch):
+    """Every scenario's regime readout compares with the engine's reference run: it is warmed at startup, and a
+    failing part of the warm-up does not stop the others."""
+    from scenariolab import context
+    from scenariolab.portfolio import service
+    from scenariolab.scenarios import runner
+    done = []
+    monkeypatch.setattr(context, "get_context", lambda: "ctx")
+
+    def reference(ctx):
+        done.append(("reference", ctx))
+        raise RuntimeError("no rg_ columns")
+
+    monkeypatch.setattr(runner, "reference_simulation", reference)
+    monkeypatch.setattr(service, "warm", lambda: done.append(("paths", None)))
+    server._warm()
+    assert done == [("reference", "ctx"), ("paths", None)]
+
+
+@pytest.mark.skipif(not (config.RESULTS_DIR / "regimes.json").exists(), reason="regimes not built")
+def test_built_regimes_are_served():
+    r = client.get("/api/regimes")
+    assert r.status_code == 200, r.text[:200]
+    body = r.json()
+    assert body["version"] == 1 and {"nowcast", "timeline", "engine"} <= set(body)
+
+
 def test_custom_ids_cannot_shadow_builtins(monkeypatch):
     monkeypatch.setattr(server, "builtin_ids", lambda: {"baseline", "custom_baseline"})
     assert server._custom_id({"id": "baseline"})["id"] == "custom2_baseline"

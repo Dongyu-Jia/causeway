@@ -2,7 +2,8 @@
 
 Pipeline for one scenario (or one backtest window):
   1. MonthDB holds the historical months the simulator may draw from, with
-     their factor changes, states, eras and the asset-model residuals.
+     their factor changes, states, eras and the asset-model residuals (and
+     the macro regime columns as of the window's end, for views).
   2. Per phase, Entropy Pooling over block starts turns views into
      block-start probabilities (pooling.pool_phase).
   3. Weighted block bootstrap draws month indices (sampler.sample_phases).
@@ -35,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from .. import config
+from . import regimes
 from .factor_model import STRUCTURAL_ASSETS, AssetFactorModel, base_columns, features_from_paths
 from .pooling import uncond_frequency
 from .sampler import sample_phases
@@ -70,6 +72,13 @@ class MonthDB:
         prev = panel[["lvl_ff", "lvl_y10", "s_spread"]].shift(1).loc[P.index]
         ok &= prev.notna().all(axis=1)
         P = P[ok]
+        # A window that ends before the panel does sees its ex-post regime columns as data through `end`
+        # define them: on the whole panel, a window ending 2008-06 would already see 2008-01..06 labelled
+        # 深度衰退. Not required columns, so the months are the same with or without them.
+        expost = [c for c in regimes.EXPOST_COLUMNS if c in P.columns]
+        if end is not None and expost and len(P) and panel.loc[:end].index.max() < panel.index.max():
+            asof = regimes.asof_columns(panel, end)
+            P = P.assign(**{c: asof[c].reindex(P.index) for c in expost})
         self.panel = panel
         self.model = model
         self.dates = P.index

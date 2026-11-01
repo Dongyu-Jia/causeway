@@ -14,7 +14,10 @@ probabilities.run. Outputs: results/scenarios/<id>.json, results/scenarios.json
 and results/scenario_paths.npz (arrays ordered like the index, by probability).
 Each index entry carries the headline numbers and, under "assets", every asset's
 cagr_p5 / cagr_p50 / cagr_p95 / real_cagr_p50 / max_dd_p50, so the UI can compare
-scenarios without loading every detail file.
+scenarios without loading every detail file; under "regimes", the year-1 and
+whole-horizon regime mix of its paths (regime_views.index_fields). The index's
+"regimes" holds the probability-weighted year-1 mix, the engine's unconditional
+reference run and the history of the month database.
 """
 from __future__ import annotations
 
@@ -28,8 +31,8 @@ import yaml
 
 from .. import config, jsonio
 from ..context import EngineContext
-from . import calibrate, probabilities
-from .runner import headline, run_spec
+from . import calibrate, probabilities, regime_views
+from .runner import headline, reference_simulation, run_spec
 from .schema import MAX_VIEWS_PER_PHASE, VIEW_SCHEMA
 
 SPEC_DIR = Path(__file__).resolve().parent / "specs"
@@ -106,7 +109,8 @@ def schema_example(spec: dict) -> dict:
         views = [{"var": v["var"], **{k: v.get(k) for k in VIEW_KEYS}, "why": v.get("why", "")}
                  for v in ph.get("views") or []]
         phases.append({
-            "name": ph.get("name", ""), "months": int(ph.get("months", 12)), "views": views,
+            "name": ph.get("name", ""), "months": int(ph.get("months", 12)),
+            "regime": regime_list(ph.get("regime")), "views": views,
             "overrides": {
                 "factor_drift": [{"factor": k, "annual": float(x), "why": "超出历史支撑的部分，见叙述"}
                                  for k, x in (ov.get("factor_drift") or {}).items()],
@@ -117,6 +121,22 @@ def schema_example(spec: dict) -> dict:
         })
     keys = ("id", "name", "summary", "narrative", "tags", "prior_prob", "analogs", "causal_chain")
     return {**{k: copy.deepcopy(spec.get(k)) for k in keys}, "phases": phases}
+
+
+def regime_list(reg) -> list[dict]:
+    """A phase's regime key in the LLM list form [{id, share, why}] (ids and aliases as written)."""
+    if isinstance(reg, list):
+        return [{"id": d.get("id"), "share": d.get("share"), "why": d.get("why") or ""} for d in reg
+                if isinstance(d, dict)]
+    out = []
+    for key, share in (reg or {}).items():
+        rid = regime_views.regime_id(key)
+        try:
+            why = regime_views.why_text(rid, float(share)) if rid else ""
+        except (TypeError, ValueError):
+            why = ""
+        out.append({"id": rid or key, "share": share, "why": why})
+    return out
 
 
 def schema_examples(ctx: EngineContext | None = None, ids: list[str] | None = None) -> list[dict]:
@@ -189,11 +209,14 @@ def _headline(detail: dict) -> dict:
 
 
 def run(ctx: EngineContext, n_paths: int = 600, out_dir: Path | None = None,
-        spec_dir: Path | None = None, ids: list[str] | None = None, base_seed: int = 0) -> dict:
+        spec_dir: Path | None = None, ids: list[str] | None = None, base_seed: int = 0,
+        regimes: bool | None = None) -> dict:
     """Run every built-in scenario, write the result files and return the index.
 
     `ids` runs a subset and writes a subset index and npz (probabilities
     renormalized over it), so pass an `out_dir` other than results/ with it.
+    `regimes` is run_spec's switch for the regime readout (None = runner.REGIME_READOUT);
+    a study that needs only the returns passes False.
     """
     out_dir = Path(out_dir or config.RESULTS_DIR)
     base = calibration_base(ctx)
@@ -203,7 +226,7 @@ def run(ctx: EngineContext, n_paths: int = 600, out_dir: Path | None = None,
             continue
         spec, cals = resolve_calibration(raw, base)
         detail, sim = run_spec(ctx, spec, n_paths=n_paths, seed=seed_for(str(spec.get("id")), base_seed),
-                               source="builtin")
+                               source="builtin", regimes=regimes)
         if cals:
             for c in cals:
                 c["engine_check"] = _engine_check(c, sim)
@@ -238,8 +261,13 @@ def run(ctx: EngineContext, n_paths: int = 600, out_dir: Path | None = None,
             "headline": _headline(d), "ens_min": min(p["ep"]["ens"] for p in d["phases"]),
             "analogs": d.get("analogs", []), "warnings": len(d["validation"]["warnings"]),
             "calibrated": "calibration" in d, "assets": _asset_stats(d),
+            **({"regimes": regime_views.index_fields(d["regimes"])} if "regimes" in d else {}),
         } for d in details],
     }
+    if any("regimes" in s for s in index["scenarios"]):
+        index["regimes"] = {**regime_views.library_mix(index["scenarios"]),
+                            "reference": regime_views.reference_summary(reference_simulation(ctx)),
+                            "history": regime_views.history_summary(ctx.db.frame)}
     jsonio.dump(index, out_dir / "scenarios.json")
     if sims:
         out_dir.mkdir(parents=True, exist_ok=True)

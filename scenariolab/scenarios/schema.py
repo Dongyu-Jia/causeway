@@ -4,7 +4,8 @@ The same schema is used by the hand-written built-in scenarios (YAML) and by
 the LLM translator. validate_spec() is the guard rail between a narrative and
 the engine: it rejects unknown variables, bounds every number to what history
 can support, pads or trims phases to the horizon, and reports every change so
-the UI can show exactly what was adjusted.
+the UI can show exactly what was adjusted. A phase's `regime` key (macro
+regimes, regime_views.py) becomes plain views on the ex-post rg_ columns.
 """
 from __future__ import annotations
 
@@ -19,8 +20,10 @@ from .. import config
 from ..engine.pooling import BLOCK, start_prior, start_values, view_support
 from ..engine.sampler import phase_block
 from ..engine.simulate import DEFAULT_REVERSION
+from . import regime_views
 
-ALLOWED_PREFIXES = ("s_", "f_", "e_")
+ALLOWED_PREFIXES = ("s_", "f_", "e_", "rg_")
+REALTIME_PREFIX = "rg_rt_"        # real-time regime labels: nowcast and forecast test only, never a view
 # States defined as a difference of two others: a phase that sets all three
 # says the same thing twice (and EP cannot meet a contradictory triple).
 IDENTITIES = {"s_real_ff": ("s_ff", "s_cpi_yoy"), "s_term_spread": ("s_y10", "s_ff")}
@@ -64,6 +67,16 @@ VIEW_SCHEMA = {
     "required": ["var", "mean", "mean_annual", "shift_sd", "min", "max", "vol_mult", "why"],
     "additionalProperties": False,
 }
+REGIME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "string", "enum": list(regime_views.IDS)},
+        "share": {"type": "number"},
+        "why": {"type": "string"},
+    },
+    "required": ["id", "share", "why"],
+    "additionalProperties": False,
+}
 SPEC_JSON_SCHEMA = {
     "type": "object",
     "properties": {
@@ -86,6 +99,7 @@ SPEC_JSON_SCHEMA = {
             "properties": {
                 "name": {"type": "string"},
                 "months": {"type": "integer"},
+                "regime": {"type": "array", "items": REGIME_SCHEMA},
                 "views": {"type": "array", "items": VIEW_SCHEMA},
                 "overrides": {"type": "object", "properties": {
                     "factor_drift": {"type": "array", "items": {"type": "object", "properties": {
@@ -100,7 +114,7 @@ SPEC_JSON_SCHEMA = {
                     "additionalProperties": False},
                 "confidence": {"type": "number"},
             },
-            "required": ["name", "months", "views", "overrides", "confidence"],
+            "required": ["name", "months", "regime", "views", "overrides", "confidence"],
             "additionalProperties": False}},
     },
     "required": ["id", "name", "summary", "narrative", "tags", "prior_prob", "analogs",
@@ -231,11 +245,19 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
         warnings.append(f"阶段总月数 {total} 超过 {horizon}，已从后往前截短")
     phases = []
     for k, ph, months in entries:
+        # the regime key: plain views on the ex-post rg_ columns, placed first (not counted in the view cap)
+        reg, reg_warnings, reg_clipped = regime_views.normalize_regime(ph.get("regime"), k + 1)
+        warnings += reg_warnings
+        clipped += reg_clipped
+        raw_views = regime_views.expand_regime(reg, ph.get("views")) or []
         views = []
-        for v in (ph.get("views") or [])[:MAX_VIEWS_PER_PHASE]:
+        for v in raw_views[:MAX_VIEWS_PER_PHASE + len(reg)]:
             if not isinstance(v, dict):
                 continue
             var = str(v.get("var", ""))
+            if var.startswith(REALTIME_PREFIX):
+                warnings.append(regime_views.realtime_view_text(k + 1, var))
+                continue
             if not var.startswith(ALLOWED_PREFIXES) or var not in columns:
                 warnings.append(f"阶段 {k + 1}：变量 {var} 不在引擎支持的列表中，已忽略")
                 continue
@@ -319,8 +341,15 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
                 clean_ov[key] = used
         conf = _num(ph.get("confidence"))
         conf = _clip(conf, *CONFIDENCE_BOUNDS) if conf is not None else 1.0
-        phases.append({"name": str(ph.get("name") or f"阶段{k + 1}")[:30], "months": months,
-                       "views": views, "overrides": clean_ov, "confidence": conf})
+        clean_ph = {"name": str(ph.get("name") or f"阶段{k + 1}")[:30], "months": months}
+        kept = {v["var"] for v in views}
+        reg = {r: s for r, s in reg.items() if f"rg_{r}" in kept}
+        if reg:                                       # what was asked, so the detail shows it
+            clean_ph["regime"] = reg
+        clean_ph.update({"views": views, "overrides": clean_ov, "confidence": conf})
+        warnings += regime_views.static_checks(clean_ph, k + 1, frame,
+                                               regime_views.phase_requests(clean_ph, k + 1, clipped))
+        phases.append(clean_ph)
     if len(phases_in) > MAX_PHASES:
         warnings.append(f"阶段数超过 {MAX_PHASES}，多余阶段已忽略")
 

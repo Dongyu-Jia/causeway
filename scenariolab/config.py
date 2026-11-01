@@ -205,3 +205,49 @@ VALUATION = {
     "cma": "historical",                  # drift the pull is added to ("historical" | "valuation_state")
     "income": "constant",                 # equity income: "constant" anchor yield or "path" (1 / P/D path)
 }
+
+# Macro regimes (engine/regimes.py): every month of history and of every simulated path gets one label from
+# CPI y/y, the unemployment rate and the industrial production level (the three series the simulator also
+# produces). The labels describe; they feed no model component (transmission, forecast and residual mode
+# each failed their own walk-forward with regime terms). A parameter changes only here, and every change
+# re-runs the NBER validation, the out-of-sample grid and the revision study (build step `regimes`).
+# high_inflation_pct equals factor_model.HIGH_INFLATION (a test checks it); the labels read the same month's
+# CPI y/y, the transmission's inflation state the previous month's.
+REGIMES = {
+    "params": {
+        "ip_swing_pct": 3.0,              # IP zigzag: % fall from the peak / rise from the trough that confirms it
+        "u_rise_pp": 0.5,                 # unemployment confirmation: pp above its low in the down-leg
+        "u_smooth_months": 3,             # trailing mean of the unemployment rate
+        "severe_ip_decline_pct": 15.0,    # leg decline (peak to lowest level) of a deep contraction
+        "high_inflation_pct": 4.0,        # CPI y/y strictly above it: high inflation (month; episode average)
+        "cpi_neg_pct": 0.0,               # CPI y/y strictly below it: prices falling
+        "core_low_pct": 1.0,              # core CPI y/y strictly below it (history only)
+    },
+    # display order = the integer code the label arrays carry (-1 = unknown); first match wins in the
+    # order stagflation > depression > recession > deflation > inflation > expansion. Ids keep the words
+    # the user asked about; `term` is that word where the display name differs from it.
+    "labels": [
+        {"id": "expansion", "name": "扩张", "term": None, "color": "#a5d8ff",
+         "desc": "增长未收缩，当月 CPI 同比在 0–4% 之间"},
+        {"id": "inflation", "name": "通胀", "term": None, "color": "#fab005",
+         "desc": "增长未收缩，当月 CPI 同比高于 4%（包括过热的年份，也包括衰退之后通胀从高位回落的年份；看通胀趋势区分上行和回落）"},
+        {"id": "deflation", "name": "物价负增长", "term": "通缩", "color": "#15aabf",
+         "desc": "增长未收缩，当月 CPI 同比低于 0"},
+        {"id": "recession", "name": "衰退", "term": None, "color": "#9775fa",
+         "desc": "收缩，这段收缩期间 CPI 同比平均不高于 4%，本轮工业产出从高点的跌幅不到 15%"},
+        {"id": "depression", "name": "深度衰退", "term": "萧条", "color": "#343a40",
+         "desc": "深度收缩：这段收缩期间 CPI 同比平均不高于 4%，本轮工业产出从高点累计下跌 15% 以上"},
+        {"id": "stagflation", "name": "滞胀", "term": None, "color": "#b35c00",
+         "desc": "收缩，且这段收缩期间 CPI 同比平均高于 4%（不论收缩深浅）"},
+    ],
+    "first_month": "1948-01",             # labels exist from here (unemployment starts 1948-01)
+    "nber_window": ("1948-06", "2020-12"),  # NBER dates only score the rule; they never enter a label
+    "min_episodes": 4,                    # a statistic resting on fewer episodes is marked thin (†)
+    "bootstrap": {"replicates": 4000, "seed": 20261101, "ci": (5.0, 95.0)},   # whole-episode bootstrap
+    "hac_lags": {"monthly": 6, "forward": 12},     # Newey-West lags: monthly regressions / 12-month windows
+    "forward_lag_months": 1,              # month t's label is known during t+1: forward windows start at t+2
+    "placebo_min_shift": 24,              # circular shifts of the real-time labels by at least this many months
+    "reference": {"n_paths": 2000, "seed": 4242},  # the engine's unconditional reference run (runner)
+    "longest_contraction_months": 18,     # the longest contraction since 1948 (1973-75, 2008-09)
+    "thin_runs": 3,                       # a regime with fewer runs since 1973 gets the thin-history warning
+}
