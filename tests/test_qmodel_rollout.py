@@ -577,7 +577,8 @@ def test_from_qtable_reads_the_appendix_b_example(stack):
     assert r["H"] == 4 and st[("x_oil_cause", 1)].value == 1.0 and st[("d_oil", 1)].sd == 8
     assert st[("d_ff", 2)].value == 0.5 and st[("d_ff", 2)].sd is None
     assert st[("u_ff", 3)].value < 0 and st[("d_gz", 1)].value > 0 and st[("d_gz", 3)].value == 0.0
-    assert sum(n.get("code") == "W-FC" for n in r["notes"]) == 2
+    # the W-FC warning is one note listing the quarters whose credit stance the model completes (P6: qtable.py)
+    assert [n["quarters"] for n in r["notes"] if n.get("code") == "W-FC"] == [[2, 4]]
     assert any(s.var == "d_unrate" and s.lo == -0.2 and s.hi == 0.3 for s in r["statements"])
     with pytest.raises(R.RolloutError):
         R.from_qtable({**QT, "c_q": {"valuation": [{"quarters": [1], "mode": "hold"}]}}, stack, "test")
@@ -620,3 +621,21 @@ def test_api_card_and_run(stack):
             break
         time.sleep(0.05)
     assert s["status"] == "done" and len(s["result"]["quarters"]) == 1
+
+
+@needs_qpanel
+def test_the_api_bands_leave_out_the_paths_the_model_flags_as_divergent(stack):
+    """One rule on every page: the fans and tables of the scenario detail and the lab use the paths the forecast tab's
+    mixture uses (tail_flags removed), and say how many were removed; clip notes name the field in Chinese."""
+    roll = R.run_path(stack, [F.Statement("d_gz", (1,), 2.5)], [], H=8, n_paths=400, seed=3)
+    keep, bands = R.band_mask(roll)
+    tails = R.tail_flags(roll.fx.levels["gz"], roll.fx.levels["unrate"],
+                         roll.ax.total[:, :, R.IA["us_equity"]]).any(axis=1)
+    assert (keep == ~tails).all() and bands["n_used"] == int((~tails).sum())
+    out = R.summary(roll)
+    cum = np.cumsum(roll.ax.total[:, :, R.IA["us_equity"]], axis=1)[keep]
+    assert np.allclose(out["assets"]["us_equity"]["cum_total"]["p50"], np.round(np.nanpercentile(cum, 50, axis=0), 6))
+    assert out["info"]["bands"]["excludes_tail"] == bool(tails.any())
+    for n in out["notes"]:
+        f = n.get("field") or n.get("var")
+        assert not (f and str(n.get("text", "")).startswith(f"{f}：")), n

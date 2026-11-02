@@ -26,7 +26,7 @@ phases:
     views:
       - {var: s_cpi_yoy, mean: 3.4, why: "油价高位但不再上涨，商品通胀缓慢回落；核心 2.6%"}
       - {var: s_unrate, mean: 4.3, why: "劳动力市场温和降温，接近今天的 4.2%"}
-      - {var: s_spread, mean: 1.7, why: "信用利差仍偏紧（今天 1.5）"}
+      - {var: s_spread, mean: 1.7, why: "信用利差从今天的 1.5 小幅走阔到 1.7（仍低于历史中位数）"}
       - {var: s_ip_yoy, mean: 1.5, why: "最近一年工业产出同比约 1.4%"}
       - {var: f_oil, mean_annual: -0.10, why: "战争溢价回吐：挑选油价每年回落约 10% 的月份"}
     confidence: 1.0

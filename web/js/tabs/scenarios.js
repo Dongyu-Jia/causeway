@@ -1,4 +1,5 @@
-// Future scenarios: the built-in library ranked by posterior probability, a cross-scenario
+// Future scenarios: the built-in library ranked by the hand-set probability (the default basis, SIM_DESIGN §7.5 /
+// U-9: the tilt by today's state is shown beside it, off by default), a cross-scenario
 // comparison of 15-year median returns, and the full detail of the selected scenario
 // (shared renderer in _scenario_detail.js), plus each scenario's year-1 macro regime mix from the
 // index. Deep link: #scenarios?<id> (built-in or custom).
@@ -6,6 +7,7 @@ import {
   renderScenarioDetail, disposeCharts, ensureStyle, ensureDetailStyle, shortName, errorText, isNum, pct, pp, esc,
   REGIME_LABELS, regimeBars,
 } from './_scenario_detail.js';
+import { loadSwitch, switchNotice, quarterlyDefault } from './_switch.js';
 
 const CSS = `
 .scenarios-list { grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); }
@@ -85,19 +87,30 @@ export async function render(root, ctx) {
   ensureStyle('scenarios', CSS);
 
   const timeout = (ms) => new Promise(resolve => setTimeout(() => resolve(null), ms));
-  const [index, custom] = await Promise.all([
+  const [index, custom, sw] = await Promise.all([
     api.get('scenarios'),                                          // 404 -> app.js shows the build hint
     Promise.race([api.get('scenarios/custom').catch(() => null), timeout(1500)]),
+    Promise.race([loadSwitch(), timeout(1500)]),                   // the switch gate T-S: the default engine (P9)
   ]);
   if (!alive()) return null;             // the user moved on while the index loaded
-  const list = (index.scenarios || []).slice().sort((a, b) => (b.prob ?? 0) - (a.prob ?? 0));
+  // the default basis is the hand-set probability (prior_prob); the tilt by today's state (prob) is shown beside it
+  const pDef = (s) => (isNum(s.prior_prob) ? s.prior_prob : 0);
+  const list = (index.scenarios || []).slice().sort((a, b) => pDef(b) - pDef(a) || (b.prob ?? 0) - (a.prob ?? 0));
   const customs = (custom?.scenarios || []).filter(s => s && s.id);
   const builtinIds = new Set(list.map(s => s.id));
 
   root.append(h('p', { class: 'lead' },
     `从今天（${index.start || '—'}）出发的 ${list.length} 个情景。每个情景是一组分阶段的“视图”：它只改变每个真实历史月份被抽中的概率，`,
     '再按今天的利率、估值和股息率把抽到的月份拼成 15 年路径。K 线、扇形图和年化回报全部由引擎计算；',
-    '概率是透明的启发式（主观先验 × 与今天状态的吻合度），不是预测。'));
+    '概率是第一层的判断（预测只在这里）：默认用手设的主观先验；按今天状态的倾斜（主观先验 × 与今天状态的吻合度）默认关闭，只作对照。'));
+  root.append(switchNotice(sw, { where: '13 个内置情景' }));
+  // once T-S has passed, the list's numbers are the quarterly set's (the 13 built-ins rebuilt on the quarterly stack)
+  const qHead = {};
+  if (quarterlyDefault(sw)) {
+    const rep = await Promise.race([api.get('portfolio/sets').catch(() => null), timeout(1500)]);
+    for (const x of (rep?.sets || []).find(e => e.id === 'quarterly')?.scenarios || []) if (x.headline) qHead[x.id] = x.headline;
+    if (!alive()) return null;
+  }
   if (!list.length) {
     root.append(ui.notice('情景库是空的。在项目根目录运行 python -m scenariolab.build。', 'info'));
     return;
@@ -109,13 +122,14 @@ export async function render(root, ctx) {
   const items = new Map();          // id -> list card (built-in and custom)
   const keyOpen = (id) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(id, { scroll: true }); } };
   const builtinItems = list.map((s, i) => {
-    const hl = s.headline || {};
+    const qh = qHead[s.id] || null;
+    const hl = qh || s.headline || {};
     const el = h('div', { class: 'scen-item', tabindex: '0', role: 'button', title: s.summary || s.name,
       onclick: () => select(s.id, { scroll: true }), onkeydown: keyOpen(s.id) },
       h('div', { class: 'scenarios-item-top' }, h('span', { class: 'scenarios-rank' }, `#${i + 1}`), h('span', { class: 't' }, s.name)),
-      h('div', { class: 'scenarios-probrow' }, '后验', h('div', { class: 'bar-inline' }, h('span', { style: { width: width(s.prob) } })), h('b', {}, pct(s.prob, 1))),
-      h('div', { class: 'scenarios-probrow' }, '先验', h('div', { class: 'bar-inline' }, h('span', { class: 'prior', style: { width: width(s.prior_prob) } })), h('b', {}, pct(s.prior_prob, 1))),
-      h('div', { class: 'scenarios-line' }, '美股年化中位数：名义 ', h('b', { class: ui.signCls(hl.us_equity_cagr_p50) }, pct(hl.us_equity_cagr_p50, 1)),
+      h('div', { class: 'scenarios-probrow', title: '手设的主观先验（默认口径）' }, '手设', h('div', { class: 'bar-inline' }, h('span', { style: { width: width(s.prior_prob) } })), h('b', {}, pct(s.prior_prob, 1))),
+      h('div', { class: 'scenarios-probrow', title: '按今天状态倾斜后的概率（对照，默认不用）' }, '倾斜', h('div', { class: 'bar-inline' }, h('span', { class: 'prior', style: { width: width(s.prob) } })), h('b', {}, pct(s.prob, 1))),
+      h('div', { class: 'scenarios-line' }, qh ? '美股年化中位数（季度模型）：名义 ' : '美股年化中位数：名义 ', h('b', { class: ui.signCls(hl.us_equity_cagr_p50) }, pct(hl.us_equity_cagr_p50, 1)),
         ' · 实际 ', h('b', { class: ui.signCls(hl.us_equity_real_cagr_p50) }, pct(hl.us_equity_real_cagr_p50, 1))),
       h('div', { class: 'scenarios-line' }, `平均 CPI 同比 ${pp(hl.cpi_avg, 2)} · 期末利率 ${pp(hl.ff_end_p50, 2)}`),
       isNum(hl.pd_end_p50) ? h('div', { class: 'scenarios-line', title: '每条路径记录的 P/D（价格 ÷ 过去 12 个月股息）的中位数；只记录，不做估值回归' },
@@ -134,13 +148,14 @@ export async function render(root, ctx) {
     return el;
   });
 
-  root.append(h('div', { class: 'section-title' }, '情景一览（按后验概率排序）'));
-  root.append(card({ title: '情景库', sub: '蓝条是后验概率、灰条是主观先验，长度按最大值缩放；点击卡片查看下方详情。' },
+  root.append(h('div', { class: 'section-title' }, '情景一览（按手设概率排序）'));
+  root.append(card({ title: '情景库', sub: '蓝条是手设的主观先验（默认口径，这一页的排序和加权都用它），灰条是按今天状态倾斜后的概率（对照）；长度按最大值缩放。点击卡片查看下方详情。' },
     h('div', { class: 'scen-list scenarios-list' }, builtinItems),
     customItems.length ? h('div', {}, h('div', { class: 'scenarios-groupname' }, `自定义情景（来自情景实验室，不参与概率排序）· ${customItems.length} 个`),
       h('div', { class: 'scen-list scenarios-list' }, customItems)) : null,
-    index.probability_method ? h('details', { class: 'scenarios-more' }, h('summary', {}, '概率是怎么算的'),
-      h('p', { class: 'muted', style: { margin: 0 } }, index.probability_method)) : null));
+    index.probability_method ? h('details', { class: 'scenarios-more' }, h('summary', {}, '倾斜后的概率是怎么算的'),
+      h('p', { class: 'muted', style: { margin: 0 } }, index.probability_method,
+        '。它只作对照：领先宏观状态还没有通过预注册的预测能力检验，所以默认用手设先验。')) : null));
 
   // ---- cross-scenario comparison: per-asset stats from the index (scenarios.json "assets"); an
   // index built before that field existed falls back to loading every detail in the background
@@ -152,7 +167,7 @@ export async function render(root, ctx) {
   const cmpTitle = h('span', {}, '各情景 × 资产：15 年实际年化回报中位数');
   root.append(h('div', { class: 'section-title' }, '跨情景对比'));
   root.append(card({ title: cmpTitle, cls: 'scenarios-card',
-    sub: '每格是一个情景下一类资产的中位数结果，颜色按 K 线配色（涨色为正）：同一列横向比较，就能看出哪类资产依赖哪种宏观传导；底部三行是按后验概率加权、情景间最差和最好。',
+    sub: '每格是一个情景下一类资产的中位数结果，颜色按 K 线配色（涨色为正）：同一列横向比较，就能看出哪类资产依赖哪种宏观传导；底部三行是按手设概率加权、情景间最差和最好。',
     actions: ui.seg(MODES.map(m => ({ value: m.value, label: m.label })), mode, (v) => { mode = v; drawCompare(); }) },
   h('div', { class: 'scenarios-scroll' }, cmpBox), cmpNote));
   cmpBox.append(ui.loading('正在载入全部情景的结果…'));
@@ -164,21 +179,27 @@ export async function render(root, ctx) {
   const rgNote = h('p', { class: 'scenarios-note' });
   const nRef = rgIdx.reference?.n_paths;
   root.append(h('div', { style: { height: '16px' } }), card({ title: '各情景第 1 年的宏观体制', cls: 'scenarios-card',
-    sub: `每一行是一个情景第 1 年模拟路径的体制构成（事后标签，和历史月份用同一套规则）；“按概率加权”按后验概率平均，`
+    sub: `每一行是一个情景第 1 年模拟路径的体制构成（事后标签，和历史月份用同一套规则）；“按概率加权”按手设概率平均，`
       + `“引擎无条件”是不加任何视图的引擎参考运行${isNum(nRef) ? `（${nRef} 条路径）` : ''}。悬停查看第 1 年出现收缩的路径占比，点击条形查看该情景。`,
     actions: h('a', { href: '#regimes' }, '宏观体制 →') },
   rgList.length ? [rgBox, rgNote]
     : ui.notice('情景库里没有宏观体制读数（由旧版本生成）：运行 python -m scenariolab.build --only scenarios regimes 后可见。', 'info')));
   if (rgList.length) {
-    const rows = rgList.map(s => ({ label: `${shortName(s.name)}  ${pct(s.prob, 1)}`, mix: s.regimes.year1, p: s.regimes.p_contraction_year1, s }));
-    if (rgIdx.year1_weighted) rows.push({ label: '按概率加权', mix: rgIdx.year1_weighted, p: rgIdx.p_contraction_year1_weighted });
+    const rows = rgList.map(s => ({ label: `${shortName(s.name)}  ${pct(pDef(s), 1)}`, mix: s.regimes.year1, p: s.regimes.p_contraction_year1, s }));
+    // the weighted row with the hand-set probabilities (the index's own weighted row uses the tilted ones)
+    const wTot = rgList.reduce((t, s) => t + pDef(s), 0);
+    const wMix = {};
+    if (wTot > 0) for (const s of rgList) for (const [k, v] of Object.entries(s.regimes.year1 || {})) if (isNum(v)) wMix[k] = (wMix[k] || 0) + (pDef(s) / wTot) * v;
+    const wP = wTot > 0 && rgList.every(s => isNum(s.regimes.p_contraction_year1))
+      ? rgList.reduce((t, s) => t + (pDef(s) / wTot) * s.regimes.p_contraction_year1, 0) : null;
+    if (Object.keys(wMix).length) rows.push({ label: '按概率加权', mix: wMix, p: wP });
     if (rgIdx.reference?.year1) rows.push({ label: '引擎无条件', mix: rgIdx.reference.year1, p: rgIdx.reference.p_contraction_year1 });
     const rgChart = regimeBars(rgBox, { rows: rows.map(r => r.label), mixes: rows.map(r => r.mix), labels: REGIME_LABELS, rowH: 26,
-      extra: (i) => [rows[i]?.s ? `后验概率 ${pct(rows[i].s.prob, 1)}` : '',
+      extra: (i) => [rows[i]?.s ? `手设概率 ${pct(pDef(rows[i].s), 1)}（倾斜后 ${pct(rows[i].s.prob, 1)}）` : '',
         isNum(rows[i]?.p) ? `第 1 年出现收缩的路径 <b>${pct(rows[i].p, 1)}</b>` : '', rows[i]?.s ? '点击查看这个情景' : ''] });
     rgChart.on('click', (p) => { const s = rows[p.dataIndex]?.s; if (s) select(s.id, { scroll: true }); });
     const hist = rgIdx.history?.p_contraction_12m_window;
-    rgNote.textContent = `第 1 年出现收缩的路径：按概率加权 ${pct(rgIdx.p_contraction_year1_weighted, 1)}，引擎无条件 ${pct(rgIdx.reference?.p_contraction_year1, 1)}`
+    rgNote.textContent = `第 1 年出现收缩的路径：按手设概率加权 ${pct(wP, 1)}，引擎无条件 ${pct(rgIdx.reference?.p_contraction_year1, 1)}`
       + `${isNum(hist) ? `，历史上任意 12 个月窗口里含收缩月份的比例 ${pct(hist, 1)}` : ''}。`
       + '引擎无条件抽样的 CPI 同比本身偏高，模拟路径里“通胀”的占比因此系统性偏大，比较时请对照“引擎无条件”这一行。';
   }
@@ -188,14 +209,14 @@ export async function render(root, ctx) {
   const pdList = list.filter(s => isNum(s.headline?.pd_end_p50));
   if (pdList.length) {
     const cma = index.cma || ui.META.raw?.cma || {};
-    const den = pdList.reduce((t, s) => t + (s.prob ?? 0), 0);
-    const pw = den > 0 ? pdList.reduce((t, s) => t + (s.prob ?? 0) * s.headline.pd_end_p50, 0) / den : null;
+    const den = pdList.reduce((t, s) => t + pDef(s), 0);
+    const pw = den > 0 ? pdList.reduce((t, s) => t + pDef(s) * s.headline.pd_end_p50, 0) / den : null;
     const n0 = (x) => (isNum(x) ? x.toFixed(0) : '—');
     const pdBox = h('div', { class: 'chart' });
     pdBox.style.height = `${Math.max(300, pdList.length * 26 + 70)}px`;
     root.append(h('div', { style: { height: '16px' } }), card({ title: '各情景 15 年后的美股 P/D（中位数）', cls: 'scenarios-card',
       sub: `每条路径记录的 P/D（价格 ÷ 过去 12 个月股息）：κ=0，只记录、不做估值回归，不影响上面的回报。竖线是今天（${n0(cma.pd_now)} 倍）和 1973 年以来的中位数（${n0(cma.pd_median)} 倍）；`
-        + `按后验概率加权约 ${n0(pw)} 倍。点击条形查看该情景。`,
+        + `按手设概率加权约 ${n0(pw)} 倍。点击条形查看该情景。`,
       actions: h('a', { href: '#valuation?scenarios' }, '估值与盈利 →') }, pdBox));
     const pdChart = charts.bars(pdBox, { x: pdList.map(s => shortName(s.name)), horizontal: true, legend: false, fmt: (v) => Number(v).toFixed(0),
       series: [{ name: '15 年后 P/D 中位数', data: pdList.map(s => +s.headline.pd_end_p50.toFixed(2)), color: '#3b5bdb' }],
@@ -203,7 +224,7 @@ export async function render(root, ctx) {
         isNum(cma.pd_median) ? { xAxis: cma.pd_median, name: `中位数 ${n0(cma.pd_median)}` } : null].filter(Boolean) });
     pdChart.setOption({ tooltip: { formatter: (ps) => {
       const s = pdList[(Array.isArray(ps) ? ps[0] : ps)?.dataIndex];
-      return s ? `<b>${esc(s.name)}</b><br/>后验概率 ${pct(s.prob, 1)}<br/>15 年后 P/D 中位数 <b>${s.headline.pd_end_p50.toFixed(1)} 倍</b><br/>点击查看这个情景` : '';
+      return s ? `<b>${esc(s.name)}</b><br/>手设概率 ${pct(pDef(s), 1)}<br/>15 年后 P/D 中位数 <b>${s.headline.pd_end_p50.toFixed(1)} 倍</b><br/>点击查看这个情景` : '';
     } } });
     pdChart.on('click', (p) => { const s = pdList[p.dataIndex]; if (s) select(s.id, { scroll: true }); });
   }
@@ -234,7 +255,7 @@ export async function render(root, ctx) {
       loaded.forEach((s, r) => {
         const v = values[r][c];
         if (!isNum(v)) return;
-        const p = s.prob ?? 0;
+        const p = pDef(s);
         num += p * v; den += p;
         if (!lo || v < lo.v) lo = { v, s };
         if (!hi || v > hi.v) hi = { v, s };
@@ -243,7 +264,7 @@ export async function render(root, ctx) {
       worst.push(lo); best.push(hi);
     });
     const rows = [
-      ...loaded.map(s => ({ id: s.id, label: `${shortName(s.name)}  ${pct(s.prob, 1)}`, s })),
+      ...loaded.map(s => ({ id: s.id, label: `${shortName(s.name)}  ${pct(pDef(s), 1)}`, s })),
       { label: '' },
       { label: '概率加权', summary: true }, { label: '情景间最差', summary: true }, { label: '情景间最好', summary: true },
     ];
@@ -255,15 +276,15 @@ export async function render(root, ctx) {
       tip: (r, c, v) => {
         const asset = esc(ui.assetName(assetIds[c]));
         const shown = isNum(v) ? m.fmt(v) : '—';
-        if (r < n) return `<b>${esc(loaded[r].name)}</b><br/>后验概率 ${pct(loaded[r].prob, 1)}<br/>${asset}：<b>${shown}</b><br/>点击查看这个情景`;
-        if (r === n + 1) return `<b>概率加权</b>：各情景中位数按后验概率的加权平均<br/>${asset}：<b>${shown}</b>`;
+        if (r < n) return `<b>${esc(loaded[r].name)}</b><br/>手设概率 ${pct(pDef(loaded[r]), 1)}<br/>${asset}：<b>${shown}</b><br/>点击查看这个情景`;
+        if (r === n + 1) return `<b>概率加权</b>：各情景中位数按手设概率的加权平均<br/>${asset}：<b>${shown}</b>`;
         const pick = r === n + 2 ? worst[c] : r === n + 3 ? best[c] : null;
         return pick ? `<b>${r === n + 2 ? '情景间最差' : '情景间最好'}</b><br/>${asset}：<b>${shown}</b>（${esc(pick.s.name)}）` : '';
       },
     });
     const missing = list.length - loaded.length;
     const tiny = ((cmpBox.clientWidth || 900) - 190) / Math.max(assetIds.length, 1) < 34;
-    cmpNote.textContent = `${loaded.length} 个情景，概率合计 ${pct(loaded.reduce((t, s) => t + (s.prob ?? 0), 0), 0)}。` +
+    cmpNote.textContent = `${loaded.length} 个情景，手设概率合计 ${pct(loaded.reduce((t, s) => t + pDef(s), 0), 0)}。` +
       (tiny ? '格子较窄，数值省略了 % 号（单位均为 %）。' : '') +
       '注意“概率加权”是各情景中位数的加权平均，不是混合分布的中位数；完整的组合层面加权（含分位数、夏普、回撤）见“组合评估”页。' +
       (missing ? ` 有 ${missing} 个情景的详情没有载入，未计入。` : '');
@@ -272,7 +293,7 @@ export async function render(root, ctx) {
   // ---- detail of the selected scenario, with a sticky switcher
   const anchor = h('div', { class: 'section-title scenarios-anchor' }, '情景详情');
   const picker = h('select', { 'aria-label': '选择情景', onchange: (e) => select(e.target.value) },
-    h('optgroup', { label: '内置情景（按后验概率）' }, list.map((s, i) => h('option', { value: s.id }, `#${i + 1} ${s.name}（${pct(s.prob, 1)}）`))),
+    h('optgroup', { label: '内置情景（按手设概率）' }, list.map((s, i) => h('option', { value: s.id }, `#${i + 1} ${s.name}（${pct(pDef(s), 1)}）`))),
     customs.length ? h('optgroup', { label: '自定义情景' }, customs.map(s => h('option', { value: s.id }, s.name || s.id))) : null);
   const order = [...list.map(s => s.id), ...customs.map(s => s.id)];
   const step = (k) => { const i = order.indexOf(current); select(order[(i + k + order.length) % order.length]); };

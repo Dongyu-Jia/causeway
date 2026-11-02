@@ -1,0 +1,101 @@
+{
+ "corr_dgz_useq_1973Q1_2026Q3": [
+  -0.557,
+  214
+ ],
+ "corr_dspread_useq_1973Q1_2026Q3": [
+  -0.401,
+  215
+ ],
+ "corr_dy10_useq_1973Q1_2026Q3": [
+  -0.017,
+  215
+ ],
+ "corr_useq_tsy_1973Q1_2026Q3": [
+  -0.043,
+  215
+ ],
+ "corr_dgz_useq_1973Q1_2019Q4": [
+  -0.505,
+  187
+ ],
+ "corr_dspread_useq_1973Q1_2019Q4": [
+  -0.332,
+  188
+ ],
+ "corr_dy10_useq_1973Q1_2019Q4": [
+  -0.021,
+  188
+ ],
+ "corr_useq_tsy_1973Q1_2019Q4": [
+  -0.044,
+  188
+ ],
+ "corr_dgz_useq_1985Q1_2026Q3": [
+  -0.582,
+  167
+ ],
+ "corr_dspread_useq_1985Q1_2026Q3": [
+  -0.599,
+  167
+ ],
+ "corr_dy10_useq_1985Q1_2026Q3": [
+  0.206,
+  167
+ ],
+ "corr_useq_tsy_1985Q1_2026Q3": [
+  -0.237,
+  167
+ ],
+ "corr_dgz_useq_2015Q1_2026Q3": [
+  -0.814,
+  47
+ ],
+ "corr_dspread_useq_2015Q1_2026Q3": [
+  -0.803,
+  47
+ ],
+ "corr_dy10_useq_2015Q1_2026Q3": [
+  0.061,
+  47
+ ],
+ "corr_useq_tsy_2015Q1_2026Q3": [
+  -0.077,
+  47
+ ],
+ "n_q_mult": 213,
+ "corr_price_dm_cape": 0.99,
+ "share_dm_cape": 1.011,
+ "corr_price_dm_pd": 0.964,
+ "share_dm_pd": 0.973,
+ "corr_price_y_mult": 0.647,
+ "share_y_mult": 0.979,
+ "legs_2007Q3_2009Q2": {
+  "y_us_equity": -0.468,
+  "dm_cape": -0.492,
+  "dm_pd": -0.46,
+  "y_mult": 1.005
+ },
+ "legs_2001Q1_2002Q4": {
+  "y_us_equity": -0.383,
+  "dm_cape": -0.469,
+  "dm_pd": -0.357,
+  "y_mult": 0.256
+ },
+ "legs_1995Q3_2000Q1": {
+  "y_us_equity": 1.008,
+  "dm_cape": 0.668,
+  "dm_pd": 0.789,
+  "y_mult": 0.621
+ },
+ "legs_2022Q1_2022Q3": {
+  "y_us_equity": -0.296,
+  "dm_cape": -0.408,
+  "dm_pd": -0.346,
+  "y_mult": -0.457
+ },
+ "unrate_min_since1973": 3.5,
+ "share_cpi_yoy_gt4": 0.33,
+ "sd_dgz": 0.447,
+ "ac1_dgz": 0.084
+}

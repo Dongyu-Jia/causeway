@@ -24,6 +24,9 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, jsonio
 from .env import load_dotenv
+from .evaluation import evalview as evaluation_api
+from .evaluation import switch as switch_api
+from .evaluation.narrative import api as narrative_api
 from .qmodel import api as qmodel_api
 
 load_dotenv()
@@ -33,7 +36,8 @@ CUSTOM = RESULTS / "custom"
 ID_RE = re.compile(r"^[a-z0-9_]{1,60}$")
 RESULT_NAMES = {"eras", "causality", "backtest", "diagnostics", "scenarios", "forecast", "ablation",
                 "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast", "factor_audit",
-                "instrument_meta", "agents_accounts_root", "agents_priors"}
+                "instrument_meta", "agents_accounts_root", "agents_priors",
+                "forecast_mix"}               # 未来一年：情景条件模拟 (analysis/scenario_mix.py, SIM_DESIGN §9)
 # Which command writes each result file (a 404 names it). Default-build steps can also be rebuilt alone.
 BUILD = "python -m scenariolab.build"
 BUILD_STEP = {"meta": "meta", "eras": "eras", "causality": "causality", "backtest": "backtest",
@@ -49,6 +53,8 @@ BUILD_HINT = {
     "agents_accounts_root": f"{BUILD}（或只补这一步：{BUILD} --only agents_accounts，智能体推演的起点账户：下载 FRED、"
                             "财政部、纽约联储、SEC 等免费数据并缓存，首次约需 1–2 分钟）",
     "agents_priors": f"{BUILD}（或只补这一步：{BUILD} --only agents_accounts，用本地数据重估行为者的历史先验）",
+    "forecast_mix": f"{BUILD} --only forecast（或只重算情景加权：python -m scenariolab.analysis.scenario_mix，"
+                    "约 1 分钟，要先有 scenarios 步骤的情景路径）",
 }
 NO_CACHE_PREFIXES = ("/js/", "/css/")
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}       # the Host a page served by this server sends
@@ -180,6 +186,13 @@ def meta():
     return _json(m)
 
 
+# 情景条件检验: GET /api/evaluation and /api/evaluation/records/{rid} (SIM_DESIGN §10.1; scenariolab/evaluation/
+# evalview.py), read-only. Included before /api/{name}, which would otherwise take /api/evaluation.
+app.include_router(evaluation_api.router)
+# 切换关 T-S: GET /api/evaluation/switch (evaluation/switch.py, SIM_DESIGN §4.6, P9): the default engine and why.
+app.include_router(switch_api.router)
+
+
 @app.get("/api/instruments")
 def instruments_catalog():
     """The ticker catalog (标的推演, the portfolio builders' ticker list): Chinese names, recipe cards, parameters
@@ -267,6 +280,14 @@ def portfolio_evaluate(body: dict = Body(...)):
 def withdrawal_evaluate(body: dict = Body(...)):
     from .portfolio import service
     return _evaluate(service.evaluate_withdrawal, body)
+
+
+@app.get("/api/portfolio/sets")
+def portfolio_sets():
+    """The scenario sets 组合评估 and 提取 can run on (monthly, quarterly, the agent tree's), which one is the default
+    and why (the switch gate T-S, SIM_DESIGN §11.3)."""
+    from .portfolio import service
+    return _json(service.sets_report())
 
 
 @app.post("/api/instruments/project")
@@ -1037,6 +1058,17 @@ def agents_cache():
 # 季度模型（试运行）: /api/q/card, /api/q/run, /api/q/run/{id} (SIM_DESIGN §3.9; scenariolab/qmodel/api.py).
 # Included before the static mount, which would otherwise answer every path.
 app.include_router(qmodel_api.router)
+
+# 叙事检验: /api/evaluation/narrative/* (SIM_DESIGN §8.5; scenariolab/evaluation/narrative/api.py). /run needs an
+# estimate id issued in the last 10 minutes and confirm: true; every POST answers this machine's own pages only.
+app.include_router(narrative_api.router)
+
+
+@app.get("/api/forecast/scenario_mix")
+def forecast_scenario_mix():
+    """未来一年：情景条件模拟 (SIM_DESIGN §3.9, §9): forecast_mix.json (also served as /api/forecast_mix)."""
+    return _json_file(RESULTS / "forecast_mix.json")
+
 
 app.mount("/", StaticFiles(directory=config.WEB_DIR, html=True), name="web")
 

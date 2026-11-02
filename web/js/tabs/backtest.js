@@ -1,6 +1,9 @@
 // Backtest: hold-out windows in which the factor model, the month library and the starting point see
 // only the training months. The engine's paths are set against what actually happened, and the gap is
 // split into a scenario, an engine and a transmission part.
+// SIM_DESIGN §10.5 / §10.1: the conditional fan comes in two arms (宏观 + 金融条件（含市场价格）, the old fan_cond, and
+// 只有宏观, fan_cond_macro); the long-run anchors are fitted to each train end (shown per window); the headline's
+// transmission tile is quarterly and annual (blockR2 on transmission.series), the monthly R² is a reference.
 const ORDER = ['us_equity', 'nasdaq', 'energy', 'industrials', 'staples', 'real_estate', 'gold',
   'healthcare', 'utilities', 'financials', 'crude_oil', 'treasury_10y', 'cash'];
 const KEY = new Set(ORDER.slice(0, 7));              // the classes the user follows most closely
@@ -427,8 +430,8 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   root.append(h('p', { class: 'lead' },
     '回测把历史切成训练期和测试期：因子模型、历史月份库和起点都只用训练期数据，然后在测试期比较四条线——',
     '实际走势；oracle（训练期因子模型直接喂入测试期真实的宏观因子，检验传导）；已知宏观的条件扇形图',
-    '（引擎在每 24 个月真实宏观均值的约束下抽样，检验引擎）；不知道宏观的无条件中位数（基准）。',
-    '它们之间的差距把误差拆成情景、引擎、传导三部分，告诉我们不准时该改哪一层。'));
+    '（引擎在每 24 个月真实宏观均值的约束下抽样，检验引擎；分两档：“宏观 + 金融条件（含市场价格）”和“只有宏观”）；不知道宏观的无条件中位数（基准）。',
+    '它们之间的差距把误差拆成情景、引擎、传导三部分，告诉我们不准时该改哪一层。长期锚（中性利率、期限利差、信用利差、失业率）按每个窗口训练期末可知的规则估计。'));
   const wait = ui.loading('读取回测结果…');
   root.append(wait);
   let bt;
@@ -472,13 +475,16 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   const S = bt.summary || {};
   const T = bt.transmission || {};
   root.append(h('div', { class: 'section-title' }, `总体结论（${builtins.length} 个回测窗口，风险资产平均）`));
+  const arm = bt.arm_names || { cond: '宏观 + 金融条件（含市场价格）', cond_macro: '只有宏观' };
+  const rq = blockR2(T, bt.risk_assets || [], 3), ry = blockR2(T, bt.risk_assets || [], 12);
   root.append(h('div', { class: 'grid cols-4' },
-    tile('已知宏观时的年化误差', pct(S.cagr_mae_cond_risk), `不知道宏观 ${pct(S.cagr_mae_uncond_risk)}（年化收益中位数与实际之差的绝对值）`,
+    tile(`已知${arm.cond}时的年化误差`, pct(S.cagr_mae_cond_risk), `${arm.cond_macro} ${pct(S.cagr_mae_cond_macro_risk)} · 不知道宏观 ${pct(S.cagr_mae_uncond_risk)}（年化收益中位数与实际之差的绝对值）`,
       isNum(S.cagr_mae_cond_risk) && isNum(S.cagr_mae_uncond_risk) && S.cagr_mae_cond_risk > S.cagr_mae_uncond_risk ? 'is-bad' : ''),
-    tile('90% 区间覆盖率', pct(S.coverage_cond_risk, 0), `不知道宏观 ${pct(S.coverage_uncond_risk, 0)}；校准良好时约 90%`),
-    tile('终值落在 5%/95% 尾部之外', pct(S.pit_tail_share_cond, 0), `${S.n_pit ?? '—'} 个资产终值；校准良好时约 10%`),
-    tile('因子解释的月度波动 R²', pct(T.r2_risk_avg, 0),
-      `样本外只有 ${pct(T.r2_oos_risk_avg, 0)}（同一批月份样本内 ${pct(T.r2_in_sample_oos_months_risk_avg, 0)}）`)));
+    tile('90% 区间覆盖率', pct(S.coverage_cond_risk, 0), `${arm.cond_macro} ${pct(S.coverage_cond_macro_risk, 0)} · 不知道宏观 ${pct(S.coverage_uncond_risk, 0)}；校准良好时约 90%`),
+    tile('终值落在 5%/95% 尾部之外', pct(S.pit_tail_share_cond, 0), `${arm.cond_macro} ${pct(S.pit_tail_share_cond_macro, 0)}；${S.n_pit ?? '—'} 个资产终值；校准良好时约 10%`),
+    tile('因子解释的季度 / 年度价格波动 R²', `${pct(rq.r2, 0)} / ${pct(ry.r2, 0)}`,
+      `样本外 ${pct(rq.oos, 0)} / ${pct(ry.oos, 0)}（${rq.n} 个季度、${ry.n} 个年度区块；以之前的平均为基准）。月度（参考）：样本内 ${pct(T.r2_risk_avg, 0)}，样本外 ${pct(T.r2_oos_risk_avg, 0)}`)));
+  root.append(h('div', { style: { height: '16px' } }), anchorsCard(h, card, ui, bt, builtins));
   if (S.text) root.append(h('div', { style: { height: '16px' } }), card({}, h('p', { class: 'backtest-text', style: { marginTop: 0 } }, S.text)));
 
   // ---- custom window: train up to any month, test the next 1-15 years (POST /api/backtest/run)
@@ -527,7 +533,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   root.append(h('div', { class: 'section-title' }, '自选时间段：拿一段新的历史来回测'),
     card({ title: '自选时间段', cls: 'backtest-custom',
       sub: `选训练期的截止月份和测试期长度：因子模型、历史月份库和起点只用截止月及以前的数据，然后在之后的月份上与实际比较，`
-        + '口径与 4 个内置窗口完全相同（已知宏观的条件扇形图把测试期真实的宏观均值当作视图）。结果作为「自选窗口」加入下面的窗口选择，'
+        + '口径与 4 个内置窗口完全相同（已知宏观的条件扇形图把测试期真实的宏观均值当作视图）。测试期 3–5 年（12–20 个季度）的结果每个十年只有 2–3 个独立窗口，只能当个案。结果作为「自选窗口」加入下面的窗口选择，'
         + `所有图表随之切换；地址栏的链接可以直接分享（#backtest?custom=2007-06:36）。训练期至少 15 年（最早 ${CB.earliest_train_end}），`
         + `测试期 ${minM}–${maxM} 个月，且不能超过数据的最后一个月${lastMonth ? `（${lastMonth}）` : ''}。` },
     h('div', { class: 'backtest-bar-row' }, h('div', { class: 'backtest-bar-label' }, '常用'), presetPills),
@@ -787,7 +793,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       assetKpis.replaceChildren(ui.notice('这个窗口没有该资产的数据。', 'info'));
       return;
     }
-    const fc = A.fan_cond || {}, fu = A.fan_uncond || {}, va = A.fan_cond_va || {};
+    const fc = A.fan_cond || {}, fu = A.fan_uncond || {}, va = A.fan_cond_va || {}, fm = A.fan_cond_macro || {};
     const shocks = shocksOf(win);
     const inTest = shockSpans(win.dates || A.dates, shocks);
     shockNote.textContent = inTest.length
@@ -795,10 +801,11 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       : '测试期内没有外生冲击（战争、疫情、恐怖袭击、石油禁运等）。';
     pathChart(charts, mainBox, {
       x: A.dates || win.dates, log: st.log, areas: phaseAreas(win), shocks,
-      band: Array.isArray(fc.p5) && Array.isArray(fc.p95) ? { label: '已知宏观', color: COL.cond, ...fc } : null,
+      band: Array.isArray(fc.p5) && Array.isArray(fc.p95) ? { label: '宏观 + 金融条件', color: COL.cond, ...fc } : null,
       lines: [
         { name: '实际', data: A.actual, color: COL.actual, width: 2.4, z: 4 },
-        { name: '已知宏观·中位数', data: fc.p50, color: COL.cond },
+        { name: '宏观 + 金融条件·中位数', data: fc.p50, color: COL.cond },
+        { name: '只有宏观·中位数', data: fm.p50, color: '#7048e8', dash: 'dashed' },
         { name: '不知道宏观·中位数', data: fu.p50, color: COL.uncond, dash: 'dashed' },
         { name: 'oracle（因子模型×真实宏观）', data: A.oracle, color: COL.oracle, dash: 'dashed' },
         { name: '估值调整 CMA·中位数', data: va.p50, color: COL.va, dash: 'dotted', hidden: true },
@@ -810,7 +817,8 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     const tail = (p) => (isNum(p) && (p < 0.05 || p > 0.95) ? 'is-bad' : '');
     assetKpis.replaceChildren(
       tile('实际走势·年化', pct(A.cagr_actual), `测试期 ${span(win.test, 4)} 名义累计总回报折年`, ui.signCls(A.cagr_actual)),
-      tile('已知宏观·中位数', pct(A.cagr_pred_cond_p50), `误差 ${pct(err(A.cagr_pred_cond_p50), 1, true)}/年`),
+      tile('宏观 + 金融条件·中位数', pct(A.cagr_pred_cond_p50), `误差 ${pct(err(A.cagr_pred_cond_p50), 1, true)}/年`),
+      tile('只有宏观·中位数', pct(A.cagr_pred_cond_macro_p50), `误差 ${pct(err(A.cagr_pred_cond_macro_p50), 1, true)}/年 · 覆盖 ${pct(A.coverage_cond_macro, 0)}`),
       tile('不知道宏观·中位数', pct(A.cagr_pred_uncond_p50), `误差 ${pct(err(A.cagr_pred_uncond_p50), 1, true)}/年`),
       tile('oracle', pct(A.cagr_oracle), structural.has(st.asset) ? '模拟器的结构规则（收益率、油价、利率）'
         : `传导误差 ${pct(err(A.cagr_oracle), 1, true)}/年 · 测试期月度 R² ${pct(A.r2_oracle, 0)}${isNum(A.r2_oracle) && A.r2_oracle < 0 ? '（< 0 = 不如历史均值）' : ''}`),
@@ -1127,4 +1135,68 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   renderWindow();
   sync();
   if (st.pending) runCustom({ req: st.pending, fromLink: true, select: true });     // a shared #backtest?custom=… link
+}
+
+// Quarterly / annual R² of the transmission (SIM_DESIGN §10.1: the headline tile becomes quarterly and annual): the
+// cumulative series of transmission.series (actual, fitted = in-sample, fitted_oos = expanding-window refits) cut into
+// non-overlapping blocks of `step` months that end on calendar quarter-ends (step 3) or year-ends (step 12). In-sample:
+// 1 - SSE / SST around the sample mean; out of sample: the blocks from the first refit on, against the mean of the
+// earlier blocks (what was known). Averaged over the risk assets, as the monthly r2_risk_avg.
+function blockR2(T, risk, step) {
+  const dates = T?.dates || [];
+  const endMonths = step === 12 ? ['12'] : ['03', '06', '09', '12'];
+  const start = dates.findIndex(d => endMonths.includes(String(d).slice(5, 7)));
+  const oosStart = T?.oos_start || null;
+  const ins = [], oos = [];
+  let nBlocks = 0;
+  for (const a of risk) {
+    const s = T?.series?.[a];
+    if (!s || !Array.isArray(s.actual)) continue;
+    const blocks = [];
+    for (let i = start; i >= 0 && i + step < dates.length; i += step) {
+      const a0 = s.actual[i], a1 = s.actual[i + step];
+      if (!(a0 > 0 && a1 > 0)) continue;
+      const f0 = s.fitted?.[i], f1 = s.fitted?.[i + step], o0 = s.fitted_oos?.[i], o1 = s.fitted_oos?.[i + step];
+      blocks.push({ end: dates[i + step], y: Math.log(a1 / a0), f: f0 > 0 && f1 > 0 ? Math.log(f1 / f0) : null,
+        o: o0 > 0 && o1 > 0 ? Math.log(o1 / o0) : null });
+    }
+    const fit = blocks.filter(b => isNum(b.f));
+    if (fit.length > 3) {
+      const m = fit.reduce((t, b) => t + b.y, 0) / fit.length;
+      const sst = fit.reduce((t, b) => t + (b.y - m) ** 2, 0), sse = fit.reduce((t, b) => t + (b.y - b.f) ** 2, 0);
+      if (sst > 0) ins.push(1 - sse / sst);
+      nBlocks = Math.max(nBlocks, fit.length);
+    }
+    let sse = 0, sst = 0, k = 0;
+    blocks.forEach((b, j) => {
+      if (!isNum(b.o) || (oosStart && b.end < oosStart) || j < 2) return;
+      const prev = blocks.slice(0, j).map(x => x.y);
+      const bench = prev.reduce((t, x) => t + x, 0) / prev.length;
+      sse += (b.y - b.o) ** 2; sst += (b.y - bench) ** 2; k += 1;
+    });
+    if (k > 3 && sst > 0) oos.push(1 - sse / sst);
+  }
+  const avg = (xs) => (xs.length ? xs.reduce((t, x) => t + x, 0) / xs.length : null);
+  return { r2: avg(ins), oos: avg(oos), n: nBlocks };
+}
+
+// The long-run anchors each window simulated with: fitted to its train end by the pre-registered rule (SIM_DESIGN
+// §5.5), next to today's fixed values that every window used before.
+function anchorsCard(h, card, ui, bt, wins) {
+  const rows = wins.filter(w => w.anchors).map(w => ({ name: w.name || w.id, ...w.anchors }));
+  if (!rows.length) return h('div');
+  const rules = bt.anchor_rules || {};
+  const f = (x) => (isNum(x) ? x.toFixed(2) : '—');
+  const d = rows[0].default || {};
+  return card({ title: '各窗口的长期锚：按训练期末可知的规则估计',
+    sub: `规则预先登记、不调参：中性实际利率 = ${rules.r_star || '—'}；期限利差 = ${rules.term || '—'}；信用利差 = ${rules.spread || '—'}；失业率 = ${rules.unrate || '—'}。`
+      + `以前每个窗口都用今天的判断值（${f(d.r_star)} / ${f(d.term_premium)} / ${f(d.spread_level)} / ${f(d.unrate_level)}），那是 2008 年以后才知道的水平；前瞻情景仍用判断值。` },
+  ui.table([
+    { key: 'name', label: '窗口' },
+    { key: 'end', label: '训练期末' },
+    { key: 'r_star', label: '中性实际利率', fmt: f },
+    { key: 'term', label: '期限利差', fmt: f },
+    { key: 'spread', label: '信用利差', fmt: f },
+    { key: 'unrate', label: '失业率', fmt: f },
+  ], rows, { stack: true }));
 }

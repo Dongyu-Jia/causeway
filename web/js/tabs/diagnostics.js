@@ -371,7 +371,8 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     '诊断回答四个问题：是不是要调参数、要不要训练小型神经网络、是不是少了一个因子、是不是缺一个传导机制。',
     '做法是走步验证（walk-forward：沿时间一段一段往前推，每一段都只用它之前的数据）：每一轮先诊断模型在训练期和验证期哪里不准，',
     '再把候选改动逐个加上去、只按验证期打分挑选，最后在从未参与挑选的测试期检验，能延续到测试期的改动才保留。',
-    '打分 = 用真实因子变化预测 10 类风险资产月度价格收益的样本外 R²，衡量的是传导质量，而不是预测宏观。'));
+    '打分 = 用真实的同月因子变化解释 10 类风险资产月度价格收益的样本外 R²：衡量的是月度传导的质量（作参考），不是预测宏观，也不是情景条件下的季度或年度检验。',
+    evalLink(h)));
   // optional files (the engine ablation, opt-in; the missing-factor audit): they never block the page and are not
   // requested when /api/meta's `results` lists the files and one is absent (the section shows how to build it)
   const absent = (name) => Array.isArray(meta?.results) && !meta.results.includes(name);
@@ -426,10 +427,10 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     ...its.map(it => ({ period: period(it.test), r2: it.test_result?.base_all_months?.score }))] : [];
   const nRobust = cands.filter(c => robust(c.id)).length;
   const sum = ra.summary || {};
-  root.append(h('div', { class: 'section-title' }, '结论：预测不准是为什么'));
-  root.append(h('div', { class: 'grid cols-4' },
+  root.append(h('div', { class: 'section-title' }, '结论：月度传导为什么解释不了更多'));
+  const monthlyTiles = h('div', { class: 'grid cols-4' },
     tile('全样本风险资产 R²', num(sum.r2_risk_avg, 3), `宏观因子能解释约 ${pct(sum.r2_risk_avg, 0)} 的月度价格波动（样本内）`),
-    ...baseOos.map(b => tile(`基准模型样本外 R²（${b.period}）`, r2s(b.r2), '只用之前的数据估计；> 0 才好过历史均值', isNum(b.r2) ? ui.goodCls(b.r2 >= 0) : ''))));
+    ...baseOos.map(b => tile(`基准模型样本外 R²（${b.period}）`, r2s(b.r2), '只用之前的数据估计；> 0 才好过历史均值', isNum(b.r2) ? ui.goodCls(b.r2 >= 0) : '')));
   const robustIds = cands.filter(c => robust(c.id)).map(c => c.id);
   const why = [
     `宏观因子在全样本只解释风险资产月度价格波动的 ${pct(sum.r2_risk_avg, 0)}；`,
@@ -438,7 +439,9 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     cands.length ? `试过的 ${cands.length} 个候选改动中，单独加在基准上、在每个样本外十年都提升 R² 超过 +${minGain} 的有 ${nRobust} 个${nRobust ? `（${robustIds.map(label).join('、')}）` : ''}。` : '',
     nRobust === 0 && sum.n_chow_reject >= 3 ? '所以不准的主因是传导关系随时代在变，而不是少了某个因子或缺了非线性；这靠改模型形式解决不了，更稳妥的是保留全样本系数，在情景里用熵池化把权重放到相似时代的月份上。' : '',
   ].join('');
-  root.append(h('div', { style: { height: '16px' } }), card({}, h('p', { class: 'diagnostics-why' }, why)));
+  root.append(card({ title: '月度传导（参考）',
+    sub: '月度 R²：同一个月的因子变化解释同一个月的资产价格收益，衡量传导质量，不是情景条件下的季度或年度检验；后者按 1 个季度和 4 个季度报告（12–20 个季度每个十年只有 2–3 个独立窗口，只能当个案）。' },
+  monthlyTiles, h('p', { class: 'diagnostics-why', style: { marginTop: '12px' } }, why)));
 
   const finChanges = fin.changes || [];
   // The last selection is scored on the months both it and the base can predict (structural shocks are blank in
@@ -1333,4 +1336,10 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
         .map((t, i) => h('th', { class: i === 1 ? 'wrap' : '' }, t)))),
       h('tbody', {}, body)));
   }
+}
+
+// The quarterly evaluation tab (情景条件检验, SIM_DESIGN §10.1) when the app has it: linked from the lead.
+function evalLink(h) {
+  const nav = typeof document !== 'undefined' ? document.querySelector('#nav a[href="#evaluation"]') : null;
+  return nav ? h('span', {}, ' 季度和年度的检验见', h('a', { href: '#evaluation' }, '“情景条件检验”'), '。') : null;
 }

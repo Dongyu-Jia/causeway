@@ -8,8 +8,8 @@ Infinity removed; Python literals (True/False/None) fixed; full-width quotes, co
 stand for JSON syntax, never inside a string (a blanket replacement corrupted 「失去席位」 in the PROMPTS prototype).
 
 validate(instance, schema) -> [SchemaError]: type (number means finite, bool is not a number), enum, const,
-required, properties, additionalProperties false, items, min/maxItems, min/maxLength, minimum/maximum, pattern,
-local $ref into $defs.
+required, properties, additionalProperties false, items, min/maxItems, min/maxLength, minimum/maximum,
+exclusiveMinimum/exclusiveMaximum (the QTable/1 schema's sd > 0), pattern, local $ref into $defs.
 
 transport_schema(schema): the strict schema without the keywords a prompt or --json-schema need not carry (bounds,
 lengths, counts, patterns, descriptions), const turned into a one-value enum (PROMPTS §3.1).
@@ -265,6 +265,10 @@ def validate(instance, schema: dict, path: str = "$", root: dict | None = None) 
             errs.append(SchemaError(path, "minimum", f"{path}：{instance} 小于 {schema['minimum']}"))
         if "maximum" in schema and instance > schema["maximum"]:
             errs.append(SchemaError(path, "maximum", f"{path}：{instance} 大于 {schema['maximum']}"))
+        if "exclusiveMinimum" in schema and instance <= schema["exclusiveMinimum"]:
+            errs.append(SchemaError(path, "minimum", f"{path}：{instance} 必须大于 {schema['exclusiveMinimum']}"))
+        if "exclusiveMaximum" in schema and instance >= schema["exclusiveMaximum"]:
+            errs.append(SchemaError(path, "maximum", f"{path}：{instance} 必须小于 {schema['exclusiveMaximum']}"))
     if isinstance(instance, dict):
         props = schema.get("properties", {})
         for k in schema.get("required", []):

@@ -2,11 +2,15 @@
 //   weightsEditor  13 asset weights: sliders + number inputs, presets, normalization, remembered in localStorage
 //   probEditor     per-scenario probability sliders, renormalized, reset to the model posterior
 //   customPicker   which saved custom scenarios to include
+//   setPicker      which scenario set the paths come from: the monthly engine's 13 built-ins, the quarterly stack's
+//                  (step_months = 3, 试运行 until the switch gate T-S passes) or an agent-tree export; the default and
+//                  the gate's reasons come from GET /api/portfolio/sets (portfolio/service.py sets_report)
 // plus a floating status pill, a debounced / coalescing request runner, a range chart and
 // formatting helpers. What the two tabs share for this page load lives in `shared`.
 import * as ui from '../ui.js';
 import * as charts from '../charts.js';
 import * as api from '../api.js';
+import { switchNotice } from './_switch.js';
 
 const STORE_KEY = 'msl-weights';
 const INK2 = '#4a5468', INK3 = '#7a8396', LINE = '#e3e6ec';
@@ -23,8 +27,9 @@ export const DEFAULT_CUSTOM_PROB = 0.05;     // portfolio/service.py: prior of a
 // weights: {asset: percent}; probs: {scenario id: relative weight in percent} or null (= model posterior);
 // probMode: which probability set the editor shows — 'posterior' (probs null), 'calibrated' (the set calibrated
 // to the one-year forecast, forecast.json live.scenario_probs_calibrated) or 'manual';
-// include: saved custom scenario ids to evaluate with the built-ins.
-export const shared = { weights: null, probs: null, probMode: 'posterior', include: [] };
+// include: saved custom scenario ids to evaluate with the built-ins; set: the scenario set id (null until the sets
+// list has loaded: the server's default, i.e. the switch's).
+export const shared = { weights: null, probs: null, probMode: 'posterior', include: [], set: null };
 
 // ---------------------------------------------------------------- formatting
 
@@ -162,10 +167,16 @@ export function parseWeightsParam(text) {
   return out;
 }
 
-// Rows of the probability editor: built-ins from scenarios.json, then the included custom ones.
-export function scenarioRows(scen, customs = []) {
-  const builtin = (scen?.scenarios || []).map(s => ({ id: s.id, name: s.name || s.id, prior: s.prior_prob,
-    likelihood: s.likelihood, post: s.prob, def: isNum(s.prob) ? s.prob : (isNum(s.prior_prob) ? s.prior_prob : 0) }));
+// Rows of the probability editor: built-ins from scenarios.json (or, for another scenario set, that set's own list
+// and default probabilities, with scenarios.json's posterior beside them), then the included custom ones.
+export function scenarioRows(scen, customs = [], set = null) {
+  const own = set && set.id !== 'monthly' && Array.isArray(set.scenarios) && set.scenarios.length ? set.scenarios : null;
+  const post = Object.fromEntries((scen?.scenarios || []).map(s => [s.id, s]));
+  const builtin = own
+    ? own.map(s => ({ id: s.id, name: s.name || post[s.id]?.name || s.id, prior: isNum(s.prior_prob) ? s.prior_prob : post[s.id]?.prior_prob,
+      likelihood: post[s.id]?.likelihood, post: post[s.id]?.prob, def: isNum(s.prob) ? s.prob : 0 }))
+    : (scen?.scenarios || []).map(s => ({ id: s.id, name: s.name || s.id, prior: s.prior_prob,
+      likelihood: s.likelihood, post: s.prob, def: isNum(s.prob) ? s.prob : (isNum(s.prior_prob) ? s.prior_prob : 0) }));
   const taken = new Set(builtin.map(r => r.id));
   const extra = shared.include.map(cid => {
     const c = customs.find(x => x.id === cid) || { id: cid, name: cid };
@@ -418,6 +429,9 @@ export function probEditor({ onChange, delay = 400 } = {}) {
   let rows = [];
   let used = null;                    // {id: prob} the last response used
   let cal = null;                     // calibrationOf(forecast.json), once loaded
+  // what the set's defaults are: the monthly set's model posterior, or a quarterly set's hand-set priors (§7.5)
+  let basis = 'posterior';
+  const basisWord = () => (basis === 'prior' ? '手设先验' : '模型后验');
   const chip = h('span', { class: 'chip' });
   const list = h('div', { class: 'weights-prob' });
   const foot = h('div', { class: 'weights-prob-foot' });
@@ -440,7 +454,7 @@ export function probEditor({ onChange, delay = 400 } = {}) {
     modeBox.replaceChildren(...MODES.map(o => h('button', { type: 'button', class: o.value === mode() ? 'on' : '',
       disabled: o.value === 'calibrated' && !cal?.available && mode() !== 'calibrated' ? true : null,
       title: o.value === 'calibrated' ? (cal?.available ? cal.text : (cal?.reason || '正在读取一年期预测…')) : null,
-      onclick: () => choose(o.value) }, o.label)));
+      onclick: () => choose(o.value) }, o.value === 'posterior' ? basisWord() : o.label)));
   }
   function choose(v) {
     if (!rows.length) return;          // nothing to weight yet (scenarios.json missing)
@@ -487,13 +501,13 @@ export function probEditor({ onChange, delay = 400 } = {}) {
     }
     chip.className = `chip ${s <= 0 ? 'bad' : m === 'calibrated' ? 'good' : adjusted() ? 'warn' : 'accent'}`;
     chip.textContent = s <= 0 ? '概率不能全为 0' : m === 'calibrated' ? '按一年期预测校准'
-      : adjusted() ? '已手动调整' : m === 'manual' ? '手动（尚未改动）' : '模型后验';
+      : adjusted() ? '已手动调整' : m === 'manual' ? '手动（尚未改动）' : basisWord();
     const custom = rows.some(r => r.custom);
     foot.replaceChildren(h('span', { class: 'muted' }, m === 'calibrated'
       ? `当前使用按一年期预测校准的概率（KL ${isNum(cal?.kl) ? cal.kl.toFixed(3) : '—'}）${custom ? '；自定义情景保持它的先验权重' : ''}，计算时按比例归一化为 100%。`
       : adjusted()
         ? `相对权重合计 ${fmtIn(Math.round(s * 10) / 10)}，计算时按比例归一化为 100%。`
-        : '当前使用模型后验概率（已归一化）。'),
+        : `当前使用${basisWord()}概率（已归一化）。`),
       h('span', { class: 'muted' }, `${rows.length} 个情景`));
   }
 
@@ -554,10 +568,17 @@ export function probEditor({ onChange, delay = 400 } = {}) {
   return {
     el,
     // rows: scenarioRows(); info: {method, gamma} from scenarios.json
+    // info: {method, gamma} from scenarios.json; basis 'prior' when the set's defaults are hand-set priors
     setRows(next, info = {}) {
       rows = next || [];
+      basis = info.basis === 'prior' ? 'prior' : 'posterior';
+      resetBtn.textContent = `重置为${basisWord()}`;
       const g = isNum(info.gamma) ? info.gamma : null;
-      intro.textContent = `模型后验 = 主观先验 × 似然${g !== null ? `^${g}` : '^γ'}，再归一化到 100%。先验是对情景本身的判断；`
+      intro.textContent = basis === 'prior'
+        ? '这个情景集默认用手设先验：每个情景的主观先验，归一化到 100%（按今天状态的后验倾斜默认关闭）。'
+          + '“模型后验”一栏是月度情景集的默认，只作对照。滑块是相对权重：调整后所有情景按比例重新归一化，组合和提取的加权结果随之更新；'
+          + '自定义情景默认用它的先验。'
+        : `模型后验 = 主观先验 × 似然${g !== null ? `^${g}` : '^γ'}，再归一化到 100%。先验是对情景本身的判断；`
         + '似然衡量今天的宏观状态（通胀、增长、失业、利率、利差、油价）与情景开局有多吻合'
         + `${g !== null && g < 1 ? `，γ = ${g} < 1 让数据只能微调、不能推翻先验` : ''}。`
         + '滑块是相对权重：调整后所有情景按比例重新归一化，组合和提取的加权结果随之更新；自定义情景默认用它的先验。';
@@ -575,7 +596,7 @@ export function probEditor({ onChange, delay = 400 } = {}) {
     // 'posterior' | 'calibrated' | 'manual', and the words for it (for a tab's own status line)
     mode,
     label: () => (mode() === 'calibrated' ? `按一年期预测校准（KL ${isNum(cal?.kl) ? cal.kl.toFixed(3) : '—'}）`
-      : adjusted() ? '已手动调整（自动归一化）' : '模型后验（主观先验 × 似然）'),
+      : adjusted() ? '已手动调整（自动归一化）' : basis === 'prior' ? '手设先验（这个情景集的默认）' : '模型后验（主观先验 × 似然）'),
     hasRows: () => rows.length > 0,
   };
 }
@@ -621,6 +642,55 @@ export function customPicker({ onChange } = {}) {
     return items;
   }
   return { el: box, load, items: () => items };
+}
+
+// ---------------------------------------------------------------- scenario set picker
+
+const SET_RE = /^(monthly|quarterly|agent:[A-Za-z0-9_-]{1,80})$/;
+
+// The scenario sets the two tabs can run on (GET /api/portfolio/sets): a segmented choice (an unavailable set is
+// disabled, its reason in the tooltip), the switch gate's notice (the default and why) and a line on the chosen set.
+// want: a set id from a deep link (#portfolio?set=quarterly), used when that set is available.
+export function setPicker({ onChange, want = null } = {}) {
+  injectStyle();
+  const { h } = ui;
+  let rep = null;
+  const seg = h('div', { class: 'seg weights-sets', role: 'group', 'aria-label': '情景集' });
+  const note = h('div', { class: 'portfolio-help' });
+  const sw = h('div');
+  const box = h('div', { class: 'weights-setbox' }, seg, note, sw);
+  const entry = (id) => (rep?.sets || []).find(x => x.id === id) || null;
+  const label = (x) => `${x.name}${x.stub ? '（桩模型）' : x.trial ? '（试运行）' : ''}${x.id === rep?.default ? '（默认）' : ''}`;
+  function paint() {
+    if (!rep) { seg.replaceChildren(h('span', { class: 'muted' }, '正在读取情景集…')); return; }
+    seg.replaceChildren(...rep.sets.map(x => h('button', { type: 'button', class: x.id === shared.set ? 'on' : '',
+      disabled: x.available ? null : true, title: x.available ? (x.text || x.name) : (x.issue || '还没有生成'),
+      onclick: () => { if (shared.set === x.id || !x.available) return; shared.set = x.id; paint(); if (onChange) onChange(x.id); } },
+    label(x))));
+    const cur = entry(shared.set);
+    note.replaceChildren(...[cur ? (cur.id === 'monthly'
+      ? '每步一个月：月度引擎的 13 个内置情景（与「未来情景」页同一批路径）。'
+      : `每步 ${cur.step_months} 个月。${cur.text || cur.name}`) : '',
+    cur && cur.step_months > 1 ? ' 波动率按季度收益 × √4 年化，回撤是季末口径，标的（QQQ、BDC 等）需要月度路径，这里不能用。' : '',
+    rep.default_note ? ` ${rep.default_note}` : ''].filter(Boolean));
+    sw.replaceChildren(switchNotice(rep.switch, { where: '组合与提取的默认情景集', compact: true }));
+  }
+  async function load() {
+    try {
+      rep = await api.get('portfolio/sets', { fresh: true });
+    } catch (err) {
+      rep = { default: 'monthly', sets: [{ id: 'monthly', name: '13 个内置情景 · 月度引擎', available: true, step_months: 1 }], switch: null };
+      note.textContent = `读不出情景集列表（${err.message}）：用月度引擎的情景集。`;
+    }
+    const ok = (id) => !!entry(id)?.available;
+    if (want && SET_RE.test(want) && ok(want)) shared.set = want;
+    else if (!shared.set || !ok(shared.set)) shared.set = ok(rep.default) ? rep.default : 'monthly';
+    paint();
+    return rep;
+  }
+  paint();
+  return { el: box, load, current: () => shared.set, entry: () => entry(shared.set),
+    stepMonths: () => entry(shared.set)?.step_months || 1, report: () => rep };
 }
 
 // ---------------------------------------------------------------- styles (both tabs)
@@ -670,6 +740,11 @@ export function injectStyle() {
 .weights-card .card-actions, .weights-results .card-actions, .weights-anchor .card-actions { flex-shrink: 0; }
 .weights-card .seg button, .weights-results .seg button, .weights-anchor .seg button { white-space: nowrap; }
 .weights-err { display: grid; gap: 8px; }
+.weights-setbox { display: grid; gap: 6px; min-width: 0; }
+.weights-sets { flex-wrap: wrap; max-width: 100%; }
+.weights-sets button { white-space: normal !important; text-align: left; }
+.weights-sets button:disabled { opacity: .5; cursor: not-allowed; }
+.weights-rebal button:disabled { opacity: .5; cursor: not-allowed; }
 .weights-err:not(:empty) { margin: 14px 0 2px; }
 .weights-results.weights-busy { opacity: .55; }
 .weights-pill { position: fixed; right: 24px; bottom: 24px; z-index: 30; display: flex; gap: 8px; align-items: center; background: #121a2b; color: #fff; padding: 8px 14px; border-radius: 999px; font-size: 12px; box-shadow: 0 4px 14px rgba(16, 24, 40, .2); opacity: 0; transform: translateY(6px); transition: opacity .2s, transform .2s; pointer-events: none; max-width: calc(100vw - 48px); }

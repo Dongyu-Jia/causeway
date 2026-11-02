@@ -17,6 +17,7 @@ import { CHANGE_LABELS } from './_change_labels.js';
 const SECTIONS = [
   ['answer', '问题与回答'], ['today', '今天'], ['history', '历史'], ['regression', '公允值回归'],
   ['kappa', '拉力速度 κ'], ['variants', '变体检验'], ['factors', '因子候选'], ['scenarios', '情景隐含 P/D'],
+  ['quarterly', '季度模型的估值口径'],
 ];
 // same era colours as the scenario detail (_scenario_detail.js)
 const ERA_COLORS = {
@@ -164,7 +165,8 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
   ensureStyle();
   root.append(h('p', { class: 'lead' },
     '这一页回答一个问题：标普500 / 纳指（QQQ）的市盈率、ROIC、自由现金流，要不要当成宏观因子放进模型？还需不需要再加别的宏观因子？',
-    '先给结论，后面每一节是支撑它的证据，包括对结论不利的部分（公允值回归的系数符号、时期稳定性、拉力的速度）。数字全部来自估值分析这一步的构建结果。'));
+    '先给结论，后面每一节是支撑它的证据，包括对结论不利的部分（公允值回归的系数符号、时期稳定性、拉力的速度）。数字全部来自估值分析这一步的构建结果。',
+    '季度模型（试运行）把股价拆成 CAPE 倍数和基本面两条腿，用 Shiller 2026 版的 CAPE，见第 9 节。'));
 
   const wait = ui.loading('读取估值分析结果…');
   root.append(wait);
@@ -528,7 +530,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
 
     // the drag a pull would imply: hypothetical, the engine does not use it
     out.push(h('div', { style: { height: '16px' } }), card({ cls: 'val-hypo', title: '假设：如果打开估值拉力',
-      sub: `只为说明今天的缺口意味着什么。回测不支持这个拉力（第 6 节），引擎没有使用它，任何情景的回报里都不含这一项；情景里的估值假设只有常数的 CMA 调整（美股 ${pct(cma.market_adjustment, 2, true)}/年，见第 1 节第 4 条）。`,
+      sub: `只为说明今天的缺口意味着什么。回测不支持这个拉力（第 6 节），引擎没有使用它，任何情景的回报里都不含这一项；月度引擎的情景里，关于估值的长期假设只有常数的 CMA 调整（美股 ${pct(cma.market_adjustment, 2, true)}/年，见第 1 节第 4 条）。`,
       actions: ui.chip('假设 · 引擎未采用', 'warn') },
     h('div', { class: 'val-kpis' },
       ui.kpi(`第一年对股价的年化影响（κ=${f(k, 2)}/年）`, pct(t.implied_annual_drag, 1, true), '= −κ × 今天的缺口', ui.signCls(t.implied_annual_drag)),
@@ -983,7 +985,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
       ui.kpi('今天的 P/D', times(pdNow, 1), `${since} 年以来 ${pct(today.pd_percentile, 0)} 分位`),
       ui.kpi('情景按概率加权：15 年后 P/D 中位数', times(pdPW, 0), `${scenList.length} 个情景各自的中位数按后验概率加权（本页计算）`),
       ui.kpi('无视图模拟（现行估值调整 CMA）', times(va.pd_end?.p50, 0), `5%–95%：${f(va.pd_end?.p5, 0)} ~ ${f(va.pd_end?.p95, 0)} 倍`),
-      ui.kpi(`${since} 年以来的中位数`, times(pdMedian, 1), `历史漂移（不做估值假设）时无视图模拟是 ${times(hs.pd_end?.p50, 0)}`)));
+      ui.kpi(`${since} 年以来的中位数`, times(pdMedian, 1), `历史漂移（不做估值调整）时无视图模拟是 ${times(hs.pd_end?.p50, 0)}`)));
 
     // per scenario
     const sBox = h('div', { class: 'chart tall' });
@@ -1030,7 +1032,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
       later.push([pBox, () => {
         const chart = charts.line(pBox, { x: Array.from({ length: n }, (_, i) => (y0 ? String(y0 + i) : `第 ${i} 年`)),
           series: [{ name: '估值调整 CMA（现行）', data: va.pd_p50_by_year || [], color: '#3b5bdb', width: 2 },
-            { name: '历史漂移（不做估值假设）', data: hs.pd_p50_by_year || [], color: '#868e96', dashed: true }],
+            { name: '历史漂移（不做估值调整）', data: hs.pd_p50_by_year || [], color: '#868e96', dashed: true }],
           yFmt: (y) => fixed(y, 0), tooltipFmt: (y) => times(y, 1),
           markLines: isNum(pdMedian) ? [{ yAxis: pdMedian, name: `${since} 年以来中位数 ${f(pdMedian, 0)}` }] : undefined });
         chart.setOption({ xAxis: { boundaryGap: false }, yAxis: [{ min: 0 }] });
@@ -1100,6 +1102,10 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     return out;
   }));
 
+  // ================================================================ 9. the quarterly stack's valuation block (/api/q/valuation)
+  root.append(anchor('quarterly', '9. 季度模型的估值口径（试运行）'));
+  root.append(quarterlyValuation(h, card, ui, api));
+
   // ================================================================ notes
   root.append(h('div', { class: 'section-title' }, '口径与说明'));
   root.append(h('div', { class: 'grid cols-2 text' },
@@ -1134,4 +1140,57 @@ function ruleParts(text) {
   const k = parts[last].indexOf('。');
   if (k > 0 && k < parts[last].length - 1) { tail = parts[last].slice(k + 1); parts[last] = parts[last].slice(0, k + 1); }
   return { head, items: parts.map(p => p.trim().replace(/；$/, '')), tail };      // the ① ② … stay: the results column cites them
+}
+
+// Section 9 (SIM_DESIGN §6, §10.5): CAPE from the Shiller 2026 workbook, the identity decomposition by window, the
+// statements with their placebo caveat, the QQQ limitation and the FCF caveat, from the quarterly panel
+// (GET /api/q/valuation). Filled when the request returns; the page does not wait for it.
+function quarterlyValuation(h, card, ui, api) {
+  const box = h('div', {}, ui.loading('读取季度模型的估值口径…'));
+  const ok = (x) => typeof x === 'number' && Number.isFinite(x);
+  const lg = (x) => (ok(x) ? `${x > 0 ? '+' : ''}${x.toFixed(3)}` : '—');
+  const pc = (x, d = 1) => (ok(x) ? `${(x * 100).toFixed(d)}%` : '—');
+  api.get('q/valuation').then((v) => {
+    if (!box.isConnected) return;
+    const st = v.today?.states || [];
+    const id = v.identity || {};
+    const all = id.all || {};
+    const fmtVal = (r) => (ok(r.value) ? `${r.value.toFixed(r.digits ?? 1)}${r.unit === '%' ? '%' : r.unit === '倍' ? ' 倍' : ''}` : '—');
+    box.replaceChildren(
+      h('p', { class: 'lead', style: { marginBottom: '12px' } }, id.text || '',
+        '。倍数用 CAPE 倍数，不用滚动 P/E：滚动 P/E 被减记扭曲，股价下跌时它的“倍数”反而上升。'),
+      h('div', { class: 'grid cols-2 text' },
+        card({ title: `今天的估值状态（${v.today?.quarter || '—'} 季初）`, sub: `分位按季度面板 ${v.cape_since || '1973Q1'} 以来的历史；只作状态和初始条件，不作预测量。` },
+          ui.table([
+            { key: 'zh', label: '状态', wrap: true },
+            { value: (r) => r, label: '今天', fmt: (r) => fmtVal(r) },
+            { key: 'percentile', label: '历史分位', fmt: (x) => pc(x, 1) },
+            { key: 'use', label: '用途与注意', wrap: true, fmt: (x, r) => `${x || ''}${r.ref ? `（${r.ref.quarter}：${ok(r.ref.value) ? r.ref.value.toFixed(1) : '—'} 倍）` : ''}` },
+          ], st, { stack: true })),
+        card({ title: '恒等式：价格 = 倍数腿 + 基本面腿（对数）',
+          sub: '每个窗口的累计对数变化。倍数腿是 CAPE 倍数，基本面腿是 CPI × 10 年平均实际盈利；P/D 与 P/Ê 只作对照（P/Ê 在两次大跌里因为减记反而上升）。' },
+          ui.table([
+            { value: (r) => r, label: '窗口', fmt: (r) => `${r.zh}（${r.from}–${r.to}）`, wrap: true },
+            { key: 'price', label: '价格', fmt: lg },
+            { key: 'mult', label: 'CAPE 倍数', fmt: lg },
+            { key: 'fund', label: '基本面', fmt: lg },
+            { key: 'pd', label: 'P/D', fmt: lg },
+            { key: 'pe', label: 'P/Ê（含减记）', fmt: lg },
+          ], id.windows || [], { stack: true }),
+          all.n ? h('p', { class: 'muted', style: { fontSize: '12px', margin: '8px 0 0' } },
+            `全部 ${all.n} 个季度（${all.from}–${all.to}）：与价格的相关 / 占价格方差的份额——CAPE 倍数 ${all.mult?.corr ?? '—'} / ${all.mult?.share ?? '—'}；`
+            + `P/D ${all.pd?.corr ?? '—'} / ${all.pd?.share ?? '—'}；P/Ê ${all.pe?.corr ?? '—'} / ${all.pe?.share ?? '—'}。恒等式的最大误差 ${ok(id.max_abs_error) ? id.max_abs_error.toExponential(0) : '—'}。`) : null)),
+      h('div', { style: { height: '16px' } }),
+      card({ title: '长期回报不外推历史估值抬升', sub: '训练期 CAPE 倍数的平均抬升（每年）：前瞻情景的漂移扣掉它，否则等于一个没说出口的估值预测。' },
+        ui.table([
+          { value: (r) => `${r.from} 至 ${r.to}`, label: '训练期' },
+          { key: 'per_year', label: '倍数抬升（年化）', fmt: (x) => pc(x, 2) },
+          { key: 'n', label: '季度数' },
+        ], v.rerating || [], { stack: true })),
+      h('div', { style: { height: '16px' } }),
+      card({ title: '怎么读估值结果（计算口径与局限）' }, h('ul', { class: 'list' }, (v.notes || []).map(n => h('li', {}, n)))));
+  }).catch((err) => {
+    if (box.isConnected) box.replaceChildren(ui.notice(`季度模型的估值口径读不了：${err.message}`, 'info'));
+  });
+  return box;
 }

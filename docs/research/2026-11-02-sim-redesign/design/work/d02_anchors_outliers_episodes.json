@@ -1,0 +1,382 @@
+{
+ "anchors_trailing_10y": {
+  "1994Q4": {
+   "real_ff_10y": 2.19,
+   "term_10y": 1.67,
+   "spread_10y": 2.01,
+   "unrate_10y": 6.41,
+   "core_10y": 4.11
+  },
+  "2004Q4": {
+   "real_ff_10y": 1.79,
+   "term_10y": 1.24,
+   "spread_10y": 2.26,
+   "unrate_10y": 5.05,
+   "core_10y": 2.31
+  },
+  "2014Q4": {
+   "real_ff_10y": -0.35,
+   "term_10y": 1.73,
+   "spread_10y": 2.71,
+   "unrate_10y": 6.96,
+   "core_10y": 1.93
+  },
+  "2026Q2": {
+   "real_ff_10y": -0.74,
+   "term_10y": 0.46,
+   "spread_10y": 2.04,
+   "unrate_10y": 4.54,
+   "core_10y": 3.12
+  }
+ },
+ "DEFAULT_REVERSION": {
+  "r_star": 0.75,
+  "term_premium": 0.75,
+  "spread_level": 2.0,
+  "unrate_level": 4.8
+ },
+ "outlier_rule": {
+  "threshold_chi2_10_995": 25.19,
+  "iterations": 7,
+  "n_quarters": 214,
+  "flagged": [
+   [
+    "1973Q3",
+    56.8
+   ],
+   [
+    "1974Q1",
+    46.9
+   ],
+   [
+    "1974Q2",
+    66.5
+   ],
+   [
+    "1974Q3",
+    48.2
+   ],
+   [
+    "1974Q4",
+    111.9
+   ],
+   [
+    "1975Q1",
+    98.4
+   ],
+   [
+    "1975Q4",
+    37.3
+   ],
+   [
+    "1976Q1",
+    34.7
+   ],
+   [
+    "1979Q3",
+    53.7
+   ],
+   [
+    "1979Q4",
+    92.5
+   ],
+   [
+    "1980Q1",
+    165.6
+   ],
+   [
+    "1980Q2",
+    417.6
+   ],
+   [
+    "1980Q3",
+    51.1
+   ],
+   [
+    "1980Q4",
+    440.9
+   ],
+   [
+    "1981Q1",
+    149.3
+   ],
+   [
+    "1981Q2",
+    165.1
+   ],
+   [
+    "1981Q3",
+    183.0
+   ],
+   [
+    "1981Q4",
+    81.8
+   ],
+   [
+    "1982Q1",
+    64.1
+   ],
+   [
+    "1982Q2",
+    42.5
+   ],
+   [
+    "1982Q3",
+    111.2
+   ],
+   [
+    "1982Q4",
+    42.0
+   ],
+   [
+    "1984Q4",
+    53.4
+   ],
+   [
+    "1986Q1",
+    46.7
+   ],
+   [
+    "1990Q3",
+    50.8
+   ],
+   [
+    "2001Q4",
+    35.0
+   ],
+   [
+    "2005Q3",
+    45.4
+   ],
+   [
+    "2005Q4",
+    33.9
+   ],
+   [
+    "2008Q1",
+    37.6
+   ],
+   [
+    "2008Q3",
+    99.2
+   ],
+   [
+    "2008Q4",
+    301.5
+   ],
+   [
+    "2009Q1",
+    121.2
+   ],
+   [
+    "2009Q2",
+    148.2
+   ],
+   [
+    "2009Q3",
+    53.4
+   ],
+   [
+    "2020Q1",
+    161.7
+   ],
+   [
+    "2020Q2",
+    1126.8
+   ],
+   [
+    "2020Q3",
+    235.4
+   ],
+   [
+    "2020Q4",
+    33.0
+   ],
+   [
+    "2021Q3",
+    48.5
+   ],
+   [
+    "2021Q4",
+    37.1
+   ],
+   [
+    "2022Q2",
+    30.1
+   ],
+   [
+    "2022Q3",
+    40.1
+   ],
+   [
+    "2022Q4",
+    32.0
+   ]
+  ]
+ },
+ "episodes": {
+  "E06": {
+   "window": "1973Q4..1975Q2",
+   "n_q": 7,
+   "train_q": 3,
+   "useq_window": -0.144,
+   "useq_maxdd": -0.569,
+   "nasdaq_window": -0.245,
+   "dgz_sum": 0.64
+  },
+  "E03": {
+   "window": "1979Q4..1982Q2",
+   "n_q": 11,
+   "train_q": 27,
+   "useq_window": 0.038,
+   "useq_maxdd": -0.211,
+   "nasdaq_window": 0.133,
+   "dgz_sum": 0.84
+  },
+  "E11": {
+   "window": "1990Q3..1991Q4",
+   "n_q": 6,
+   "train_q": 70,
+   "useq_window": 0.168,
+   "useq_maxdd": -0.177,
+   "nasdaq_window": 0.327,
+   "dgz_sum": 0.3
+  },
+  "E07": {
+   "window": "1994Q1..1995Q2",
+   "n_q": 6,
+   "train_q": 84,
+   "useq_window": 0.14,
+   "useq_maxdd": -0.061,
+   "nasdaq_window": 0.301,
+   "dgz_sum": 0.08
+  },
+  "E02": {
+   "window": "1995Q3..1997Q4",
+   "n_q": 10,
+   "train_q": 90,
+   "useq_window": 0.554,
+   "useq_maxdd": 0.0,
+   "nasdaq_window": 0.611,
+   "dgz_sum": -0.02
+  },
+  "E12": {
+   "window": "2001Q1..2002Q4",
+   "n_q": 8,
+   "train_q": 112,
+   "useq_window": -0.383,
+   "useq_maxdd": -0.456,
+   "nasdaq_window": -0.867,
+   "dgz_sum": -0.08
+  },
+  "E01": {
+   "window": "2004Q3..2006Q4",
+   "n_q": 10,
+   "train_q": 126,
+   "useq_window": 0.233,
+   "useq_maxdd": -0.028,
+   "nasdaq_window": 0.143,
+   "dgz_sum": -0.21
+  },
+  "E05": {
+   "window": "2007Q3..2009Q2",
+   "n_q": 8,
+   "train_q": 138,
+   "useq_window": -0.468,
+   "useq_maxdd": -0.625,
+   "nasdaq_window": -0.269,
+   "dgz_sum": 2.54
+  },
+  "E04": {
+   "window": "2014Q3..2015Q4",
+   "n_q": 6,
+   "train_q": 166,
+   "useq_window": 0.025,
+   "useq_maxdd": -0.083,
+   "nasdaq_window": 0.177,
+   "dgz_sum": 1.1
+  },
+  "E09": {
+   "window": "2017Q1..2019Q4",
+   "n_q": 12,
+   "train_q": 176,
+   "useq_window": 0.363,
+   "useq_maxdd": -0.162,
+   "nasdaq_window": 0.585,
+   "dgz_sum": -0.2
+  },
+  "E08": {
+   "window": "2020Q1..2021Q2",
+   "n_q": 6,
+   "train_q": 188,
+   "useq_window": 0.329,
+   "useq_maxdd": -0.23,
+   "nasdaq_window": 0.511,
+   "dgz_sum": -0.3
+  },
+  "E10": {
+   "window": "2022Q1..2023Q4",
+   "n_q": 8,
+   "train_q": 196,
+   "useq_window": -0.015,
+   "useq_maxdd": -0.296,
+   "nasdaq_window": 0.031,
+   "dgz_sum": -0.1
+  },
+  "N13": {
+   "window": "1987Q3..1988Q4",
+   "n_q": 6,
+   "train_q": 58,
+   "useq_window": -0.093,
+   "useq_maxdd": -0.272,
+   "nasdaq_window": -0.065,
+   "dgz_sum": -0.15
+  },
+  "N14": {
+   "window": "1998Q1..2000Q4",
+   "n_q": 12,
+   "train_q": 100,
+   "useq_window": 0.284,
+   "useq_maxdd": -0.17,
+   "nasdaq_window": 0.86,
+   "dgz_sum": 2.47
+  },
+  "N15": {
+   "window": "2010Q2..2012Q4",
+   "n_q": 11,
+   "train_q": 149,
+   "useq_window": 0.201,
+   "useq_maxdd": -0.175,
+   "nasdaq_window": 0.307,
+   "dgz_sum": 0.01
+  },
+  "N16": {
+   "window": "1977Q1..1979Q3",
+   "n_q": 11,
+   "train_q": 16,
+   "useq_window": 0.114,
+   "useq_maxdd": -0.122,
+   "nasdaq_window": 0.427,
+   "dgz_sum": -0.35
+  },
+  "N17": {
+   "window": "1983Q1..1984Q4",
+   "n_q": 8,
+   "train_q": 40,
+   "useq_window": 0.158,
+   "useq_maxdd": -0.129,
+   "nasdaq_window": 0.062,
+   "dgz_sum": -0.66
+  },
+  "N18": {
+   "window": "2024Q1..2026Q2",
+   "n_q": 10,
+   "train_q": 204,
+   "useq_window": 0.449,
+   "useq_maxdd": -0.056,
+   "nasdaq_window": 0.587,
+   "dgz_sum": -0.29
+  }
+ },
+ "overlaps": []
+}

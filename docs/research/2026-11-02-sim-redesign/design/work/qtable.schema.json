@@ -1,0 +1,3464 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "title": "QTable/1",
+ "description": "季度情景表：LLM 的输出 = 季度模型的输入。null/缺省 = 文字没有给（模型补全）。",
+ "type": "object",
+ "additionalProperties": false,
+ "properties": {
+  "schema": {
+   "const": "qtable/1"
+  },
+  "model_card": {
+   "type": "string"
+  },
+  "n_quarters": {
+   "type": "integer",
+   "minimum": 1,
+   "maximum": 60
+  },
+  "rows": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "q": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "x": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "d_bdlev": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_bs": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_bund": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_capex": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_chargeoff": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cons_goods": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cons_serv": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_core": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_corptax": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cpbill": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cpi_goods": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cpi_serv": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_cre": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_defense": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_deficit": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_epu": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_epu_health": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_exports": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_ff": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_gpr": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_gz": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_hpi": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_igrea": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_infexp1": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_infexp_lr": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_ip": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_itinv": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_lf": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_lprod": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_lshare": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_metals_oil": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_natgas": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_oil": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_perstax": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_profits": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_resinv": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_rgdp": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_sent": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_spread": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_tariff": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_tips10": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_tp10": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_transfers": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_unrate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_usd": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_usd_em": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_wage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_y10": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "d_y2": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "x_lending_std": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "x_supply_chain": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "x_oil_cause": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "enum": [
+           "supply",
+           "demand",
+           "mixed"
+          ]
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "value",
+         "src",
+         "quote"
+        ]
+       }
+      }
+     },
+     "u": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "u_ff": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "u_bs": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "u_def": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "u_tr": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       },
+       "u_ptax": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+         "value": {
+          "type": "number"
+         },
+         "sd": {
+          "type": "number",
+          "exclusiveMinimum": 0
+         },
+         "sign": {
+          "enum": [
+           "+",
+           "-",
+           "0"
+          ]
+         },
+         "size": {
+          "enum": [
+           "小",
+           "温和",
+           "明显",
+           "大幅",
+           "极端"
+          ]
+         },
+         "min": {
+          "type": "number"
+         },
+         "max": {
+          "type": "number"
+         },
+         "src": {
+          "enum": [
+           "stated",
+           "stated_qual",
+           "derived"
+          ]
+         },
+         "quote": {
+          "type": "string",
+          "maxLength": 120
+         }
+        },
+        "required": [
+         "src",
+         "quote"
+        ]
+       }
+      }
+     },
+     "fc": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "stance": {
+        "enum": [
+         "明显收紧",
+         "收紧",
+         "中性",
+         "宽松",
+         "明显宽松",
+         "未说明"
+        ]
+       },
+       "quote": {
+        "type": "string",
+        "maxLength": 120
+       }
+      },
+      "required": [
+       "stance"
+      ]
+     }
+    },
+    "required": [
+     "q",
+     "x",
+     "fc"
+    ]
+   }
+  },
+  "c_q": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "anchors": {
+     "type": "object",
+     "additionalProperties": false,
+     "properties": {
+      "r_star": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "pi_lr": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "a_tp": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "a_spread": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "a_ustar": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "a_oil": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      },
+      "a_usd": {
+       "type": "object",
+       "additionalProperties": false,
+       "properties": {
+        "value": {
+         "type": "number"
+        },
+        "from_q": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "quote": {
+         "type": "string",
+         "maxLength": 120
+        }
+       },
+       "required": [
+        "value",
+        "quote"
+       ]
+      }
+     }
+    },
+    "announced": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "field": {
+        "enum": [
+         "d_bdlev",
+         "d_bs",
+         "d_bund",
+         "d_capex",
+         "d_chargeoff",
+         "d_cons_goods",
+         "d_cons_serv",
+         "d_core",
+         "d_corptax",
+         "d_cpbill",
+         "d_cpi_goods",
+         "d_cpi_serv",
+         "d_cre",
+         "d_defense",
+         "d_deficit",
+         "d_epu",
+         "d_epu_health",
+         "d_exports",
+         "d_ff",
+         "d_gpr",
+         "d_gz",
+         "d_hpi",
+         "d_igrea",
+         "d_infexp1",
+         "d_infexp_lr",
+         "d_ip",
+         "d_itinv",
+         "d_lf",
+         "d_lprod",
+         "d_lshare",
+         "d_metals_oil",
+         "d_natgas",
+         "d_oil",
+         "d_perstax",
+         "d_profits",
+         "d_resinv",
+         "d_rgdp",
+         "d_sent",
+         "d_spread",
+         "d_tariff",
+         "d_tips10",
+         "d_tp10",
+         "d_transfers",
+         "d_unrate",
+         "d_usd",
+         "d_usd_em",
+         "d_wage",
+         "d_y10",
+         "d_y2",
+         "x_lending_std",
+         "x_supply_chain"
+        ]
+       },
+       "quarters": {
+        "type": "array",
+        "items": {
+         "type": "integer"
+        }
+       },
+       "values": {
+        "type": "array",
+        "items": {
+         "type": [
+          "number",
+          "null"
+         ]
+        }
+       },
+       "sd": {
+        "type": "number"
+       },
+       "quote": {
+        "type": "string",
+        "maxLength": 120
+       }
+      },
+      "required": [
+       "field",
+       "quarters",
+       "quote"
+      ]
+     }
+    },
+    "constraints": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "kind": {
+        "enum": [
+         "sum",
+         "mean",
+         "yoy",
+         "level",
+         "range"
+        ]
+       },
+       "field": {
+        "enum": [
+         "d_bdlev",
+         "d_bs",
+         "d_bund",
+         "d_capex",
+         "d_chargeoff",
+         "d_cons_goods",
+         "d_cons_serv",
+         "d_core",
+         "d_corptax",
+         "d_cpbill",
+         "d_cpi_goods",
+         "d_cpi_serv",
+         "d_cre",
+         "d_defense",
+         "d_deficit",
+         "d_epu",
+         "d_epu_health",
+         "d_exports",
+         "d_ff",
+         "d_gpr",
+         "d_gz",
+         "d_hpi",
+         "d_igrea",
+         "d_infexp1",
+         "d_infexp_lr",
+         "d_ip",
+         "d_itinv",
+         "d_lf",
+         "d_lprod",
+         "d_lshare",
+         "d_metals_oil",
+         "d_natgas",
+         "d_oil",
+         "d_perstax",
+         "d_profits",
+         "d_resinv",
+         "d_rgdp",
+         "d_sent",
+         "d_spread",
+         "d_tariff",
+         "d_tips10",
+         "d_tp10",
+         "d_transfers",
+         "d_unrate",
+         "d_usd",
+         "d_usd_em",
+         "d_wage",
+         "d_y10",
+         "d_y2",
+         "x_lending_std",
+         "x_supply_chain",
+         "s_cpi_yoy",
+         "s_core_yoy",
+         "s_unrate",
+         "s_ff"
+        ]
+       },
+       "quarters": {
+        "type": "array",
+        "items": {
+         "type": "integer"
+        }
+       },
+       "value": {
+        "type": "number"
+       },
+       "sd": {
+        "type": "number"
+       },
+       "min": {
+        "type": "number"
+       },
+       "max": {
+        "type": "number"
+       },
+       "quote": {
+        "type": "string",
+        "maxLength": 120
+       }
+      },
+      "required": [
+       "kind",
+       "field",
+       "quarters",
+       "quote"
+      ]
+     }
+    },
+    "valuation": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "quarters": {
+        "type": "array",
+        "items": {
+         "type": "integer"
+        }
+       },
+       "mode": {
+        "enum": [
+         "inferred",
+         "hold",
+         "rerate"
+        ]
+       },
+       "direction": {
+        "enum": [
+         "+",
+         "-"
+        ]
+       },
+       "size": {
+        "enum": [
+         "温和",
+         "明显",
+         "极端"
+        ]
+       },
+       "reversion_half_life_years": {
+        "type": "number",
+        "minimum": 14
+       },
+       "quote": {
+        "type": "string",
+        "maxLength": 120
+       }
+      },
+      "required": [
+       "quarters",
+       "mode",
+       "quote"
+      ]
+     }
+    },
+    "regime": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+       "quarters": {
+        "type": "array",
+        "items": {
+         "type": "integer"
+        }
+       },
+       "label": {
+        "enum": [
+         "expansion",
+         "inflation",
+         "deflation",
+         "recession",
+         "depression",
+         "stagflation",
+         "contraction",
+         "high_infl"
+        ]
+       },
+       "share": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "quote": {
+        "type": "string",
+        "maxLength": 120
+       }
+      },
+      "required": [
+       "quarters",
+       "label",
+       "share",
+       "quote"
+      ]
+     }
+    }
+   }
+  },
+  "events": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "text": {
+      "type": "string",
+      "maxLength": 200
+     },
+     "quarters": {
+      "type": "array",
+      "items": {
+       "type": "integer"
+      }
+     },
+     "templates": {
+      "type": "array",
+      "items": {
+       "type": "string",
+       "pattern": "^G[0-9]{2}$"
+      }
+     },
+     "channels": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "d_bdlev",
+        "d_bs",
+        "d_bund",
+        "d_capex",
+        "d_chargeoff",
+        "d_cons_goods",
+        "d_cons_serv",
+        "d_core",
+        "d_corptax",
+        "d_cpbill",
+        "d_cpi_goods",
+        "d_cpi_serv",
+        "d_cre",
+        "d_defense",
+        "d_deficit",
+        "d_epu",
+        "d_epu_health",
+        "d_exports",
+        "d_ff",
+        "d_gpr",
+        "d_gz",
+        "d_hpi",
+        "d_igrea",
+        "d_infexp1",
+        "d_infexp_lr",
+        "d_ip",
+        "d_itinv",
+        "d_lf",
+        "d_lprod",
+        "d_lshare",
+        "d_metals_oil",
+        "d_natgas",
+        "d_oil",
+        "d_perstax",
+        "d_profits",
+        "d_resinv",
+        "d_rgdp",
+        "d_sent",
+        "d_spread",
+        "d_tariff",
+        "d_tips10",
+        "d_tp10",
+        "d_transfers",
+        "d_unrate",
+        "d_usd",
+        "d_usd_em",
+        "d_wage",
+        "d_y10",
+        "d_y2",
+        "x_lending_std",
+        "x_supply_chain",
+        "u_ff",
+        "u_bs",
+        "u_def",
+        "u_tr",
+        "u_ptax",
+        "x_oil_cause"
+       ]
+      }
+     },
+     "generic_footprint": {
+      "type": "boolean"
+     },
+     "how_decomposed": {
+      "type": "string",
+      "maxLength": 200
+     }
+    },
+    "required": [
+     "text",
+     "quarters",
+     "channels",
+     "generic_footprint",
+     "how_decomposed"
+    ]
+   }
+  },
+  "notes": {
+   "type": "array",
+   "items": {
+    "type": "string",
+    "maxLength": 200
+   }
+  }
+ },
+ "required": [
+  "schema",
+  "n_quarters",
+  "rows",
+  "c_q",
+  "events"
+ ]
+}

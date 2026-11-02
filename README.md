@@ -6,7 +6,9 @@
 
 > **一句话原理**：引擎不“发明”未来。它把历史上真实发生过的每个月当作积木：情景只改变每块 6 个月积木被抽中的概率（Entropy Pooling），历史支撑不够时把视图自动向历史均值收缩；再按今天的利率、油价、估值和股息率把积木重新拼成 15 年的路径。没有情景主题时，只认真预测下一年；多年期结果都以某个情景主题为条件（唯一的例外是提取分析的第 16–40 年，见下文）。LLM 只负责把文字情景翻译成这些约束，**所有数字都由引擎计算**。
 
-*English summary: a local web app (FastAPI + a static ECharts UI, no build step, ECharts vendored so it works offline) on a Python engine. A scenario is a set of phases whose entropy-pooling views reweight 6-month blocks of real US months since 1973; the engine re-anchors the drawn months at today's levels (level-scaled, mean-reverting rates, a real-oil anchor, valuation-adjusted long-run drift, half-coupled residuals) and turns them into 15-year fans and K-lines for 13 asset classes, with every return split additively into its transmission channels. The only unconditional forecast is one year ahead, scored on 42 rolling origins since 1984 and recorded live in an append-only ledger at every build; multi-year results exist only conditional on a scenario theme (13 built-in scenarios, or a narrative that an optional Claude translator turns into views; the LLM never produces numbers). Backtests run on four fixed holdout windows or any window you choose. Portfolio and withdrawal (ruin) analysis runs on the same paths; withdrawal horizons past 15 years (up to 40) continue each scenario path with an unconditional engine path, and the page labels this. Every historical month since 1948 and every simulated path carries one of six macro regimes (expansion, inflation, falling prices, recession, deep recession, stagflation), classified by one rule from CPI y/y and the direction and depth of industrial production confirmed by unemployment; scenario phases can ask for regime months, every scenario reports its regime mix next to the engine's unconditional run, and regimes stay out of the transmission model and the one-year forecast because both out-of-sample tests failed. The UI is in Simplified Chinese.*
+> **季度模型（试运行）**：另一套按季度运行的模型，做的也是模拟，不是预测：情景 → 因子 → 资产。大模型把文字翻译成季度情景表（QTable），它的输出格式就是模型的输入格式，每个值都带原文引文和来源（文字里的数字、文字里的定性幅度、推算）。一个联合模型精确满足文字给的值，把没说的因子从联合分布里补全，再按同季映射得到 13 类资产的季末分布。预测只在情景概率里。通过预注册的切换关 T-S 之前，它只标“试运行”，内置情景、未来一年、组合评估和提取的默认仍是月度引擎。
+
+*English summary: a local web app (FastAPI + a static ECharts UI, no build step, ECharts vendored so it works offline) on a Python engine. A scenario is a set of phases whose entropy-pooling views reweight 6-month blocks of real US months since 1973; the engine re-anchors the drawn months at today's levels (level-scaled, mean-reverting rates, a real-oil anchor, valuation-adjusted long-run drift, half-coupled residuals) and turns them into 15-year fans and K-lines for 13 asset classes, with every return split additively into its transmission channels. The only unconditional forecast is one year ahead, scored on 42 rolling origins since 1984 and recorded live in an append-only ledger at every build; multi-year results exist only conditional on a scenario theme (13 built-in scenarios, or a narrative that an optional Claude translator turns into views; the LLM never produces numbers). Backtests run on four fixed holdout windows or any window you choose. Portfolio and withdrawal (ruin) analysis runs on the same paths; withdrawal horizons past 15 years (up to 40) continue each scenario path with an unconditional engine path, and the page labels this. Every historical month since 1948 and every simulated path carries one of six macro regimes (expansion, inflation, falling prices, recession, deep recession, stagflation), classified by one rule from CPI y/y and the direction and depth of industrial production confirmed by unemployment; scenario phases can ask for regime months, every scenario reports its regime mix next to the engine's unconditional run, and regimes stay out of the transmission model and the one-year forecast because both out-of-sample tests failed. A second, quarterly stack (labelled trial until a pre-registered switch gate passes) runs scenario → factors → assets as simulation, not prediction: the LLM writes a QTable whose schema is the model's input schema, every value with a quote from the text; a joint model (a BVAR core with satellites) meets the stated values exactly and completes the rest; the factor round's betas map each quarter to the 13 assets. A permanent narrative test scores that chain on historical episodes under a blind protocol. Tests and builds always use a mock LLM, and a real run happens only by hand, after an estimate and a confirmation. The UI is in Simplified Chinese.*
 
 <table>
   <tr>
@@ -27,16 +29,18 @@
 | | 历史时代画像 | 9 个时代（1955–今）：宏观指纹、资产实际回报、时代内相关性、股债相关、油价→通胀传导、菲利普斯曲线；今天在历史上的位置，收入分配的新形势；**传导归因**：1973 年以来每个时代的资产回报拆成 β × 当时的实际因子变动、常数项、未解释部分和收入（热力图） |
 | | 宏观体制 | 每个月归入扩张、通胀、物价负增长、衰退、深度衰退、滞胀之一（只用 CPI 同比、工业产出的方向和跌幅、失业率三条序列；常说的“通缩”和“萧条”分别对应物价负增长和深度衰退）：今天的实时体制和离每道门槛还有多远、1948 年以来的时间线、和 NBER 衰退日期的对比（样本内和样本外）、各体制下的资产表现和收缩期的逐段路径、宏观特征、体制转换、体制之后一年的回报（带发布滞后和置换检验）、引擎里的体制、为什么体制不进入一年期预测和传导模型 |
 | | 因果传导 | 符号约束 SVAR：石油供给 / 总需求 / 货币政策 / 金融冲击的分时期脉冲响应、通胀的历史分解；劳动收入占比冲击的季度局部投影；因子→资产 β 随时期的变化；从冲击到资产的因果链 |
-| 验证 | 一年期预测 | 从今天出发的未来 12 个月分布（无条件、相似起点、情景加权）；1984 年以来 42 个起点（每年年末，加上最近一个已有完整下一年的月份）的滚动成绩单：90% 区间覆盖率、CRPS、PIT、跨资产排序 IC，外生冲击年份单独标出，偏离最大的预测逐个归因；**实时样本外记录**：每次构建把当时的一年期预测原样存档（只追加、不覆盖），到期后用新数据评分；**情景概率与一年期预测的对账**：情景加权的第一年为什么比相似起点法悲观，差距按情景拆开 |
+| 验证 | 情景条件检验 | 季度模型的检验，按季度和年度报告：已知因子路径时能复现多少（研究轮的消融：宏观本身对资产几乎没有信息，能力来自信用利差）；**叙事检验**（研究轮、模拟后端和真实运行的成绩单、配对差异和最小可检出差异、识别率与污染指数、逐片段小图；「用真实大模型重跑叙事检验…」先给估算，勾选确认后才调用）；估值账本；因子引擎检验（T-F、T-C）；前瞻账本；预注册与选择记录；切换关 T-S 的每个条件和没通过的原因 |
+| | 未来一年：情景条件模拟 | 这不是预测：13 个情景未来 4 个季度的模拟，按情景概率加权（概率可调，默认手设先验），给出各资产季末的区间；每个情景要你相信什么（逐季的政策利率、失业率、通胀、油价、信用立场和估值模式，标出文字给的和模型补的）；无情景基准；情景组合隐含的宏观基率；**前瞻账本**（每次构建只追加、到期评分）。默认用月度引擎加总到季末，季度模型可以切换（试运行）。下方的**历史回放（相似起点法）**是原来的一年期滚动记录：1984 年以来 42 个起点（每年年末，加上最近一个已有完整下一年的月份）的成绩单（90% 区间覆盖率、CRPS、PIT、跨资产排序 IC，外生冲击年份单独标出，偏离最大的预测逐个归因）、**实时样本外记录**（每次构建把当时的一年期预测原样存档，只追加、不覆盖，到期后用新数据评分）和**情景概率与一年期预测的对账** |
 | | 回测：模拟 vs 实际 | 4 个保留窗口：实际走势、oracle（训练期传导 × 真实因子）、已知宏观的条件扇形图、不知道宏观的无条件中位数；误差拆成情景 / 引擎 / 传导三部分；后验相关性；引擎抽中了哪些历史月份；外生冲击在图上标出；**自选回测窗口**：任选训练期截止月份（最早 1987-12）和 1–15 年的测试期，结果可以用链接分享 |
 | | 诊断与迭代 | 预测为什么不准：缺因子、缺传导机制、要调参、要神经网络？走步迭代：诊断 → 改进 → 在未触碰的时段上检验（增量关卡：第 2 轮的改动要胜过本轮起始模型）；只作用于单个资产的专门改动；**缺失因子审计**：六个研究家族测过的候选、多重检验与反驳检验、每项改动的证据和注意事项、能解释多少、按资产和按概念的缺口；引擎消融的结果（可选） |
 | | 估值与盈利 | 标普 500 / 纳指的市盈率、ROIC、自由现金流要不要当宏观因子：今天的 P/D 与公允值、公允值回归与稳定性、拉力速度 κ、估值状态变体的回测、外生候选因子、各情景隐含的 15 年后 P/D |
-| 未来 | 未来情景 | 13 个内置情景按后验概率排序：因果链、分阶段视图与抽中的历史月份、**宏观体制**（每个阶段的模拟路径、抽中月份和引擎无条件抽样各是什么体制，第 1 年出现收缩的路径占比对照历史基准）、月线 / 年线 K 线、名义与实际扇形图、宏观路径（含 P/D）、后验相关性、收入分配计算器、校验报告；跨情景对比；**传导归因**：每个阶段、每类资产的年化回报来自哪些因子（瀑布图，因果链的连线上标出引擎算出的数字） |
-| | 情景实验室（LLM） | 输入一段文字叙事 → 本机 Claude Code（使用你的订阅额度）翻译成情景规格（可编辑的 JSON，阶段可以用 regime 字段要求多抽某种宏观体制的历史月份，并检查历史上能不能做到）→ 校验截断 → 引擎模拟并保存；不调用 LLM 也能“载入示例”（内置情景的叙事和手写规格，看一遍完整流程），或载入内置情景当模板、编辑后运行 |
+| 未来 | 未来情景 | 13 个内置情景按后验概率排序：因果链、分阶段视图与抽中的历史月份、**宏观体制**（每个阶段的模拟路径、抽中月份和引擎无条件抽样各是什么体制，第 1 年出现收缩的路径占比对照历史基准）、月线 / 年线 K 线、名义与实际扇形图、宏观路径（含 P/D）、后验相关性、收入分配计算器、校验报告；跨情景对比；**传导归因**：每个阶段、每类资产的年化回报来自哪些因子（瀑布图，因果链的连线上标出引擎算出的数字）；**季度模型（试运行）**：每个内置情景的季度情景表在季度模型上的模拟（逐季“情景说了什么 / 模型补了什么”、估值和“你必须相信的估值”、收益归因、金融条件、宏观体制） |
+| | 情景实验室（LLM） | 两种模式。**季度情景表**（默认）：叙事 → 本机 Claude Code（使用你的订阅额度）翻译成季度情景表 → 逐条校验（被拒绝的条目、警告、没写的政策 / 增长 / 通胀 / 油价 / 金融条件，附叙事里的证据句）→ 在季度模型或月度引擎上运行；每季每格都能自己改，调用前先显示估算。**月度规格**：叙事 → 翻译成情景规格（可编辑的 JSON，阶段可以用 regime 字段要求多抽某种宏观体制的历史月份，并检查历史上能不能做到）→ 校验截断 → 引擎模拟并保存；不调用 LLM 也能“载入示例”（内置情景的叙事和手写规格，看一遍完整流程），或载入内置情景当模板、编辑后运行 |
 | | 标的推演 | 16 个标的（QQQ、QLD、TQQQ、QQQI、TLT、GLD、金价，XLG、SCHD、MO、BRK.B、BME，三家 BDC、两家 MLP）作为配方作用在同一批情景路径上：每个情景和加权汇总的价格 / 总回报扇形、对比表、每股分配与削减概率、收益来源分解、与资产和其他标的的相关；配方卡写明公式、参数、验证（标明样本内 / 样本外）与局限；参数只在本页即时重算 |
-| | 组合评估 | 任意 13 类资产权重和再平衡方式：每个情景及概率加权 / 等权 / 最差 / 最好情景下的 CAGR、波动、夏普、Sortino、最大回撤、CVaR；可以调整情景概率、纳入自定义情景；**情景概率校准**：概率可选模型后验、按一年期预测校准或手动（校准只用通过检验的宏观变量，目前没有变量通过，这个选项暂时不可用） |
-| | 提取与破产概率 | 三种提取方式：按比例、先用股息再按比例、先用股息再按当年收益从高到低卖；破产概率、存活曲线、安全提取率、期末实际财富；**30 年提取**：期限 10–40 年（默认 30 年），前 15 年是情景路径，第 16 年起按历史月份无条件续抽，15 年与所选期限的结果并列 |
-| 说明 | 方法与数据 | 引擎每一步怎么做、当前的估值锚定参数、数据来源与局限 |
+| | 组合评估 | 任意 13 类资产权重和再平衡方式：每个情景及概率加权 / 等权 / 最差 / 最好情景下的 CAGR、波动、夏普、Sortino、最大回撤、CVaR；可以调整情景概率、纳入自定义情景；**情景概率校准**：概率可选模型后验、按一年期预测校准或手动（校准只用通过检验的宏观变量，目前没有变量通过，这个选项暂时不可用）；**情景集**：月度引擎（默认）或季度模型（试运行：每季再平衡，波动按季度收益 × √4，最大回撤按季末计） |
+| | 提取与破产概率 | 三种提取方式：按比例、先用股息再按比例、先用股息再按当年收益从高到低卖；破产概率、存活曲线、安全提取率、期末实际财富；**30 年提取**：期限 10–40 年（默认 30 年），前 15 年是情景路径，第 16 年起按历史月份无条件续抽，15 年与所选期限的结果并列；也可以选季度模型的情景集（试运行：年度提取不变，第 16 年起是同一模型的无条件续推） |
+| 说明 | 方法与数据 | 引擎每一步怎么做；季度模型一章（三层结构、模型的输入是什么、神经网络为什么只作对照、估值既是状态也是一条腿）；当前的估值锚定参数、数据来源、计算口径与局限 |
+| | 变量卡片 | 季度模型的 101 个变量：中文名、同期 / 前定、时点、内生性、翻译器能不能写、到资产的路径、今天的值、历史分位和走势小图，每行链接到它的证据；可以搜索和筛选 |
 
 资产（大类）：美股大盘、纳斯达克100、石油能源股、工业制造股、必需消费股、医疗保健股、公用事业股、金融股、房地产 REITs、黄金、原油、10 年期美债、现金。K 线默认红涨绿跌，可以在页面右上角切换为绿涨红跌。
 
@@ -56,16 +60,16 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - 首次构建要下载约 85 个文件（约 65 个 FRED 序列、3 个 Ken French 压缩包，Nareit、金价、席勒 CAPE 各一个，以及美联储 GZ 信用利差、纽约联储 ACM 期限溢价、世界银行 Pink Sheet、房价、地缘政治风险、政策不确定性和中性利率的出版方文件）。FRED 偶尔限流，下载失败时重新运行同一条命令即可：已经下载的文件会直接复用，只有 `--refresh` 才会重新下载。
 - FRED 的 API key 是可选的（免费注册）：在 `.env` 里填 `FRED_API_KEY=…`，构建就通过 `api.stlouisfed.org` 下载（更稳定），没有它就用 FRED 的图表 CSV，结果相同。key 被拒绝或 API 暂时不可用时，构建自动改用不带 key 的图表 CSV。key 只发给 `api.stlouisfed.org`，日志和记录里的网址一律写成 `api_key=REDACTED`。已经有研究轮下载的文件时，可以先用 `python -m scenariolab.data.import_raw <目录> [--force]` 把它们导入 `data/raw/`（只复制字节并核对哈希，写出 `data/raw/SOURCES.json` 和 `import_log.json`），不必重新下载。
 - 席勒 CAPE（[ie_data.xls](http://www.econ.yale.edu/~shiller/data/ie_data.xls)）是可选来源：下载失败时各页面上的 CAPE 为空，构建照常完成，回测、一年期预测和情景的结果不受影响，下一次构建会再试一次。也可以手动把它放到 `data/raw/shiller/ie_data.xls`。
-- 构建时间：不算首次下载数据，默认构建约 5 分钟，最慢的一步是估值检验 valuation（约 2.7 分钟），宏观体制 regimes 约 40 秒，缺失因子审计 factor_audit 约 20 秒；连同两个默认不跑的步骤（`--all`：引擎消融约 5 分钟、宏观体制的一年期预测检验约 2 分钟）约 12 分钟，峰值内存约 2.8 GB（引擎消融；其余步骤最多约 2.3 GB）。结果写进 `data/results/`，网页直接读取这些文件；一年期预测另外存档到 `data/ledger/`（见下文“实时样本外记录”）。
+- 构建时间：不算首次下载数据，默认构建约 5 分钟，最慢的一步是估值检验 valuation（约 2.7 分钟），宏观体制 regimes 约 40 秒，缺失因子审计 factor_audit 约 20 秒；连同两个默认不跑的步骤（`--all`：引擎消融约 5 分钟、宏观体制的一年期预测检验约 2 分钟）约 12 分钟，峰值内存约 2.8 GB（引擎消融；其余步骤最多约 2.3 GB）。结果写进 `data/results/`，网页直接读取这些文件；一年期预测另外存档到 `data/ledger/`（见下文“实时样本外记录”），未来一年的情景加权另有一份前瞻账本 `data/results/ledger/forecast_ledger.jsonl`（同样只追加）。
 - 常用参数：
   - `--refresh`：重新下载全部数据（包括席勒 CAPE）。
   - `--skip panel`：不重建数据面板，用已缓存的面板重建全部结果。
-  - `--only <步骤…>`：只跑部分步骤（panel causality eras diagnostics factor_audit backtest scenarios regimes forecast valuation portfolio llm meta ablation regime_forecast，总是按这个顺序执行）。缺失因子审计 factor_audit 是默认步骤（约 20 秒），要先有 diagnostics 的结果；单独重建用 `--only factor_audit`。时代画像 eras 用走步检验选中的模型做传导归因：同一次构建里 diagnostics 换了模型（例如新克隆的第一次构建）时，eras 会在 diagnostics 之后自动重做；只跑 `--only diagnostics` 时构建会提示补跑 `--only eras`。改了 `scenariolab/scenarios/specs/*.yaml` 之后运行 `python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm`：宏观体制页和情景的体制读数共用同一次引擎无条件抽样，一年期预测、估值页、组合默认值和 LLM 示例都依赖情景结果或情景文件。
+  - `--only <步骤…>`：只跑部分步骤（panel agents_accounts causality eras diagnostics factor_audit backtest scenarios instruments regimes forecast valuation portfolio llm meta ablation regime_forecast，总是按这个顺序执行；forecast 这一步也写未来一年的情景加权和前瞻账本）。缺失因子审计 factor_audit 是默认步骤（约 20 秒），要先有 diagnostics 的结果；单独重建用 `--only factor_audit`。时代画像 eras 用走步检验选中的模型做传导归因：同一次构建里 diagnostics 换了模型（例如新克隆的第一次构建）时，eras 会在 diagnostics 之后自动重做；只跑 `--only diagnostics` 时构建会提示补跑 `--only eras`。改了 `scenariolab/scenarios/specs/*.yaml` 之后运行 `python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm`：宏观体制页和情景的体制读数共用同一次引擎无条件抽样，一年期预测、估值页、组合默认值和 LLM 示例都依赖情景结果或情景文件。
   - `--paths 1000`：每个内置情景的模拟路径数（默认 600）。
   - `--all`：连同默认不跑的引擎消融（ablation，约 5 分钟）和宏观体制的一年期预测检验（regime_forecast，约 2 分钟）一起跑；也可以单独运行 `--only ablation` 或 `--only regime_forecast`。
 - 重新构建之后重启服务器：自定义情景、自选回测窗口和 LLM 翻译用的是服务器启动时载入的引擎。换端口：`MSL_PORT=9000 python -m scenariolab.server`。
 - 页面的图表库 [Apache ECharts](https://echarts.apache.org) 5.5.1 随代码放在 `web/vendor/echarts/`（Apache License 2.0，许可证和 NOTICE 在同一目录），不依赖 CDN，断网也能打开；页面只访问本机的服务器。
-- 测试：`pytest -q`（写作时共 558 个测试，完整构建之后约 4 分钟；测试从不启动真正的 Claude Code，也不消耗订阅用量；需要数据或结果文件的测试在构建之前会自动跳过，默认构建之后只剩引擎消融的 1 个测试跳过，跑过 `--only ablation` 才会执行）。GitHub Actions 在 Python 3.10 和 3.12 上对每次推送和 PR 运行编译检查、`ruff check scenariolab tests` 和全部测试（只装 dev 依赖，不装 llm 扩展，翻译器的测试文件整体跳过；新克隆没有数据，依赖数据的测试跳过：352 个通过、178 个跳过；装了 llm 扩展时 357 个通过、201 个跳过）。
+- 测试：`pytest -q`（写作时 45 个测试文件共 1282 个测试，完整构建并生成季度模型的文件之后约 9 分钟：1280 个通过，2 个跳过，跳过的是两项研究存档核对，要把 `MSL_RESEARCH_DIR` 设成研究轮的文件夹才会执行）。所有会调用大模型的路径在测试里都用模拟后端：测试从不启动真正的 Claude Code，也不消耗订阅用量。需要数据或结果文件的测试在构建之前会自动跳过。GitHub Actions 在 Python 3.10 和 3.12 上对每次推送和 PR 运行编译检查、`ruff check scenariolab tests` 和全部测试。CI 只装 dev 依赖、不装 llm 扩展，翻译器的测试文件整体跳过；新克隆没有数据，依赖数据的测试也跳过：约 951 个通过、300 个跳过。装了 llm 扩展时是 957 个通过、325 个跳过，约 2 分钟。
 - 想参与开发、添加情景或数据源：见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### LLM 情景实验室：本机 Claude Code（使用你的订阅额度）
@@ -82,6 +86,88 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - 想改用 Anthropic API（按 API 计费）：在 `.env` 里写 `MSL_LLM_BACKEND=api` 和 `ANTHROPIC_API_KEY=…`，安装可选依赖 `pip install -e ".[llm]"`，再重启服务。只有明确设置 `MSL_LLM_BACKEND=api` 时才会用 API。
 
 不调用 LLM 时其余功能全部照常可用；实验室的“载入示例”会把一个内置情景的叙事和它手写的规格（按 LLM 的输出格式排列，标明不是实时翻译）分别放进第 ① ② 步，可以直接交给引擎运行，看一遍“叙事 → 规格 → 引擎”的完整流程；也可以载入内置情景当模板、编辑规格后运行，只是不能把自己的文字翻译成规格。**`.env` 已经写进 `.gitignore`，永远不要提交它。** 命令行也可以翻译：`python -m scenariolab.llm.translator "霍尔木兹海峡被封锁半年……" --run`（`--refresh` 不用缓存）。
+
+### 季度模型（试运行）：数据、构建与检查
+
+季度模型的文件不在默认构建的步骤里，各有自己的命令（都不调用大模型，也不下载数据）：
+
+```bash
+python -m scenariolab.qmodel.sources_q import <scratchpad 目录>   # 一次性：导入研究轮下载的原始文件（只复制字节并核对哈希）
+python -m scenariolab.qmodel.panel                                 # 季度面板 data/processed/panel_quarterly.csv（几秒）
+python -m scenariolab.qmodel.factor_checks                         # 因子层的 T-F、T-C 检验 → data/results/qmodel.json（约 1.5 分钟）
+python -m scenariolab.analysis.scenario_mix                        # 未来一年的情景加权和前瞻账本（约 30–45 秒；默认构建的 forecast 步骤也会做）
+python -m scenariolab.portfolio.qsets build                        # 组合评估与提取用的季度情景集（约 40 秒，标“试运行”）
+python tools/qtable_from_yaml.py --check                           # 13 个内置情景的季度情景表与 YAML 一致
+python tools/build_model_card.py --check                           # 变量卡片 card.json 与 schema.json 一致
+```
+
+- 季度面板要读几份默认构建还不下载的数据：22 个 FRED 序列（NIPA、Z.1 等）、Shiller 2026 版工作簿、费城联储的交货时间指数、密歇根的 5–10 年通胀预期和分类经济政策不确定性。它们是研究轮下载的，用第一条命令导入，来源、条款和哈希记在 `data/raw/SOURCES.json`。缺这些文件时季度面板建不起来：季度模型的页面显示构建提示，其余页面不受影响。新克隆的仓库目前还没有办法自己下载它们。
+- 季度情景表的翻译：用实验室的“季度情景表”模式，或者命令行 `python -m scenariolab.llm.qtranslator "叙事" --quarters 8`。`--print-prompt` 只打印系统提示词、不调用模型，`--mode test` 是盲测用的提示词。真实调用和月度翻译一样走本机 Claude Code，先给出估算：命令行会再问一次（`--yes` 跳过询问），网页要勾选确认。季度情景表不走 Anthropic API。
+- 智能体推演默认用高斯桩定价。想改用季度模型，在 `.env` 里写 `MSL_AGENT_MODEL=scenariolab.qmodel.adapter:make_adapter`；`python -m scenariolab.qmodel.adapter --check` 用智能体推演自己的接口检查核对它。
+
+### 叙事检验与切换关：先估算，真实运行只由你手动确认
+
+情景条件检验页（`#evaluation`）汇总季度模型的检验。它读的都是本地的计算结果和预注册记录，打开页面不调用模型。
+
+**叙事检验**把历史片段写成不含年份、人名和地名的叙事。大模型在盲测规范下把叙事翻译成季度情景表；模型只用片段之前的数据拟合，从片段起点模拟，再和真实结果比，旁边是直接给出真实因子路径的 oracle 臂。季度模型和月度引擎读同一张表。下面这些命令都用模拟后端，不调用模型，也不消耗额度：研究轮的 36 个代译表代替翻译，用来检查整条流程。
+
+```bash
+export MSL_LLM_BACKEND=mock
+python -m scenariolab.evaluation.narrative seal                                       # 首次：封存片段钥匙，写公开登记表（data/evaluation/）
+python -m scenariolab.evaluation.narrative estimate --narratives v1 --episodes X03 --engines Q   # 一个历史片段加 8 个合成片段、只用季度模型（运行约 1 分钟）：调用次数、tokens、分钟数和估算编号
+python -m scenariolab.evaluation.narrative run --estimate <估算编号>                     # 估算 10 分钟内有效
+python -m scenariolab.evaluation.narrative report <运行编号>                             # 从存下的逐格分数重算统计，写 report.json
+python -m scenariolab.evaluation.narrative list                                       # 研究轮、模拟后端和真实的运行
+python -m scenariolab.evaluation.narrative build                                      # 构建用的完整模拟运行（26 个片段，约 8–9 分钟）
+```
+
+- **真实运行**：
+  1. 把 `MSL_LLM_BACKEND` 设回 `claude_code`（默认值）。
+  2. 运行 `estimate`，例如 `--narratives v1 --episodes clean --engines Q,E`。
+  3. 运行 `run --estimate <编号>`。终端里会问「确认运行？」；不在终端里运行时要加 `--i-understand-this-uses-my-plan`。
+
+  每次调用都计入你订阅的用量。遇到用量上限会暂停，之后用 `resume <运行编号>` 接着跑：它按这次运行自己剩下的调用重新估算（别的估算不能用来继续），只要还有没缓存的调用就再问一次；翻译过的从缓存读，不重复花额度。叙事检验不走 Anthropic API，`--i-understand-this-is-billed` 只会被拒绝。
+- **网页**：情景条件检验 → 叙事检验 → 「用真实大模型重跑叙事检验…」。页面先显示估算，勾选确认之后才发出请求。服务器拒绝没有 10 分钟内估算编号的请求，也拒绝没有确认的请求，而且只接受本机页面发来的请求。
+- **构建、测试和 CI 永远用模拟后端**：`narrative build` 运行期间强制用模拟后端，pytest 里叙事检验拒绝真实后端。模拟后端和代译表的结果只是流程检验，报告里这样标注。
+- 按盲测规范 v2 写的叙事还没有写：现在的叙事臂用研究轮的 v1 叙事（12 个片段），新增的 6 个片段只有无叙事、oracle 和恒等式上界几臂。“美联储当时的预测（SEP）”一臂要先下载 ALFRED 的数据，这需要你的同意；`python -m scenariolab.evaluation.narrative sep plan` 只列出要下载什么。
+
+**切换关 T-S** 决定季度模型什么时候成为默认引擎，条件都在叙事检验的干净片段上：
+
+- 因子层的 T-F 通过；
+- oracle 臂（只给宏观；宏观加金融市场；全部字段）上，季度模型减月度引擎的 MAE 差的 90% 上界低于 +0.02，第 4 季度和窗口末都要满足；
+- 校准不比月度引擎差 0.02 以上；
+- 叙事臂上同样的差的上界低于 +0.03：只在真实大模型翻译的运行上评估，并且要覆盖全部干净片段（盲测规范 v2 的叙事）。模拟后端加研究轮代译的运行只是流程检验，它的叙事臂记为“不能评估”，结果也不追加到冻结记录旁的结果文件。
+
+缺任何输入都算没有通过，手写的结果文件也不算数。切换之后，季度情景集只有用切换关认证的那个模型版本生成时才是组合与提取的默认；版本不同就退回月度情景集，并提示重新生成。
+
+```bash
+python -m scenariolab.evaluation.switch status                    # 现在的默认引擎和原因（不评估）
+python -m scenariolab.evaluation.switch inputs                    # 评估要读什么、还缺什么
+python -m scenariolab.evaluation.narrative build --engines Q,E    # 两套引擎的模拟运行（不花额度，约 20 分钟；流程检验，T-S 不会因此通过）
+python -m scenariolab.evaluation.switch evaluate --run latest     # 评估（退出码 0 通过、1 没通过）；先不加 --write，看清楚预注册记录是怎么读的；latest 优先取真实运行
+```
+
+现在的状态是“尚未评估”，原因有三条：这条分支上还没有 T-S 的预注册记录（预注册那一轮合并之后才有）；因子层的 T-F 在 61 项计算检验里有 13 项没有通过；也还没有用两套引擎都打过分的叙事检验运行。
+
+### 季度模型的 API
+
+| 方法 | 地址 | 作用 |
+|---|---|---|
+| GET | `/api/q/card`、`/api/q/card/view` | 模型卡片（101 个变量）和今天的季初状态；变量卡片页的数据 |
+| POST | `/api/q/run` | 运行一张季度情景表：`{qtable, narrative?}` 或 `{scenario: "<内置情景>"}`，`n_paths` 100–4000，`mode` 为 path（整段路径）或 step（只模拟第 1 季），另有 `continuation`、`cma`、`seed`。返回任务编号，用 `GET /api/q/run/{id}` 取结果 |
+| POST | `/api/q/validate` | 校验报告：错误、被拒绝的条目、警告、缺失的 R1–R5 |
+| POST | `/api/q/translate/estimate` | 一次翻译的估算，不调用模型 |
+| POST | `/api/q/translate` | 叙事 → 季度情景表。只接受本机页面的 JSON 请求；真实后端没有缓存时要 `confirm: true`，否则返回 409 和估算；用量上限返回 503，带 `pause` 和 `reset_at` |
+| GET | `/api/q/valuation` | 估值块：今天的估值状态和历史分位、恒等式拆分、重估漂移、注意事项 |
+| GET | `/api/q/scenarios`、`/api/q/scenarios/{id}` | 13 个内置情景的季度情景表 |
+| POST | `/api/q/phase_spec` | 把同一张表换算成月度引擎的情景规格，并列出丢掉的视图 |
+| GET | `/api/evaluation`、`/api/evaluation/records/{id}` | 情景条件检验页的数据；一条预注册记录的全文 |
+| GET | `/api/evaluation/switch` | 切换关：默认引擎、每个条件和原因 |
+| GET / POST | `/api/evaluation/narrative/…` | 叙事检验：登记表摘要、运行列表和报告、`estimate`、`run`（要 10 分钟内的估算编号和 `confirm: true`）、`resume`、`cancel` |
+| GET | `/api/forecast/scenario_mix` | 未来一年的情景加权（也可用 `/api/forecast_mix`） |
+| GET | `/api/portfolio/sets` | 组合评估与提取可选的情景集、默认是哪一个、为什么 |
+
+`POST /api/portfolio/evaluate` 和 `/api/withdrawal/evaluate` 都接受 `scenario_set`（`monthly`、`quarterly` 或 `agent:<编号>`；不写就按切换关的默认）和 `rebalance: "quarterly"`。字段和错误的完整说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 的“季度模型”一章。
 
 ## 工作原理
 
@@ -141,27 +227,46 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 
 还要注意：引擎无条件模拟里 CPI 同比高于 4% 的月份占 41%（1973 年以来的历史为 33%），所以模拟路径里“通胀”的占比系统性偏高，情景页的体制读数总是附上这条说明和同一时段的引擎无条件对照。
 
+### 季度模型：情景 → 因子 → 资产（试运行）
+
+```
+第一层  情景假说（带概率）       唯一做预测的一层：内置情景、你自己写的情景、大模型翻译的叙事、智能体推演
+        季度情景表 QTable        每季写明的字段（数值 / 定性幅度 / 区间，都带原文引文）+ 长期锚、估值和体制的说明
+第二层  因子路径：一个联合模型    文字给的值精确满足；没说的从联合分布补全；政策可以写成“干预”（do 算子）
+        52 个字段 + 5 个政策冲击  每条路径、每个季度都补齐
+第三层  资产路径：同期映射        因子轮的传导系数作用在季度因子变动上；原油、国债、现金按恒等式
+        13 类资产               季度价格、收入和总回报，以及估值的两条腿（CAPE 倍数、基本面）
+```
+
+- 每个季度有三个输入：季初的状态 s_q（发布滞后之后已经知道的数据）、季前的情景文字 c_q 和季内的情景文字 x_q。大模型只翻译两段文字。每个字段都对应一条实测序列，训练时实测值就是“完美翻译”；文字没写的字段留空，由模型补全，页面上标成“模型补全”。
+- 因子层是 10 个核心变量的贝叶斯 VAR（政策利率用影子利率处理零下限），其余字段是卫星方程。文字给的值用 Waggoner–Zha 条件模拟精确满足，没给的从联合分布里补全。政策冲击当季不改变宏观，市场价格当季就反应。
+- 资产层默认用 L0：把因子轮的月度 β 用在季度加总的因子变动上。其他字段只通过因子层影响资产，新的项要通过预注册检验 T-A 才能加入。神经网络在三个十年里都输给了线性高斯模型，只作对照。
+- 估值既是状态，也是一条腿：股价 = CAPE 倍数 × CPI × 10 年平均实际盈利。情景不说估值时，倍数只跟着宏观和信用变化。“估值重估”要明写，而且等于直接假设股价，页面会这样写。历史上的估值抬升（每年约 1.2–1.9%）不往未来外推。
+- 金融条件（信用立场）每个季度都要写。不写时由模型补全，并标出“补全的信用利差在历史检验里与无条件抽样相当”：在研究轮的检验里，资产结果主要取决于它。
+- 一张表最多 60 个季度。路径模式一次推完整段，后面季度的陈述也影响前面；之后同一个模型无条件续推到 40 年。智能体推演用逐季模式。
+
 ## 验证结果
 
-下面的数字来自 2026-11-02 的构建（`meta.json` 的 built_at 为 2026-11-02T06:20:04Z，数据截至 2026-09），重新构建后会变；网页上的对应页面总是显示当前结果。风险资产 = 股票、REITs、黄金。
+下面的数字来自 2026-11-02 的构建（`meta.json` 的 built_at 为 2026-11-02T06:20:04Z，数据截至 2026-09），重新构建后会变；网页上的对应页面总是显示当前结果。回测窗口一节已经换成季度模型那一轮 P0.1 之后重跑的 backtest.json（长期锚改为训练期末可知的规则，条件扇形图分成两档）；引擎消融和估值检验两节还是 P0.1 之前的构建，`--only ablation valuation` 重建之后会变。风险资产 = 股票、REITs、黄金。
 
 ### 多年期：只在给定情景主题时检验（回测：模拟 vs 实际）
 
-模型、历史月份库和起点都只用训练期的数据；条件扇形图把测试期每 24 个月的真实宏观均值（8 个变量）当作“情景主题”，检验“如果事先知道宏观路径，引擎能不能算对资产”。
+模型、历史月份库和起点都只用训练期的数据。条件扇形图把测试期每 24 个月的真实均值当作“情景主题”，检验“如果事先知道这些路径，引擎能不能算对资产”，分两档：“宏观 + 金融条件”用 8 个变量（其中 10 年期收益率、信用利差和美元的变动是市场价格），“只有宏观”用 5 个（CPI 同比、工业产出同比、政策利率、油价、失业率）。
 
-| 窗口 | 测试期 | 已知宏观时的年化误差 | 不知道宏观 | 90% 区间覆盖率（已知 / 不知道） |
-|---|---|---|---|---|
-| 科技繁荣与泡沫破裂 | 1995-01 至 2004-12 | 3.5% | 3.8% | 78% / 81% |
-| 金融危机与 QE | 2005-01 至 2014-12 | 3.4% | 2.9% | 88% / 89% |
-| 疫情、再通胀与 AI | 2015-01 至 2026-09 | 4.0% | 3.6% | 100% / 98% |
-| 疫情以来 | 2020-01 至 2026-09 | 5.8% | 5.6% | 96% / 96% |
-| 4 个窗口平均 | | 4.1% | 4.0% | 91% / 91% |
+| 窗口 | 测试期 | 已知宏观与金融条件时的年化误差 | 只知道宏观 | 都不知道 | 90% 区间覆盖率（宏观 + 金融条件 / 只有宏观 / 都不知道） |
+|---|---|---|---|---|---|
+| 科技繁荣与泡沫破裂 | 1995-01 至 2004-12 | 4.2% | 3.9% | 4.5% | 75% / 74% / 75% |
+| 金融危机与 QE | 2005-01 至 2014-12 | 3.5% | 3.0% | 2.7% | 88% / 88% / 89% |
+| 疫情、再通胀与 AI | 2015-01 至 2026-09 | 4.0% | 3.7% | 3.5% | 100% / 95% / 99% |
+| 疫情以来 | 2020-01 至 2026-09 | 5.5% | 4.2% | 5.4% | 96% / 95% / 96% |
+| 4 个窗口平均 | | 4.3% | 3.7% | 4.0% | 90% / 88% / 90% |
 
-- 年化误差 = 风险资产模拟中位数年化收益与实际之差的绝对值平均。知道宏观之后剩下的误差里，传导部分（因子模型解释不了的）平均每年 4.0%，引擎部分（抽样、重加权、再锚定）1.3%。
+- 年化误差 = 风险资产模拟中位数年化收益与实际之差的绝对值平均。知道宏观与金融条件之后剩下的误差里，传导部分（因子模型解释不了的）平均每年 4.0%，引擎部分（抽样、重加权、再锚定）1.5%。
+- 每个窗口的长期锚（中性利率、期限利差、信用利差、失业率）按训练期末可知的规则估计：过去 40 个季度的均值，失业率用过去 80 个季度。以前每个窗口都用今天的判断值（0.75、0.75、2.0、4.8），这是前视；前瞻情景仍用今天的判断值。
 - 宏观因子在样本内解释风险资产月度价格波动的 23%，扩展窗口的样本外只有 15%：模拟 K 线的大部分波动来自重抽样的真实历史残差，因子决定的是条件分布的位置。
-- 4 个窗口中有 3 个“知道宏观”反而误差更大，原因见下面的引擎消融。
+- 4 个窗口中有 3 个“知道宏观与金融条件”反而比都不知道误差更大，只知道宏观时是 2 个。原因见下面的引擎消融。
 
-### 一年期滚动预测（一年期预测）
+### 一年期滚动预测（未来一年 → 历史回放）
 
 1984-12 至 2025-09 的 42 个起点，每次只用当时的数据重新估计模型、预测下一年。相似起点法按“今天像哪些历史起点”给历史年份加权；无条件法随机抽一个历史年份（两者用同一组随机数，差别只来自权重）；朴素基准是训练期 12 个月收益的正态分布。
 
@@ -177,7 +282,7 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - 偏离最大的 15 次预测中，2 次（13%）发生在外生冲击年份，13 次是宏观意外（实际的宏观变化落在预测的 90% 区间之外，例如 2007 年底之后的衰退和急速降息），没有一次是宏观符合预期而资产本身偏离（估值或盈利）。
 - “像哪段历史”该押多重是在 2004 年及以前的起点上选出的，之后的起点只用来检验。候选是每个起点可用历史起点数的 1/32、1/16、1/8、1/4、1/2（最多一半，每个起点都够用），选中最平的 1/2（第一个起点约 66 个有效起点，今天约 316 个）；42 个起点的权重都不是平的。押得越集中区间越窄、越容易被现实打穿：1/32 时检验期覆盖率只有 80%。
 
-### 实时样本外记录、情景概率的对账与校准（一年期预测）
+### 实时样本外记录、情景概率的对账与校准（未来一年 → 历史回放）
 
 - **实时样本外记录**：上面的成绩单是事后回放（每个起点只用当时的数据，但模型和代码是今天的）。每次构建还会把当时的一年期预测原样存进 `data/ledger/forecast_<起点>.json`：每个起点一个文件，只追加、不覆盖，不补记更早的起点，起点之后 3 个月以上才做的预测也不记；数据更新到起点之后 12 个月时，下一次构建自动给它打分（覆盖率、PIT、CRPS）。目前有 1 条记录（起点 2026-09），要等数据更新到 2027-09 才能评分。`data/` 不进 git，账本留在各自的电脑上。
 - **对账**：同一个起点、同一套引擎，情景加权的第一年比相似起点法悲观：美股大盘中位数 +4.1% 对 +8.1%，P(亏损) 41% 对 28%。差距来自把冲击放在第一年的 7 个情景（系统性金融危机、AI 泡沫破裂、去全球化、中东战争、日本化、滞胀、K 型 AI 经济，合计概率 48%）：按概率加权，它们第一年的失业率平均上升 0.63 pp，相似起点法是 −0.01 pp。页面把均值和 P(亏损) 的差距逐个情景拆开，各项相加正好等于差距。
@@ -203,7 +308,7 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - 这次消融按同样的规则选出的是“残差解耦”（每个区块都用独立抽取的残差）：验证 4.50% → 2.80%（改善 1.70% ± 0.06%），测试 5.49% → 4.81%（改善 0.68% ± 0.14%），覆盖率 90% / 98%，15 年无条件分布的宽度不低于基准的 97.1%。引擎没有自动切换：是否改用要先复核，改了以后要完整重新构建；诊断页的引擎消融部分会标出两者不一致。
 - 没有采用：残差去趋势（60 个月）验证 3.67%，但把医疗保健股的 15 年分布收窄到原来的 91%，会让回撤和破产概率显得更乐观；更细的 12 个月阶段和估值调整 CMA 都没有帮助，提高最少有效月份没有定论。
 - 剩下的主要是传导问题，不是调参能修的：2015 年以来的窗口里，oracle（训练期传导 × 真实因子）本身就远低于实际（美股 7.9% 对 13.5%），每年 5.1% 的缺口中估值重估占 3.8%。
-- 引擎消融不在默认构建里；当前的 ablation.json 与现行回测和现行情景的结果一致（`settings.engine_reproduces_backtest`、`scenario_effects.engine_matches_results`）。
+- 引擎消融不在默认构建里。ablation.json 与当时的回测和情景结果一致（`settings.engine_reproduces_backtest`、`scenario_effects.engine_matches_results`）；回测换成训练期末的长期锚之后，要 `--only ablation` 重跑才能再核对。
 
 ### 是不是少了因子？（缺失因子审计）
 
@@ -223,7 +328,31 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 1. **市盈率不能当同月的宏观因子。** 股价 = 盈利 × 市盈率，市盈率这个月的变化几乎就是这个月的股价变化：席勒 CAPE 的月度变化与当月美股价格收益相关 0.68，市场 P/D 相关 0.96。把它们放进走步检验，样本外 R² 大涨只是因为它们就是答案本身，所以只作对照。纳指（QQQ）的市盈率没有免费的历史数据，没有检验。
 2. **不需要再加宏观因子。** 外生候选单独加入后，三个样本外十年（1995–2004 / 2005–2014 / 2015–2026）的 R² 变化：10 年期实际收益率 −0.025 / +0.030 / +0.004（它的月度变化 99% 已能由现有因子解释），按发布月对齐的企业利润增长 +0.003 / −0.009 / −0.013，自由现金流代理（税后利润 − 非住宅投资）+0.007 / −0.040 / −0.014，都没有在每个十年稳定提升（加在走步检验选出的传导模型上，见上文“是不是少了因子？”）。ROIC 代理（利润 / 永续盘存法估算的资本存量）与利润占比的相关为 0.89，换进公允值回归也不显著（t = 1.1），所以用利润占比代表盈利能力。
 3. **估值是“状态”，不是驱动因子。** 每条模拟路径都记录它隐含的 P/D（κ = 0：只记录，不改变回报）。9 个估值状态变体（8 个按 −κ·(ln P/D − ln 公允 P/D) 以不同速度把股价拉回公允值，1 个不加拉力、只让股息率随 P/D 路径变化）在回测的验证窗口上全部比现行引擎差（现行 3.47%，最接近的是不加拉力的那个，3.61%），所以**估值拉力关闭**（`config.VALUATION["enabled"] = False`）。公允值回归（1973-02 至 2026-09，R² 0.71）里只有通胀预期显著（t = −5.9），实际利率的系数符号与理论相反（但不显著，t = 1.7）；只用当时数据的估值缺口对下一年市场价格收益的样本外 R² 为 −0.16，它并不能预测下一年。
-4. **今天**：美股 P/D 97 倍、席勒 CAPE 43.7，都高于 1973 年以来 99% 的月份；公允值 62 倍，对数缺口 +0.45（约贵 57%），缺口本身高于 94% 的月份（最高 +0.63，2000-08）。13 个情景 15 年后的 P/D 中位数按概率加权约 76 倍。估值重估或泡沫破裂要在情景里显式写出（对 s_div_yield 的视图或有上限的 asset_drift）。
+4. **今天**：美股 P/D 97 倍，高于 1973 年以来 99% 的月份；席勒 CAPE 40.6（2026-09，取自 Shiller 2026 版工作簿；P0.3 之前的面板用 NIPA 利润外推，读数是 43.7），高于 1973 年以来 97% 的月份；公允值 62 倍，对数缺口 +0.45（约贵 57%），缺口本身高于 94% 的月份（最高 +0.63，2000-08）。13 个情景 15 年后的 P/D 中位数按概率加权约 76 倍。估值重估或泡沫破裂要在情景里显式写出（对 s_div_yield 的视图或有上限的 asset_drift）。
+
+### 季度模型（试运行）：研究轮的证据和现在的计算值
+
+研究轮（2026-11-01，经过批评复核）的结论，报告和设计全文在 [docs/research/2026-11-02-sim-redesign/](docs/research/2026-11-02-sim-redesign/README.md)：
+
+- **宏观本身对资产几乎没有信息，“已知宏观”的能力来自信用利差。** 把真实的因子路径喂给因子轮的传导模型 F，看 1985–2026 年滚动合并的样本外 R²（10 类风险资产平均）。下表依次是 1、4、12、20 个季度，独立窗口分别为 167、41、13、8 个：
+
+  | 输入 | 样本外 R² |
+  |---|---|
+  | F（全部因子） | +0.226 / +0.223 / −0.007 / −0.030 |
+  | 去掉两种信用利差 | −0.003 / −0.016 / −0.258 / −0.285 |
+  | 只有宏观 | −0.081 / −0.145 / −0.373 / −0.421 |
+  | 只用 GZ 信用利差 | +0.165 / +0.149 / +0.110 / +0.108 |
+
+  12 和 20 个季度的数字，每个十年只有 2–3 个独立窗口，只能当个案。所以季度情景表的每个季度都要写金融条件；页面也说明，写信用利差接近直接写股权风险溢价。
+- **正确的叙事没有带来可检出的改进，而且研究版的检验不是盲的。** 在 11 个片段上，能检出的最小差异约 0.02–0.03 log，叙事带来的改进比它小；翻译者认出了全部 12 个片段的年代。所以叙事检验改成了常设、盲测的版本（见“叙事检验与切换关”）。
+- **起点估值不能当预测量用。** CAPE、P/D、自由现金流收益率这些起点估值，对 1–20 个季度的回报没有样本外增益；任何“拉回均值”的设定都更差。估值因此只作状态和初始条件。
+- **神经网络输了。** 在三个十年里，它 1 个季度的 R² 比结构化的线性高斯模型低 0.21、0.22、0.31，90% 区间都不含 0。
+
+这条分支上的计算值（不是冻结的预注册结果）：
+
+- 因子层的 T-F 后验预测检验，61 项通过 48 项。没通过的是：CPI 同比的 4 季自相关、低通胀时的股债相关、取值边界、do 算子下失业率反应的滞后、补全能力 F7。T-C 的关卡在 10 年期期限溢价上没过（补全 R² −0.021，门槛 −0.02）。
+- 13 个内置情景换算成季度情景表以后，106 个视图都落在月度引擎自己的交付容差之内。
+- 叙事检验还没有真实大模型的运行；模拟后端加代译表的完整运行只是流程检验。切换关 T-S 尚未评估。
 
 ## 数据来源
 
@@ -233,7 +362,7 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - [Ken French Data Library](https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html)：Fama-French 因子（CRSP 全市场回报）和 12 个行业的市值加权回报（含 / 不含股息）
 - [FTSE Nareit](https://www.reit.com/data-research/reit-indexes/monthly-index-values-returns)（`MonthlyHistoricalReturns.xls`）：All Equity REITs 的总回报、价格回报与收入回报
 - [Gold Prices（DataHub 核心数据集）](https://github.com/datasets/gold-prices)（`data/monthly.csv`）：月度金价
-- [Robert Shiller 的 ie_data.xls](http://www.econ.yale.edu/~shiller/data/ie_data.xls)：席勒 CAPE，和其他来源一样在首次构建时下载、只在 `--refresh` 时重新下载；它是可选来源，下载失败时 CAPE 为空、构建照常完成。他的数据结束之后按 NIPA 利润和 CRSP 价格外推，只作展示与对照
+- [Robert Shiller 的 ie_data.xls](http://www.econ.yale.edu/~shiller/data/ie_data.xls)：席勒 CAPE，和其他来源一样在首次构建时下载、只在 `--refresh` 时重新下载；它是可选来源，下载失败时 CAPE 为空、构建照常完成。s_cape 直接取他工作簿里的 CAPE，他最后一个 CAPE 月份之后为空，不再用 NIPA 利润外推。构建自己下载的是这个网址上的旧版（研究轮核对过，盈利只到 2023-06）；2026 版工作簿（E 和 D 到 2026-06）由 `python -m scenariolab.data.import_raw <目录>` 从研究轮的下载导入
 
 缺失因子审计这一轮加入的来源（模型输入是必需的，情景变量的来源缺失时对应的列为空，构建照常完成）：
 
@@ -242,6 +371,11 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - [纽约联储 ACM 期限溢价](https://www.newyorkfed.org/research/data_indicators/term-premia-tabs)（Adrian、Crump、Moench；必需；模型在全样本上估计）
 - [世界银行大宗商品价格（Pink Sheet）](https://www.worldbank.org/en/research/commodity-markets)（基础金属价格指数与原油均价；必需：能源股的专门因子）
 - [Freddie Mac 房价指数（FMHPI）](https://www.freddiemac.com/research/indices/house-price-index)、[Shiller 美国房价（Fig. 3-1）](http://www.econ.yale.edu/~shiller/data/Fig3-1.xls)（1973–74 年的衔接）、[Caldara–Iacoviello 地缘政治风险指数](https://www.matteoiacoviello.com/gpr.htm)、[Baker–Bloom–Davis 经济政策不确定性指数](https://www.policyuncertainty.com)、[纽约联储 Holston–Laubach–Williams 中性利率](https://www.newyorkfed.org/research/policy/rstar)：情景变量，可选
+
+季度模型的面板另外要读研究轮下载的文件（用 `python -m scenariolab.qmodel.sources_q import <scratchpad 目录>` 导入，只复制字节并核对哈希；默认构建还不下载它们）：
+
+- FRED 上的 22 个序列，来自 BEA 的 NIPA、美联储的 Z.1、H.8 和 H.10、BLS 的 CPS 和 OECD（`scenariolab/qmodel/sources_q.py` 的 `FRED_IMPORTS` 逐个列出）
+- Shiller 2026 版工作簿（shillerdata.com）、费城联储制造业调查的交货时间指数、密歇根消费者调查的 5–10 年通胀预期（不得再分发）、Baker–Bloom–Davis 的分类经济政策不确定性（医疗）
 
 第三方版权：Moody's（通过 FRED 提供的 Baa 收益率）、Freddie Mac（房贷利率调查 PMMS、FMHPI）、University of Michigan（消费者信心、通胀预期）、Robert J. Shiller（ie_data、Fig. 3-1）。这些数据只在本地使用，仓库不分发。
 
@@ -256,6 +390,9 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
 - **NIPA 数据会修订。** 利润占比、利润增长、自由现金流代理按首次发布的月份对齐（季度开始 5 个月后才算已知），但用的是今天的修订版数据，修订本身没有还原，水平上存在轻微的前视。
 - **估值拉力是关闭的。** 引擎只记录每条路径隐含的 P/D，不把估值拉回公允值；长期估值假设只通过资本市场假设里的常数调整进入。无条件模拟 15 年后美股 P/D 的分布很宽（中位数 78 倍，5%–95%：27–221 倍）。估值重估或泡沫破裂要在情景里显式写出。
 - **大部分月度波动解释不了。** 2015–26 年 10 类资产平均约 71% 的月度价格波动在样本外解释不了（市场自身的估值与风险偏好、行业新闻、危机月份）；把全部可用候选放进惩罚回归也只到 0.18–0.23。引擎用抽中月份的残差承载这一部分。GZ 信用利差和期限溢价是今天的修订版和模型估计值。
+- **季度模型还在试运行。** 切换关 T-S 尚未评估，默认仍是月度引擎。因子层的 T-F 有 13 项计算检验没过。这条分支的季度模型在长期限上有一部分路径发散（60 个季度的路径约 16–21% 被标成尾部）。美元项的一个缺陷让“AI 泡沫破裂”在季度模型上没有有限的资产路径，情景加权和季度情景集把它排除，并写明了原因。情景写的长期锚只记录，还没有作用到模型上。长期限的发散由另一条分支上的 P4b 处理，美元项的缺陷要在合并之后复查。
+- **叙事检验认得出年代。** 研究轮的翻译者认出了全部 12 个片段的年代，那次检验是“识别出年代的回放（不是盲测）”。盲测规范 v2 的叙事还没有写；每次运行都会测识别率，结果和成绩一起显示。
+- **季度面板的部分原始数据要从研究轮导入**（见“季度模型（试运行）”）。新克隆的仓库暂时建不起季度模型，其余功能不受影响。
 - **其他。** 只有美国 1973 年以来的数据（1955 年起只作描述），而美国是过去半个世纪的赢家，存在幸存者偏差；季度序列（劳动收入占比、利润、GDP 等）按通常的发布滞后对齐（季度第一个月之后 3–6 个月才算已知，之前沿用上一次发布值），不插值，但个别推迟发布的季度（如 2013、2018–19 和 2025 年美国政府停摆期间）会比实际发布早 1–2 个月出现，而且用的是今天的修订版数据；原油是现货回报（不含期货展期收益），黄金是月度均价，纳斯达克的股息用科技行业近似；超出历史支撑的冲击（例如 AGI）只能通过有上限的覆盖项注入，并在界面上标出。
 
 ## 声明

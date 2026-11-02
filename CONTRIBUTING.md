@@ -38,14 +38,49 @@ python -m scenariolab.server                # http://127.0.0.1:8765
 ## 测试
 
 ```bash
-pytest -q                      # 全部测试，完整构建之后约 4 分钟（没有数据时依赖数据的测试跳过，快得多）
-ruff check scenariolab tests   # 规则见 pyproject.toml（E9 语法错误 + F pyflakes）
+pytest -q                            # 全部测试，完整构建之后约 9 分钟（没有数据时依赖数据的测试跳过，约 2 分钟）
+ruff check scenariolab tests tools   # 规则见 pyproject.toml（E9 语法错误 + F pyflakes）
 python -m compileall -q scenariolab
 ```
 
 - 需要本地数据或结果文件的测试在构建之前会自动跳过；新克隆的仓库没有 `data/`，CI（`.github/workflows/ci.yml`，Python 3.10 和 3.12）就在这种状态下运行编译检查、ruff 和测试。
 - 新功能要有测试。测试不下载数据、不调用模型：网络用假的 `requests.get`（见 `tests/test_build.py`），API 用假的客户端（见 `tests/test_translator.py`），Claude Code 用假的 `subprocess.run`（见 `tests/test_claude_code.py`；`tests/conftest.py` 让任何测试都启动不了真正的 claude，也不消耗订阅用量）。
+- **测试从不花 token。** 凡是会调用大模型的路径（月度翻译器、季度情景表翻译器、智能体推演、叙事检验），测试里一律用模拟后端：`MSL_LLM_BACKEND=mock`，代码在 `scenariolab/llm/mock.py`。它不起进程、不联网，只读提示词和用户消息，给出确定的、符合格式的回答。
+  - 边界情况用录好的夹具：坏 JSON、拒绝、超时、用量上限、未登录等，用 `MOCK.push(name, match=...)` 或 `MSL_LLM_MOCK_FIXTURE` 触发。
+  - 季度情景表可以用 `mock.register_qtable(narrative, qtable)` 回放。
+  - 不要在测试里把后端设成 `claude_code` 或 `api`，也不要为了测试去掉“先估算、再确认”的关卡：叙事检验在 pytest 下会拒绝真实后端。
+  - 真实调用只能是用户自己发起的命令或按钮，先显示估算（调用次数、tokens、分钟数），确认之后才发出；构建步骤也永远不调用真实模型。
 - 需要数据的测试用 `needs_panel`（或检查它要读的那个结果文件）在缺数据时跳过，而不是失败。
+
+## 预注册记录：永远不改冻结的记录
+
+季度模型的几个关卡都先写好协议再运行，记录是冻结的：
+
+- T-A（资产层候选）、T-C（补全）、T-S（切换关）放在 `scenariolab/qmodel/preregistered/<日期>_T?.json`，由预注册那一轮的工具（`tools/run_preregistered.py`）写入，这两样随那一轮合并进来；
+- T-N（叙事检验能说什么）放在 `scenariolab/evaluation/narrative/preregistered/2026-11-02_TN.json`。
+
+规则：
+
+1. **永远不改冻结的部分**：协议、候选、门槛、种子、输入文件的哈希都不改。改了，基于它的结论就作废：切换关会把这样的结果判为“过期”，什么也不切换。
+2. **结果只追加，从不改写**：一次运行、一条状态或一条说明，只能追加到记录的 `results` 里（由运行它的工具写）。切换关的评估另外把每次结果追加到同名的 `<stem>.results.jsonl`。
+3. **协议要改，就另立一份新的记录**：新记录有新的日期或标签（例如 `2026-11-02-r2_TC.json`），并写明它取代哪一份。
+4. **先提交冻结的记录，再提交结果**：两次提交分开，不要把这几次提交 squash 合并。预注册那一轮合并之后，CI 会按完整的提交历史检查这个顺序。
+5. **记下在哪些数据上选了什么**：2015–2026 年已经被前几轮看过，是重新检验，不是新鲜的留出样本。真正干净的检验只有从 2026Q4 起的前瞻账本。
+6. **研究存档也冻结**：`docs/research/2026-11-02-sim-redesign/`、`scenariolab/evaluation/narrative/research/` 和 `scenariolab/evaluation/research/oracle_ablation.json` 都不改；新的一轮研究另建文件夹。
+
+## 季度模型的约定
+
+- 生成的文件不要手改，改了用对应的工具重新生成。测试和工具的 `--check` 会核对它们：
+  - `scenariolab/qmodel/card.json`：`python tools/build_model_card.py`
+  - `scenariolab/qmodel/schema_view.json`：`python tools/schema_view.py`
+  - `scenariolab/scenarios/qtables/*.json`：`python tools/qtable_from_yaml.py`
+- 叙事检验的钥匙 `data/evaluation/key.json`（哪个编号是哪段历史）只在本地，不进 git，也不要贴进 issue 或 PR。`prompts.py` 和 `runner.py` 永远不能导入 `key.py`，测试会检查导入关系；构造或发送提示词的代码里不要出现片段的年份或起点。
+- 界面文字遵守 [SIM_DESIGN](docs/research/2026-11-02-sim-redesign/SIM_DESIGN.md) §10.6，有文字测试检查：
+  - 「预测」只用于情景概率和前瞻账本；情景结果叫“情景条件模拟”或“推演”；
+  - 12–20 个季度的数字一律标「只能当个案」；
+  - 「估值假设」一律带「相当于直接假设股价」；
+  - 没有通过的预注册声明，不能写成“有改进”；
+  - 大模型的文字只用 `textContent` 或 `h()` 放进页面，不经过 `innerHTML`。
 
 ## 添加一个内置情景
 
@@ -55,6 +90,10 @@ python -m compileall -q scenariolab
 4. 运行 `pytest tests/test_scenarios.py`，再重建：`python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm meta`（宏观体制页和情景的体制读数共用引擎的无条件参照，一年期预测、估值页、组合默认值和 LLM 的示例都依赖情景结果或情景文件）。
 5. 阶段可以用 `regime` 字段要求多抽某种宏观体制的历史月份（例如 `regime: {滞胀: 0.7}`）；校验会给出历史支撑不够的警告（W1–W11），内置情景要做到没有这类警告。阶段名称或叙事写到的体制（滞胀、衰退、通缩、过热……）要在模拟路径的这一阶段里占一半以上的月份（体制读数的 N3 注记检查名称），先用视图做到（regime 字段、rg_ 标志、f_cpi 或情景变量）；历史撑不起来时（截断、支撑太薄、收缩比 1948 年以来最长的一次还长）就改名，并在叙事里写明实际的体制构成。W7 和 W11 只数抽中的收缩月份；要求多抽收缩类月份（收缩、衰退、深度衰退、滞胀）的阶段还要看模拟出来的收缩有多长：体制读数逐阶段给出与这一阶段重叠、长于 18 个月的收缩（`long_contraction`）和引擎无条件抽样同一时段的对照，收缩段里长于 18 个月的占比比对照高出 10 个百分点以上时出现 N5 注记——内置情景要做到没有 N5：把收缩阶段压到 12 个月左右、后面接一个复苏或常态阶段，或降低要求，并在叙事里写出这一占比和对照。“不衰退”这类说法要写出出现收缩的路径占比，并和引擎无条件抽样、同样长度的历史窗口对照。
 6. narrative 里引用的模拟数字（“模拟的……约……”）来自引擎的运行结果，跑完之后再填写；改了视图、传导模型（走步检验换了模型）或数据面板之后都要重新核对，摘要（summary）和因果链里的数字也一样：模拟路径只由视图、种子和引擎决定，改 narrative 的文字不改变任何模拟数字。
+7. 季度模型读的是同一个情景的季度情景表（`scenariolab/scenarios/qtables/<id>.json`）：
+   - 改了 YAML 之后运行 `python tools/qtable_from_yaml.py`，逐条看换算记录（`conversion`）和人工复核记录（`review`），金融条件的立场要有原文依据；
+   - 再运行 `python tools/qtable_from_yaml.py --check` 和 `--delivery`：每个视图都要落在月度引擎自己的交付容差之内；
+   - YAML 的 sha256 记在表里，旧表会被测试发现。
 
 ## 添加一个数据源
 
@@ -98,7 +137,10 @@ python -m compileall -q scenariolab
 
 - **Setup:** Python 3.10+, `pip install -e ".[llm,dev]"` (the `llm` extra is only for `MSL_LLM_BACKEND=api`; by default the translator runs the local Claude Code CLI on your own subscription, for personal local use only). The web UI is static ES modules with no build step; ECharts 5.5.1 (Apache-2.0) is vendored in `web/vendor/echarts/`.
 - **Build:** `python -m scenariolab.build` downloads the public data on first run and writes `data/results/`; use `--skip panel` or `--only <steps>` to rebuild part of it, and restart the server afterwards. The module and JSON contracts are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-- **Tests:** `pytest -q`, `ruff check scenariolab tests`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
+- **Tests:** `pytest -q`, `ruff check scenariolab tests tools`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
+- **Tests never spend tokens:** every LLM path (the monthly translator, the QTable translator, the agent tree, the narrative test) runs on the mock backend in tests (`MSL_LLM_BACKEND=mock`, `scenariolab/llm/mock.py`: deterministic, schema-valid answers and recorded failure fixtures). Never point a test at `claude_code` or `api`, and never remove the estimate-and-confirm gate to make a test pass. A real call exists only as a command or button the user starts after an estimate.
+- **Pre-registration:** never edit a frozen record (`scenariolab/qmodel/preregistered/`, which lands with the pre-registration round, and `scenariolab/evaluation/narrative/preregistered/`). Results are only appended; a protocol change is a new dated record that names the one it supersedes; commit the frozen record before its results and never squash those commits. The research archives (`docs/research/2026-11-02-sim-redesign/`, `scenariolab/evaluation/narrative/research/`, `scenariolab/evaluation/research/`) are frozen too.
+- **Quarterly stack:** `card.json`, `schema_view.json` and `scenarios/qtables/*.json` are generated (`tools/build_model_card.py`, `tools/schema_view.py`, `tools/qtable_from_yaml.py`; `--check` compares). After editing a built-in YAML, regenerate and review its QTable. The narrative test's key (`data/evaluation/key.json`) stays local, and the prompt builder must never import `key.py`.
 - **New scenario:** copy a YAML spec in `scenariolab/scenarios/specs/`, keep to the rules `tests/test_scenarios.py` checks, then rebuild `--only scenarios regimes forecast valuation portfolio llm meta`.
 - **Regime classifier:** its parameters change only through `config.REGIMES`; every change re-runs `--only scenarios regimes forecast valuation portfolio llm meta` (the scenario step labels the scenario paths with the live parameters; the regimes step holds the NBER validation, the out-of-sample grid and the revision study), plus `--only regime_forecast` when that file is kept, and reports the three studies.
 - **New data source:** a cached downloader in `scenariolab/data/sources.py` (through `_download()`; optional sources fail soft; check the content before caching, parse downloads and never execute them), panel columns and a `SOURCES` entry in `scenariolab/data/panel.py`, mocked network in tests. Open sources only; the one optional (free) key is `FRED_API_KEY`, which goes only to `api.stlouisfed.org` and is logged as `api_key=REDACTED`.

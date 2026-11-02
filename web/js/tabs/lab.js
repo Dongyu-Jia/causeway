@@ -1,5 +1,10 @@
-// LLM scenario lab: narrative -> (LLM) scenario spec -> validate_spec -> engine.
-// The LLM only translates a story into shocks, views, phases and a causal chain; every
+// 情景实验室 (SIM_DESIGN §10.4). Two modes, switched at the top of the page:
+//   季度情景表 (default; _qlab.js): narrative -> QTable/1 (the LLM only translates; every value carries a quote) ->
+//     validation report -> the quarterly stack (试运行) or the monthly engine (the same table converted to a phase
+//     spec, dropped views listed) -> results (_qdetail.js). Deep link #lab?q=<built-in id>.
+//   月度情景规格 (the current engine's spec editor, below): narrative -> (LLM) scenario spec -> validate_spec -> engine.
+//     Deep links #lab?<custom id> and #lab?tpl=<built-in id> open this mode, as before.
+// In the monthly mode the LLM only translates a story into shocks, views, phases and a causal chain; every
 // K-line and annualized return comes from the engine drawing real historical months.
 // The LLM is the local Claude Code CLI on the user's own subscription by default (MSL_LLM_BACKEND=api: the
 // Anthropic API). Without it the spec can still be loaded from a built-in, edited and run, and 载入示例 walks
@@ -11,6 +16,7 @@ import {
   errorText, isNum, table, fmtVar, varCell, pct, fill, GLOSSARY, viewSpecText, overrideItems,
   REGIME_LABELS, regimeRequest, regimeRequestMix,
 } from './_scenario_detail.js';
+import { renderQLab } from './_qlab.js';
 
 const DEFAULT_HORIZON = 180;    // the engine always simulates 15 years (config.HORIZON_MONTHS, meta.horizon_months)
 
@@ -152,7 +158,36 @@ function jsonError(err, text, lead = 0) {
   return { msg: `第 ${before.split('\n').length} 行第 ${pos - before.lastIndexOf('\n')} 列附近${near ? `（“${near}”）` : ''}：${jsonZh(what)}`, pos };
 }
 
+// The lab's mode: the QTable lab unless the deep link names a monthly spec (a saved custom scenario or a template),
+// remembered for the browser session.
+const MODE_KEY = 'msl-lab-mode';
 export async function render(root, ctx) {
+  const { ui, param } = ctx;
+  const { h } = ui;
+  let mode = null;
+  if (param && !/^q=/.test(param)) mode = 'monthly';               // #lab?<custom id>, #lab?tpl=<id>: the monthly spec editor
+  else if (param) mode = 'qtable';
+  if (!mode) { try { mode = sessionStorage.getItem(MODE_KEY) || 'qtable'; } catch (_) { mode = 'qtable'; } }
+  const body = h('div');
+  const show = async (m, { linked = true } = {}) => {
+    mode = m;
+    try { sessionStorage.setItem(MODE_KEY, m); } catch (_) { /* private mode */ }
+    ctx.charts?.disposeWithin?.(body);
+    const inner = h('div');               // a fresh container per mode: the other mode's late results see it detached
+    body.replaceChildren(inner);
+    const sub = { ...ctx, param: linked ? param : null, alive: () => (ctx.alive ? ctx.alive() : root.isConnected) && inner.isConnected };
+    if (m === 'qtable') await renderQLab(inner, sub);
+    else await renderMonthlyLab(inner, sub);
+  };
+  const seg = ui.seg([{ value: 'qtable', label: '季度情景表（QTable）' }, { value: 'monthly', label: '月度情景规格（现行引擎）' }], mode,
+    (m) => { if (m !== mode) { ui.setRoute('lab', '', ctx.alive || (() => true)); show(m, { linked: false }); } });
+  root.append(h('div', { class: 'row', style: { marginBottom: '14px' } }, h('span', { class: 'muted', style: { fontSize: '12px' } }, '实验室：'), seg,
+    h('span', { class: 'muted', style: { fontSize: '12px' } }, '季度情景表是新的输入格式（大模型的输出 = 模型的输入）；月度规格是现行引擎的输入。')),
+  body);
+  await show(mode);
+}
+
+async function renderMonthlyLab(root, ctx) {
   const { api, ui, meta, param } = ctx;
   const alive = ctx.alive || (() => root.isConnected);
   const { h, card } = ui;
@@ -235,9 +270,10 @@ export async function render(root, ctx) {
 
   // ---- variables reference (filled in the background)
   const refBox = h('div', {}, ui.loading('载入变量参考…'));
-  root.append(h('div', { style: { height: '16px' } }),
-    h('details', { class: 'card scenarios-more', style: { marginTop: 0 } },
-      h('summary', {}, '变量参考：引擎认识的变量和视图的可设范围（展开）'), refBox));
+  // #lab?vars: the monthly spec editor with this reference open (the diagnostics tab's audit links here)
+  const refDetails = h('details', { class: 'card scenarios-more', style: { marginTop: 0 }, id: 'lab-vars', open: param === 'vars' ? true : null },
+    h('summary', {}, '变量参考：引擎认识的变量和视图的可设范围（展开）'), refBox);
+  root.append(h('div', { style: { height: '16px' } }), refDetails);
 
   // ---- ③ run
   const nPaths = h('input', { type: 'number', min: '100', max: '2000', step: '100', value: String(draft.nPaths || 600),
@@ -758,7 +794,9 @@ export async function render(root, ctx) {
   // deep links. A re-render of the same page (the K-line toggle: ctx.rerender) keeps the editor
   // draft and the reader's scroll position instead of loading the linked spec over it again.
   const redraw = !!ctx.rerender && typeof draft.editor === 'string';
-  if (param) {
+  if (param === 'vars') {
+    if (!redraw) setTimeout(() => { if (refDetails.isConnected) refDetails.scrollIntoView({ block: 'start' }); }, 60);
+  } else if (param) {
     const tpl = param.startsWith('tpl=') ? param.slice(4) : builtinIds.has(param) ? param : null;
     if (tpl) {
       if (!redraw) {

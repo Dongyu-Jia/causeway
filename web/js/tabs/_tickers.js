@@ -21,6 +21,9 @@ import {
 
 const INK = '#1d2433', INK2 = '#4a5468', INK3 = '#7a8396', LINE = '#e3e6ec', ACCENT = '#3b5bdb';
 export const GOLD = 'GOLD';
+// the quarterly set has no monthly paths: tickers cannot be evaluated on it (the server refuses them)
+export const TICKERS_Q = '标的权重在季度情景集里不计入：标的（QQQ、TQQQ、BDC 等）需要月度路径，季度情景集没有。这里只按资产类别的权重计算（按比例归一化）；换回月度情景集即可算标的。';
+export const TICKERS_Q_ONLY = '这个组合只有标的：季度情景集算不了标的（它们需要月度路径）。请换回月度情景集，或者给资产类别设权重。';
 const ASSET_IDS = ['us_equity', 'nasdaq', 'energy', 'industrials', 'staples', 'healthcare', 'utilities', 'financials',
   'real_estate', 'gold', 'crude_oil', 'treasury_10y', 'cash'];
 // used until (or when) GET /api/instruments cannot be read: the same ids, groups and names as its catalog
@@ -624,9 +627,28 @@ export function portfolioEditor({ assets, presets, initial, onChange, onAmount, 
   const open0 = TK.open || { assets: wide || aIds.some(id => v[id] > 0) || !tIds.some(id => v[id] > 0), tickers: wide || tIds.some(id => v[id] > 0) };
   const assetSec = h('details', { class: 'tk-section', open: open0.assets ? true : null },
     h('summary', {}, h('span', { class: 'tk-sec-title' }, `资产类别（${alist.length} 类）`), assetSum), assetGrid);
+  const lockBox = h('div', { class: 'tk-lock' });
   const tickerSec = h('details', { class: 'tk-section', open: open0.tickers ? true : null },
     h('summary', {}, h('span', { class: 'tk-sec-title' }, `标的（${tIds.length} 个 + 金价）`), tickerSum, clearTickers),
-    statusBox, tickerBox);
+    lockBox, statusBox, tickerBox);
+  // a scenario set the tickers cannot use (the quarterly set has no monthly paths): their rows are disabled, the
+  // weights are kept for when the reader switches back, and the request carries the asset classes only
+  let locked = null;
+  function lockTickers(reason) {
+    locked = reason || null;
+    for (const id of tIds) for (const r of rows[id] || []) { r.slider.disabled = !!locked; r.input.disabled = !!locked; }
+    clearTickers.disabled = !!locked;
+    tickerBox.classList.toggle('tk-locked', !!locked);
+    lockBox.replaceChildren(...(locked ? [ui.notice(locked, 'info')] : []));
+  }
+  // the asset-class weights alone, normalized (null when none): what a set without tickers can evaluate
+  function getAssets() {
+    const s = aIds.reduce((t, id) => t + v[id], 0);
+    if (!(s > 0)) return null;
+    const out = {};
+    for (const id of aIds) if (v[id] > 0) out[id] = v[id] / s;
+    return out;
+  }
   const remember = () => { TK.open = { assets: assetSec.open, tickers: tickerSec.open }; };
   assetSec.addEventListener('toggle', remember);
   tickerSec.addEventListener('toggle', remember);
@@ -651,6 +673,7 @@ export function portfolioEditor({ assets, presets, initial, onChange, onAmount, 
     amountTotal: () => (mode === 'amount' ? total() : null),
     held: () => ids.filter(id => v[id] > 0),
     heldTickers: () => tIds.filter(id => v[id] > 0),
+    lockTickers, getAssets, tickersLocked: () => locked,
     open(section = 'tickers') { (section === 'assets' ? assetSec : tickerSec).open = true; },
   };
 }
@@ -1783,6 +1806,8 @@ const CSS = `
 .tk-amount-line { font-size: 12px; color: var(--ink-3); margin: -4px 0 8px; }
 .tk-amount-line:empty { display: none; }
 .tk-section { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 10px; }
+.tk-groups.tk-locked { opacity: 0.55; }
+.tk-lock .notice { margin: 4px 0 8px; }
 .tk-section > summary { cursor: pointer; display: flex; gap: 6px 10px; align-items: center; flex-wrap: wrap; list-style: none; padding: 2px 0 4px; }
 .tk-section > summary::-webkit-details-marker { display: none; }
 .tk-section > summary::before { content: '▸'; color: var(--ink-3); display: inline-block; transition: transform .15s; }

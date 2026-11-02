@@ -73,6 +73,16 @@ scenariolab/
                            (data/llm_cache/), concurrency; build step -> llm_translator.json
   llm/claude_code.py       the default backend: the local Claude Code CLI in print mode on the user's own
                            subscription (arguments, sanitized environment, output envelope, errors, status)
+  llm/mock.py              the mock backend (MSL_LLM_BACKEND=mock): deterministic answers, recorded failure fixtures
+  llm/qtranslator.py       narrative -> QTable/1 for the quarterly stack (see "季度模型")
+  qmodel/                  the quarterly stack: card, quarterly panel, factor layer, asset layer, valuation, rollout,
+                           QTable/1, the agent tree's adapter, /api/q/* (see "季度模型")
+  evaluation/              harness.py, evalview.py (/api/evaluation), switch.py (the switch gate T-S),
+                           narrative/ (the permanent narrative test) (see "季度模型")
+  analysis/scenario_mix.py -> results/forecast_mix.json + results/ledger/forecast_ledger.jsonl (未来一年：情景条件模拟)
+  portfolio/qsets.py       the 13 built-ins on the quarterly stack as a quarterly scenario set (scenario_paths_q.npz)
+  scenarios/qtables/       the 13 built-ins as reviewed QTables (tools/qtable_from_yaml.py)
+tools/                     build_model_card.py, schema_view.py, qtable_from_yaml.py, import_oracle_ablation.py
 web/
   index.html               shell: sidebar nav, K-line colour select, vendor/echarts/echarts.min.js, js/app.js
   vendor/echarts/          Apache ECharts 5.5.1 (echarts.min.js, LICENSE, NOTICE; Apache-2.0), from the npm
@@ -82,25 +92,31 @@ web/
   js/api.js                fetch wrapper (GET results cached per page load)
   js/ui.js                 DOM helpers, number formats, colour classes, META lookups
   js/charts.js             ECharts helpers and their lifecycle, K-line colours
-  js/tabs/<id>.js          one module per tab (13, see "Web app")
+  js/tabs/<id>.js          one module per tab (17, see "Web app")
   js/tabs/_scenario_detail.js, js/tabs/_weights.js   shared helpers (a leading underscore = not a tab)
+  js/tabs/_qdetail.js, _qlab.js, _switch.js   the quarterly stack's scenario section, the lab's QTable mode and the
+                           switch-gate notice (see "季度模型")
   js/tabs/_factor_audit.js the diagnostics tab's 「缺失因子审计」 section (factor_audit.json; deep links
                            #diagnostics?audit, ?audit-families, ?audit-assets, ?audit-concepts)
   js/tabs/_change_labels.js the walk-forward's change ids in words, one map for the diagnostics and valuation tabs
-tests/                     pytest suite (22 files and conftest.py, see "Testing")
+tests/                     pytest suite (45 test files and conftest.py, see "Testing")
 data/                      raw/, processed/, results/, ledger/ (git-ignored, built locally; ledger/ is the
                            append-only record of live one-year forecasts, see "Forecast ledger")
 docs/                      ARCHITECTURE.md (this file), screenshots/ (the README's four PNGs),
-                           research/2026-11-01-factor-audit/ (the research round's reports, statistics only)
+                           research/2026-11-01-factor-audit/ (the research round's reports, statistics only),
+                           research/2026-11-02-sim-redesign/ (the quarterly redesign: reports, critique, SIM_DESIGN)
 .github/workflows/ci.yml   CI on every push and pull request (see "Testing")
 CONTRIBUTING.md            setup, build, tests, adding a scenario or a data source (Chinese + English summary)
-.env.example               template for .env: MSL_LLM_BACKEND, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY (api only),
-                           FRED_API_KEY (optional), MSL_LLM_MODEL, MSL_CLAUDE_BIN, MSL_LLM_TIMEOUT,
-                           MSL_LLM_CONCURRENCY, MSL_PORT
+.env.example               template for .env: MSL_LLM_BACKEND (claude_code | api | mock, tests only),
+                           CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY (api only), FRED_API_KEY (optional),
+                           MSL_LLM_MODEL, MSL_CLAUDE_BIN, MSL_LLM_TIMEOUT, MSL_LLM_CONCURRENCY, MSL_PORT,
+                           MSL_AGENT_MODEL (optional: the agent tree on the quarterly stack)
 ```
 
 ## Conventions
 
+* The quarterly stack (see "季度模型") labels quarters "1973Q1"; its asset returns are quarterly log returns and
+  its x fields are in the model card's units. Everything below is the monthly engine's convention.
 * Monthly data, index = month start (`pd.Timestamp("2026-09-01")`). JSON dates
   are `"YYYY-MM"` strings for monthly series and `"YYYY"` for yearly ones; a few
   metadata fields are `"YYYY-MM-DD"` (`meta.data_start` / `data_end`,
@@ -196,9 +212,9 @@ data downloaded) anyway.
 | backtest | `analysis.backtest.run` | panel, model_selection.json | results/backtest.json |
 | scenarios | `scenarios.library.run` | specs/*.yaml, model_selection.json | results/scenarios.json, results/scenarios/<id>.json, results/scenario_paths.npz |
 | regimes | `analysis.regimes.run` | panel (+ the rg_ columns), the MonthDB, the cached reference run (`runner.reference_simulation`, shared with the scenario readouts), diagnostics.json (the transmission walk-forward verdict, optional), data/raw/fred (the 2025-10 interpolation note, cache only, optional) | results/regimes.json |
-| forecast | `analysis.forecast.run` | panel, model_selection.json, scenario_paths.npz (live scenario mixture), results/scenarios/<id>.json (each built-in's validated spec, re-run with runner.run_spec at library.seed_for(id) and the npz path count for its year-one macro paths; this reproduces the npz exactly, `live.reconciliation.paths_reproduced`), data/ledger/*.json | results/forecast.json; appends data/ledger/forecast_<origin>.json |
+| forecast | `build.build_forecast`: `analysis.forecast.run`, then `analysis.scenario_mix.run` | panel, model_selection.json, scenario_paths.npz (live scenario mixture), results/scenarios/<id>.json (each built-in's validated spec, re-run with runner.run_spec at library.seed_for(id) and the npz path count for its year-one macro paths; this reproduces the npz exactly, `live.reconciliation.paths_reproduced`), data/ledger/*.json; for the mixture also scenario_macro.npz, scenarios/qtables/*.json and the quarterly panel | results/forecast.json; appends data/ledger/forecast_<origin>.json; results/forecast_mix.json; appends results/ledger/forecast_ledger.jsonl (see "季度模型") |
 | valuation | `analysis.valuation.run` | panel, forecast.json (analog_share, reproduction check), backtest.json and scenarios.json (consistency checks), data/raw/shiller (cache only, never downloads) | results/valuation.json |
-| portfolio | `portfolio.service.run` | the context (build_continuation), scenario_paths.npz, scenarios.json | results/continuation_paths.npz, results/portfolio_default.json |
+| portfolio | `build.build_portfolio`: `portfolio.service.run`, then `portfolio.qsets.run` only once the switch gate T-S has passed | the context (build_continuation), scenario_paths.npz, scenarios.json; switch.state() | results/continuation_paths.npz, results/portfolio_default.json; after the switch results/scenario_paths_q.npz + scenarios_q.json |
 | llm | `llm.translator.run` | specs/*.yaml (few-shot examples), the MonthDB, results/regimes.json (`engine.studies`, quoted by the prompt's regime section only when its `data_end` is the anchor month) | results/llm_translator.json |
 | meta | `build.build_meta` | panel_meta.json + `data.panel.SOURCES` (`meta_sources`), the context, `translator.status()` | results/meta.json |
 | ablation (opt-in) | `analysis.ablation.run` | panel, backtest.json (reproduction check), scenarios.json | results/ablation.json |
@@ -1751,12 +1767,19 @@ the portfolio service may be reading the old one.
 
 ```python
 evaluate_portfolio(weights: dict, scenario_probs: dict | None = None,
-                   include_custom: list[str] = (), rebalance: str = "monthly") -> dict
+                   include_custom: list[str] = (), rebalance: str | None = None,
+                   scenario_set: str | None = None) -> dict
 evaluate_withdrawal(weights: dict, initial: float = 1e6, rate: float = 0.04,
                     strategy: str = "all", inflation_indexed: bool = True,
                     scenario_probs: dict | None = None, include_custom: list[str] = (),
-                    horizon_years: int = 30) -> dict
+                    horizon_years: int = 30, alpha_mode: str = "shrunk",
+                    scenario_set: str | None = None) -> dict
 ```
+
+This section describes the monthly set. `scenario_set` (monthly | quarterly | `agent:<id>`; None = the switch gate's
+default, monthly until T-S passes), `rebalance` "quarterly" (None = monthly on a monthly set, quarterly on a
+quarterly one) and the step_months = 3 rules are in "季度模型" (Quarterly scenario sets); a monthly request
+computes exactly what it did before sets existed.
 
 Inputs. `weights` = {asset id: weight >= 0}, normalized to 1 (an unknown
 asset, a negative or non-numeric weight, or all zeros is a ValueError, i.e.
@@ -1871,7 +1894,7 @@ are fast; a failure of one part only makes its first request slower.
 |---|---|---|
 | GET | `/`, `/js/…`, `/css/…`, `/vendor/…` | the static UI from web/ (`Cache-Control: no-cache` on `/`, `/index.html`, `/js/*`, `/css/*`, so edited tab modules are revalidated; `/vendor/echarts/*` gets ETag and Last-Modified, a conditional GET a 304, and no Cache-Control; a directory such as `/vendor/` is a 404, no listing) |
 | GET | `/api/meta` | meta.json plus `results`: the result names (of the list below) whose file exists at request time, so pages skip a missing optional file instead of requesting it (`api.optional`) |
-| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, factor_audit, scenarios, regimes, forecast, ablation, regime_forecast, portfolio_default, llm_translator, valuation |
+| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, factor_audit, scenarios, regimes, forecast, forecast_mix, ablation, regime_forecast, portfolio_default, llm_translator, valuation (and the agent tree's and instruments' result names) |
 | GET | `/api/scenarios/{id}` | results/scenarios/{id}.json, else results/custom/{id}.json (built-ins win) |
 | GET | `/api/scenarios/custom` | `{scenarios: [{id, name, summary, source, created, prior_prob, prob}]}`, newest first |
 | POST | `/api/scenarios/custom/run` | `{spec, save = true, n_paths = 600 (clamped 100..2000), seed = 7, source = "custom"}` -> the detail JSON (with `regimes`; W8-W11 in `validation.warnings`; a phase's `regime` key in the dict or list form) + `created`; with `save`, also custom/{id}.json + .npz |
@@ -1881,6 +1904,12 @@ are fast; a failure of one part only makes its first request slower.
 | POST | `/api/backtest/run` | `{train_end "YYYY-MM", months 12..180, n_paths 100..400 = 200, seed = 11}` -> one custom holdout window: the `run_window` JSON (id "custom", name "自选窗口") + `label`, `custom`, `shocks`, `elapsed_s` (see backtest.json) |
 | GET | `/api/llm/status` | `translator.status()`: `{backend, label, available, model, reason}`, plus `binary, version, auth` for claude_code (local checks only, never a model call; cached 60 s, an unavailable answer 5 s) |
 | POST | `/api/llm/translate` | `{narrative (<= 20000 chars), horizon_months = 180 (12..600), refresh = false}` -> `{spec, validation, model, requested_model, usage, raw, elapsed_s, preview, backend, cached, meta}`; `refresh: true` (exactly) skips data/llm_cache/; only a Host of 127.0.0.1 / localhost / [::1] is served (else 403) |
+
+The quarterly stack's endpoints are listed in "季度模型": `/api/q/*` (the card, runs, validation, the QTable
+translator, valuation, the built-in QTables, the phase spec), `GET /api/evaluation` and `/api/evaluation/records/{rid}`,
+`GET /api/evaluation/switch`, `/api/evaluation/narrative/*` (estimate, run with a fresh estimate id and
+`confirm: true`), `GET /api/forecast/scenario_mix` and `GET /api/portfolio/sets`. `/api/evaluation` and
+`/api/evaluation/switch` are included before `/api/{name}`, which would otherwise take them.
 
 `/api/backtest/run` is a plain def, so FastAPI runs it in its threadpool and
 the server stays responsive. Finished windows are cached in memory by
@@ -2126,6 +2155,874 @@ the beam search; agents/snapshot.py freezes one run as a snapshot; agents/jobs.p
   bars, 各季动作分布, a 分支 × 资产 table and the 8-quarter agent-vs-base-rate KPI; the two-stage sankey is not
   built (the overview canvas shows the same flow).
 
+## 季度模型 (qmodel/, evaluation/; SIM_DESIGN 2026-11-02)
+
+The quarterly stack simulates scenario → factors → assets one quarter at a time (季度情景模拟). It implements the
+spec [SIM_DESIGN.md](research/2026-11-02-sim-redesign/SIM_DESIGN.md); the research reports and the critique behind it
+are in the same folder ([README](research/2026-11-02-sim-redesign/README.md)).
+
+The framing is the user's: this is simulation, not price prediction. The only predictive layer is the scenario
+hypotheses and their probabilities. The factor and asset layers simulate what follows from a hypothesis. Horizons are
+quarterly and longer, and 12–20-quarter statistics carry the anecdote label 「每个十年只有 2–3 个独立窗口，只能当个案」.
+
+**Status.** The stack is labelled 试运行 (`config_q.TRIAL_LABEL`) until the switch gate T-S passes (below). Until
+then the monthly engine stays the default for the 13 built-in scenarios, the 未来一年 tab, 组合评估 and 提取与破产概率.
+The quarterly stack serves the lab, the scenario detail's 季度模型（试运行） section, the agent tree (when
+`MSL_AGENT_MODEL` names its adapter) and the evaluation tab, and it can be picked by hand wherever a default is shown.
+
+**What is on this branch.** feat/quarterly-ui carries P0–P4 as a snapshot, plus P6–P10. P4b (bounded transforms for
+unemployment and the spreads) and P5 land from feat/quarterly-model. P5 brings the frozen T-A / T-C / T-S records,
+`evaluation/protocol.py`, `tools/run_preregistered.py` and the `quarterly` / `qmodel` / `evaluation` build steps.
+
+For the quarterly stack this chapter is the contract. Where an earlier section of this file says something else
+about it (the forecast tab, the portfolio services' scenario sets, the tab list), this chapter wins. The modules'
+docstrings carry the full detail; this chapter names the shapes, the rules and the files.
+
+### Layout and files
+
+```
+scenariolab/qmodel/          the quarterly stack; config.py is not edited (its constants live in config_q.py)
+  config_q.py                paths, the quarter convention, L0 unit conversion, release lags (SERIES_LAG), reaction
+                             functions, the QTable vocabulary (size bins, stances, anchors), factor / asset / rollout /
+                             API settings, TRIAL_LABEL
+  schema.json                schema-revise-2 3.0 plus P0.5 (x_oil_cause enum; y_mult = Δlog CAPE multiple; y_fund, y_pd)
+  card.json, card.py         the model card (generated by tools/build_model_card.py) and qtable_json_schema()
+  schema_view.json           the blind schema view of test-mode prompts (tools/schema_view.py)
+  sources_q.py, panel.py     cache-only raw readers and the quarterly panel
+  policy.py                  reaction functions, automatic stabilizers, the policy shocks u_*
+  factors.py                 Layer 2: BVAR core + satellites, conditioning, the do-operator, the zero bound
+  factor_checks.py           T-F and T-C -> data/results/qmodel.json (computed, shown; not a gate)
+  assets.py                  Layer 3: L0, the mechanical identities, residuals, income, the CMA arms
+  valuation.py               the CAPE-multiple identity, the legs, valuation statements, implied CAPE and P/D
+  rollout.py                 path mode, step mode, the state roll Φ, continuation, exports, attribution
+  adapter.py                 the agent tree's ModelAdapter; the instruments' CoreView input
+  qtable.py                  QTable/1: validation and refusals, rollout inputs, the monthly engine's phase spec
+  qview.py, qreadout.py      a QTable in words per quarter with badges; a run's extra readouts
+  valview.py, cardview.py    the valuation view; the 变量卡片 view
+  api.py                     /api/q/*
+scenariolab/llm/qtranslator.py     narrative -> QTable/1 (production and test modes), estimate(), QTablePause
+scenariolab/llm/mock.py            the mock backend (its qtable and nprobe call kinds serve the quarterly stack)
+scenariolab/scenarios/qtables/     the 13 built-ins as reviewed QTables (tools/qtable_from_yaml.py)
+scenariolab/engine/anchors.py      train-end anchors (P0.1), shared with the monthly engine's backtests
+scenariolab/evaluation/harness.py  the oracle-macro evaluation harness (port of the research simharness.py)
+scenariolab/evaluation/evalview.py GET /api/evaluation: the 情景条件检验 tab's view of records and computed checks
+scenariolab/evaluation/switch.py   the switch gate T-S: evaluate(), state(), GET /api/evaluation/switch
+scenariolab/evaluation/research/oracle_ablation.json   the research round's oracle ablation (committed)
+scenariolab/evaluation/narrative/  the permanent narrative test; preregistered/2026-11-02_TN.json; research/ (committed)
+scenariolab/analysis/scenario_mix.py   未来一年：情景条件模拟: the four-quarter mixture and the forward ledger
+scenariolab/portfolio/qsets.py         the 13 built-ins on the quarterly stack as a quarterly scenario set
+tools/build_model_card.py, schema_view.py, qtable_from_yaml.py, import_oracle_ablation.py
+web/js/tabs/evaluation.js, card.js, _qdetail.js, _qlab.js, _switch.js   (and forecast.js, lab.js,
+                             _scenario_detail.js, _weights.js, portfolio.js, withdrawal.js and the text tabs, changed)
+data/ (git-ignored)
+  processed/panel_quarterly.csv, panel_quarterly_meta.json
+  results/qmodel.json, qtable_delivery.json, forecast_mix.json, ledger/forecast_ledger.jsonl, switch_gate.json,
+          scenario_paths_q.npz, scenarios_q.json, narrative/<run_id>/, narrative/estimates/<id>.json
+  evaluation/key.json (the sealed key), registry.json, narratives/<code>/<version>/<n>.md, standin/<code>/v1/<n>.json
+  llm_cache/                 shared with the monthly translator (mock answers are never cached)
+```
+
+### Commands
+
+The build's `STEPS` are unchanged on this branch (tests/test_build.py pins the shared list), so the quarterly files
+come from their own modules:
+
+```
+python -m scenariolab.qmodel.sources_q import <scratchpad>   # once: the research rounds' downloads -> data/raw
+python -m scenariolab.qmodel.panel                           # the quarterly panel (a few seconds)
+python -m scenariolab.qmodel.factor_checks [--quick]         # T-F and T-C -> results/qmodel.json (about 1.5 min; --quick 30 s)
+python tools/build_model_card.py [--check]                   # card.json from schema.json and the spec's overrides
+python tools/schema_view.py [--check]                        # the blind schema view
+python tools/qtable_from_yaml.py [--check | --delivery [--paths N] | --only ids]
+python -m scenariolab.qmodel.adapter --check                 # the agent tree's contract check on the real adapter
+python -m scenariolab.llm.qtranslator --print-prompt [--mode test]                  # the prompt; no model call
+python -m scenariolab.analysis.scenario_mix [--paths N] [--seed S] [--no-ledger]    # about 30-45 s
+python -m scenariolab.portfolio.qsets build [--paths 600] | status                  # about 40 s
+python -m scenariolab.evaluation.narrative <command>         # "The narrative test" below
+python -m scenariolab.evaluation.switch status | inputs | evaluate --run latest [--write] [--append]   # exit 0 = passed
+python -m scenariolab.evaluation.harness                     # the harness self-check
+python tools/import_oracle_ablation.py --from <sim_redesign> [--check]
+```
+
+The quarterly panel reads series that the app's own downloader does not fetch yet: 22 FRED series of the schema
+rounds (NIPA, Z.1, CPS, H.8, H.10 and OECD), the Shiller 2026 workbook, the Philadelphia Fed's delivery-time index,
+Michigan's 5–10-year inflation expectation and the categorical EPU (`sources_q.FRED_IMPORTS`, `PUBLISHER_IMPORTS`).
+They were downloaded by the research rounds and are imported once with `sources_q import`. That command copies bytes,
+checks each file's hash against the one the round recorded, opens nothing as a workbook and writes a provenance record
+to data/raw/SOURCES.json. Without these files `panel.py` raises a FileNotFoundError that names the import command,
+and every page built on the quarterly stack shows its build hint.
+
+Two default build steps now do more:
+- `forecast` (`build.build_forecast`) writes forecast.json, then the scenario mixture forecast_mix.json, and appends
+  the forward ledger.
+- `portfolio` (`build.build_portfolio`) writes the monthly outputs. It rebuilds the quarterly scenario set only once
+  `switch.state()` says the quarterly stack is the default.
+
+No build step and no test calls a real LLM.
+
+### The three layers and the quarterly cell
+
+```
+Layer 1  情景假说（带概率）      the only predictive layer: the user, the 13 built-ins, the LLM translating a
+                                narrative, the agent tree
+         QTable/1               per quarter the stated fields (value / size / range, each with a quote) + c_q
+Layer 2  因子路径（一个联合模型）  stated values delivered (hard exactly, soft within their sd); everything else drawn
+                                from p(x | s, stated); policy may be an intervention (do-operator)
+         x_q complete           52 fields + 5 shocks per path and quarter
+Layer 3  资产路径（同期映射）      r = drift + B·g(x_q, s_q) + residual; crude, the Treasury and cash by identity
+         13 assets              quarterly log price, income, total; the valuation legs
+State roll Φ                    s_{q+1} = Φ(s_q, x_q, r_q): levels, the inflation trend, CAPE, P/D, flags
+```
+
+The layers keep two errors apart: hypothesis error (Layer 1 is wrong) and simulation error (Layers 2–3 are wrong
+given a correct hypothesis). The narrative test measures them separately.
+
+A cell is one quarter:
+- **Inputs.**
+  - `s_q`: the state at the start of the quarter, known after publication lags (the card's 22 states, the core's last
+    two quarters, s_vol, s_zlb, s_core4).
+  - `c_q`: the pre-quarter text (anchors, announced paths, cross-quarter constraints, valuation statements, regime
+    requests).
+  - `x_q`: the in-quarter text: any subset of the 52 fields and 5 shocks, plus the financial-conditions stance.
+- **Model.** The factor layer conditions on what is stated and completes the rest. The asset layer maps the completed
+  fields to returns. Φ is accounting with no fitted asset parameters.
+- **Training.** In training the realized fields are the perfect translation. No text model is trained, so the
+  meaning of a field is the measured series' definition, which the card gives the translator.
+
+Every x field is same-quarter (同期); the s states are predetermined (前定); c_q is assumed (假设).
+
+**The quarterly panel** (`data/processed/panel_quarterly.csv` + `_meta.json`) has one row per calendar quarter, from
+1973Q1 to "today", the quarter after the last complete data quarter (2026Q4 on the 2026-09 monthly panel, 216 rows).
+Its column roles are recorded in the meta's `columns`:
+
+| Role | What |
+|---|---|
+| `x` | the card's x fields, realized during the quarter |
+| `x_aux` | model variables that are not QTable fields (headline CPI inflation, d_oil_sup) |
+| `s`, `s_aux` | start-of-quarter states (card rows, and model-only states such as the inflation trend, the Sahm gap, the flags, s_vol and each equity's own P/D) |
+| `y`, `y_aux` | the 13 asset returns, y_mult, y_fund, y_pd, y_eps; log total returns, income, dividend growth |
+| `view` | display only |
+| `level` | quarter-end levels |
+| `known` | `<field>_l1__known` / `_l2__known`: the lags as published by the start of the quarter |
+
+The L0 fields equal the quarter's sum of the monthly factor changes times a unit scale (`config_q.L0_FIELDS`), to
+1e-12. A truncation test rebuilds the panel from inputs cut at their release lags and checks that the start-of-quarter
+columns are unchanged.
+
+### The model card (card.json)
+
+One row per variable, 101 rows in all:
+
+| Group | Rows |
+|---|---|
+| x | 52 fields |
+| u | 5 policy shocks |
+| s | 22 states |
+| c | 5 anchors |
+| y | 5 outputs |
+| v | 12 views |
+
+The columns are Appendix A's, under English keys: id, zh, slot, lead (同期/前定/假设), timing, endo (E0 / E0p / E1c /
+E1 / E2 / E3 / S / C / V / O), route (到资产的路径), translator, factor_core, fc, unit, first, lag and note. The machine
+fields are group, endo_code, timing_code, layer, tier, family, l0, l0_scope, fc_role, permission, definition,
+keywords and panel. `keywords` are the Chinese words a quote must contain for an E1 / E1c / E2 entry (§7.3); `panel`
+holds the quarterly-panel columns of the row.
+
+The permission codes are free, stated_only, raw_or_shock, intervention_only, default, data, read_only and never.
+
+`tools/build_model_card.py` generates the card from schema.json with the rules and overrides of the spec's
+`design/d03_model_card.py`, so the card and the schema cannot disagree. Never edit card.json by hand: `--check`
+fails on any difference.
+
+The card feeds:
+- the translator's field list and the QTable JSON schema (`card.qtable_json_schema()`; its x enum is exactly the
+  card's 52 x ids);
+- the validator;
+- the 变量卡片 tab (`cardview.view()`, GET /api/q/card/view), whose texts replace card ids with Chinese names;
+- the lab's column tooltips.
+
+Tests assert that the card, the QTable schema and the panel columns agree one to one.
+
+### QTable/1: the contract (qtable.py)
+
+The LLM's output schema is the model's input schema.
+
+```
+{"schema": "qtable/1", "model_card": "card/1 (...)", "n_quarters": H,                      H <= 60
+ "rows": [{"q": 1..H,
+           "x":  {field: entry},                  absent = not stated: the model completes it
+           "u":  {u_ff | u_bs | u_def | u_tr | u_ptax: entry},   interventions the text names
+           "fc": {"stance": 明显收紧 | 收紧 | 中性 | 宽松 | 明显宽松 | 未说明, "quote"}}],   required in every row
+ "c_q": {"anchors": {r_star | pi_lr | a_tp | a_spread | a_ustar | a_oil | a_usd: {value, from_q, quote}},
+         "announced": [{field, quarters, values, sd, quote}],
+         "constraints": [{kind: sum | mean | yoy | level | range, field, quarters, value | min/max, sd, quote}],
+         "valuation": [{quarters, mode: inferred | hold | rerate, direction, size: 温和 | 明显 | 极端,
+                        reversion_half_life_years >= 14, quote}],
+         "regime": [{quarters, label, share, quote}]},
+ "events": [{text, quarters, templates, channels, generic_footprint, how_decomposed}],   never an input
+ "notes": [...]}                                                                            never an input
+entry = exactly one of {"value"[, "sd"]} | {"sign", "size": 小 | 温和 | 明显 | 大幅 | 极端} | {"min", "max"},
+        plus "src": stated | stated_qual | derived and "quote" (<= 120 characters, a substring of the narrative)
+```
+
+The size bins are 0.25 / 0.5 / 1 / 2 / 3 training sd of the field's quarterly change (`config_q.SIZE_BINS`). A
+stance maps to soft statements on d_gz and d_spread at ±1 or ±2 training sd (`FC_STANCE`, sd `FC_STANCE_SD`).
+`x_oil_cause` is supply / demand / mixed; the adapter passes it as 1 / 0 / 0.5.
+
+**Modes and sources.**
+- Modes:
+  - "production": the lab, the built-ins and the agent tree.
+  - "test": the narrative test. Valuation statements, years and month counts are refused, and R-RANGE refuses
+    instead of clipping.
+- Sources:
+  - "translator": every rule.
+  - "user": the user's own cells in the lab. The user is the author, so the E1 keyword rule and the intervention
+    check do not apply.
+  - "builtin": quotes are checked against the YAML's own prose.
+  - "legacy": the research round's stand-in tables. They have no quotes, so the quote rules are skipped and every
+    result says so.
+
+**Rules** (§7.3). Codes appear in the report and the messages are in Chinese:
+
+| Code | Rule | Effect |
+|---|---|---|
+| R-SHAPE | not a QTable (no rows, quarters outside 1..60) | error |
+| R-FIELD | unknown field, shock, anchor or template | refused |
+| R-E3 | asset prices or returns, valuation legs, E3 fields | refused |
+| R-STATE | a start-of-quarter state written as an input | refused |
+| R-FORM | not exactly one entry form, or wrong types | refused |
+| R-SIZE | a size outside the five bins | refused |
+| R-SRC | src not one of the three, or words written as a number; a translation's value or range marked stated / derived whose quote has no numeral (digits, 百分之…, 三成, 五十个基点, 一半) | refused |
+| R-N3 | numbers=False (the narrative test's N3 arm): an E1 / E1c / E2 value or range | refused (stand-ins: re-expressed as the nearest size bin, W-N3) |
+| R-QUOTE | no quote, or a quote that is not in the narrative | refused |
+| R-E1 | an E1 / E1c / E2 entry or a credit stance whose quote does not name the variable | refused |
+| R-RANGE | beyond 1.5 × the historical range (a y/y constraint: its level's range; a policy shock: ±4 shock sd) | refused in test mode; clipped with W-RANGE in production |
+| R-VAL | a valuation statement in test mode; a number inside any valuation statement | refused |
+| R-YEAR | a 19xx / 20xx token or a month count in any string, test mode | refused |
+| W-QE | u_bs without intervention paths on d_tp10 / d_y2 / d_gz | warning |
+| W-IDENT | more than two of output / productivity / labour input, or the deficit with its components | warning; one is dropped |
+| W-U | a policy shock whose quote names no intervention | warning |
+| W-FC, W-R1–W-R4, W-OIL | R1–R5 left to the model, with the narrative's evidence sentence | warning |
+| W-ANCHOR | anchors are recorded but not applied (the factor layer's steady state is fixed when it is fitted) | warning |
+| W-VAL | a valuation statement (「估值假设相当于直接假设股价」) | warning |
+| W-QUOTE | no narrative to check the quotes against | warning |
+| W-EVENT | an event without a generic footprint is a record, not an input | warning |
+
+**Functions.**
+- `validate(qt, narrative, mode=, source=)` returns the report: ok, readable, errors, refused, warnings, missing (R1–R5
+  with the evidence sentence), clipped, dropped, anchors, counts and the clean copy `qtable`. Refused entries are
+  removed from the clean copy.
+- `check()` is the strict version: it raises QTableError on the first problem.
+- `constraints(qt, stack=… | Q=…)` turns the clean table into the rollout's inputs: factor-layer Statements, valuation
+  statements, the cycle module's odds, H and notes. Regime requests go through the regime classifier's rules.
+- `to_phase_spec()` converts the same table into the monthly engine's phase spec (§7.4):
+  - consecutive quarters with the same stated set merge into phases of at least 2 quarters;
+  - d_ff/3, d_cpi_goods/1200, d_ip, d_oil and d_usd /300, the pp fields /3;
+  - a stance becomes f_spread and f_gz views;
+  - a field with no monthly column is dropped with 「月度引擎没有这个字段」.
+- `minimal(H)` (every field absent, fc 未说明) is the mock's test-mode answer and the translator's fallback.
+- `builtin(sid)` / `builtin_ids()` give the 13 reviewed tables, and `scan_blind(obj)` finds year tokens and month
+  counts.
+- `rollout.from_qtable` is a thin wrapper that raises RolloutError on a refusal.
+
+**The built-ins** (`scenarios/qtables/<id>.json`, written by `tools/qtable_from_yaml.py`):
+- **Envelope:** {id, name, prior_prob, qtable, text, conversion[], review[], source {yaml, yaml_sha256, train_end,
+  today}, generated_by}.
+- **Conversion rules:**
+  - a phase view becomes a phase-mean constraint;
+  - its confidence becomes the sd;
+  - a spread view becomes a stance plan;
+  - e_oil_supply becomes x_oil_cause supply;
+  - a regime key becomes a regime request;
+  - what a QTable cannot state is dropped with its reason (36 records, for example every per-phase r_star and asset or
+    factor drift override).
+- **Review:** the human review's decisions are in `review`.
+- **Checks:**
+  - `--check` reproduces the committed files;
+  - `--delivery` runs each table on the quarterly stack and writes data/results/qtable_delivery.json. All 106
+    converted views come within the monthly engine's own tolerance.
+- **Staleness:** the tables store sd values from the local panel. When the panel is rebuilt with new data, `--check`
+  fails until the tool is rerun, and a changed YAML is caught by its sha256.
+
+### The translator (llm/qtranslator.py)
+
+- **System prompt.** It follows §7.2's order: the role; the card's x / u / c fields (compact, with the quote keywords);
+  the size bins; the generic templates G01–G35 (production: signs and sd sizes from schema.json; test: signs only from
+  the blind view); the rules (decompose every event into generic channels, R1–R6, refusals, quotes, quarter indices);
+  the state table (production: today's levels; test: percentile bands, from `state_rows=` when the narrative test
+  passes the registry's); and the output schema in one line.
+- **Examples and messages.** Three synthetic few-shot examples (a demand recession, an oil supply shock, a banking
+  panic) carry no years, names or events. The user message is the narrative only. Production is about 27,000
+  characters and test mode about 23,700. `prompt_scan()` must find no year, quarter label, month count, T0 offset or
+  footprint in the test-mode prompt.
+- **Calls.** `translate(narrative, *, mode, n_quarters, refresh, model, backend, quarter, Q, cancel, stats, state_rows)`
+  runs on
+  `MSL_LLM_BACKEND` claude_code or mock. The api backend is refused for QTables (USER_DECISIONS). Answers are cached
+  in data/llm_cache/ by (backend, model, system prompt, user message), and calls share the process-wide slots
+  (`MSL_LLM_CONCURRENCY`).
+- **Failures:**
+  - an unreadable answer or a form problem gets one repair call;
+  - a refusal, a timeout, max_tokens, an empty answer or a 429 / 5xx falls back to the minimal QTable, and the result
+    says why;
+  - a usage limit, a missing login, a missing CLI, a model that is not allowed, or a cancel raises `QTablePause(kind,
+    message, reset_at)`.
+- **Result:** {status ok | repaired | fallback, qtable, validation, raw, repair, error, backend, model, cached, calls,
+  usage, elapsed_s, prompt {version, mode, chars, sha256, narrative_sha256}}.
+- **Estimate.** `estimate()` makes no call and returns calls, tokens, seconds, cached and needs_confirmation.
+- **The mock** (`llm/mock.py`, call kind qtable):
+  - a replay registered for the narrative (`register_qtable`, or `MSL_LLM_MOCK_QTABLES=<dir>`), else
+  - in test mode, the minimal QTable, else
+  - sign + size entries in quarter 1 from narrative keywords, each quoting its clause.
+
+  Fixtures cover malformed JSON, refusals, timeouts and usage-limit texts (`MOCK.push(name, match="qtable")`).
+
+### The factor layer (factors.py, policy.py)
+
+- **Core.** A BVAR(2) on ten quarterly variables, in the recursive order of the do-operator:
+  [E0] pc ps ip lu → [E0p] rff → [E1c] ro → [E1] ry10 sp gz usd.
+  - pc and ps are headline and services CPI inflation (annualized).
+  - ip is 4 d_ip.
+  - lu = log(u − 2), so unemployment stays above 2 (P4b replaces it with a bounded scale).
+  - rff is the shadow real policy rate; observed ff = max(rff + π_trend, 0.1).
+  - ro is 100 log real oil; ry10 = y10 − π_trend.
+  - sp and gz are log(spread − 0.1), the floor transform of §5.4.
+  - usd is 100 log broad dollar.
+  - π_trend is the EWMA of headline CPI inflation with a 36-month half-life.
+  - Goods inflation comes from the CPI identity with training weights.
+- **Estimation.**
+  - Minnesota and sum-of-coefficients dummy priors, λ by marginal likelihood on the training window.
+  - Student-t likelihood weights by EM, with ν ∈ {4, 8, 16, ∞} by marginal likelihood. Extreme quarters get small
+    weights by a rule; no quarter is excluded by date.
+  - The zero-bound shadow rate is missing data in the same EM.
+  - A steady-state prior centred on the anchors (train-end rule in backtests, sd 1.0 pp; the §3.8 defaults forward, sd
+    0.5 pp).
+  - 100 posterior draws; explosive draws are redrawn and the rate is recorded.
+- **Satellites.** Every other x field is a ridge on its own lag and the core (same-quarter terms restricted by the
+  recursive order), with a factor-analytic or shrinkage residual covariance from a missing-data EM. Late series are
+  masked before they start, never invented.
+- **Policy** (policy.py). The reaction function and the stabilizers fitted to the train end define u_ff, u_bs, u_def,
+  u_tr and u_ptax. A `u` entry's size bin is a multiple of that shock's training sd.
+- **Simulation.**
+  - **Innovations:** each path draws whitened training residual vectors with equal probability (history's own tail
+    frequency, U-12).
+  - **Statements:** they become linear restrictions on the stacked path. Hard ones are imposed exactly by the
+    Waggoner–Zha projection; soft ones (value + sd) are imposed exactly at a target drawn from N(value, sd²).
+  - **Ranges:** accept/reject while at least 10% of paths pass, otherwise a Gibbs step.
+  - **Log-scaled variables:** statements on them are solved per path by Newton steps.
+  - **The do-operator:** a stated u_* is a structural shock under the recursive order, so same-quarter E0 macro is not
+    moved, E1 and E2 react on impact and E0 reacts with the lags. A stated raw policy field is a reduced-form
+    observation.
+  - **Saturation:** a stated value's gap to its conditional mean saturates at ±4 training sd; d_oil and d_y10 pass
+    through.
+  - **The cycle module (C′):** in quarters that state nothing about growth it imposes an IP path drawn from 2-quarter
+    blocks of training IP growth (soft, sd 0.5 × the quarterly IP sd), tilted by regime odds when the scenario states
+    them.
+  - **The dollar hold:** where d_usd is unstated, its expected change is zero (`USD_HOLD`).
+  - **T-C candidates:** completion shrinkage (`COMPLETION_W` = 1) and the regime covariance (`REGIME_COV` = False) are
+    candidates for T-C and are off.
+- **Rarity.** The Mahalanobis size of the innovation adjustment the statements need, as a χ² percentile. Above the
+  99th the page warns 「这个组合在历史上极少见」.
+
+### The asset layer (assets.py)
+
+- **L0, the default (§4.1).** r_{a,q} = κ_a + cma_a + Σ_k β_{a,k} F_{k,q} + ε_{a,q} for the 10 risk assets.
+  - α and β are the factor round's F (data/results/model_selection.json), refitted monthly to the train end.
+  - F_{k,q} is the quarter's sum of the monthly factor changes, by unit conversion (`config_q.L0_FIELDS`).
+  - tp10_x_core4 = d_tp10 × s_core4 is switched at the quarter's start.
+  - κ_a = 3α_a + c_a, so the in-sample mean residual is 0.
+- **Mechanical assets.** They are identities and are scored apart: crude = d_oil/100 (WTI spot); the Treasury is a par
+  bond repriced on the y10 path, with coupon income; cash is the bill path.
+- **Income.** Equities and REITs earn k_a × exp(−s_pd)/4 on their own trailing P/D; the P/D rolls with price minus
+  dividend growth.
+- **Residuals.**
+  - The training quarters' 13-asset residual vectors are bootstrapped in 2-quarter blocks (`RESID_BLOCK`; blocks of 1
+    and 4 are the sensitivity arms), uncoupled from the factor innovations and scaled by the volatility state.
+  - 200 block-bootstrap refits of F give parameter uncertainty, one refit per path.
+  - Every path records the quarter label of each residual it drew (`drawn`).
+- **Drift and the CMA arms.**
+  - "historical" keeps the fitted drift (walk-forward and backtests).
+  - "no_rerate" is the forward default (U-5). It removes the training-period re-rating of the CAPE multiple (+1.18 /
+    +1.80 / +1.47 / +1.89 %/yr to the 1994 / 2004 / 2014 / 2026 train ends), halves each equity's drift relative to
+    the market and removes gold's real drift.
+  - There is no reversion term.
+- **T-A candidates.** They are all off (`TA_DEFAULT = ()`); only the pre-registered test T-A may switch one on.
+- **Attribution.** `rollout.attribution` splits every return linearly into stated fields, completed fields, drift,
+  the valuation statement and the residual. The scenario detail shows the medians as 情景说了什么 / 模型补了什么 /
+  历史常态漂移 / 估值假设, at 4 and 40 quarters and over the whole horizon.
+
+### Valuation (valuation.py, valview.py)
+
+- **The identity.** log P(CRSP) = log M + log CPI + log E10r, where M is the CAPE multiple on the CRSP price and E10r
+  the 10-year average of S&P real EPS (Shiller's 2026 workbook). So y_us_equity = y_mult + y_fund, which the panel
+  holds to 1e-10.
+- **Display only.** The trailing P/Ê (write-downs distort it) and the NFC free-cash-flow yield proxy (labelled: it is
+  not SPY's or QQQ's).
+- **Not used for re-rating.** The P/D, because about 30% of its rise since 1973 is payout decline.
+- **No pull.** Nothing moves the multiple toward a fair value: every out-of-sample pull lost.
+- **Valuation statements** (c_q.valuation, §6.3):
+
+  | Mode | What it does |
+  |---|---|
+  | inferred (default) | the multiple does what the macro and credit path implies |
+  | hold | soft Σ y_mult = 0 over the stated quarters |
+  | rerate | soft Σ y_mult = ±size; 温和 / 明显 / 极端 are the p50 / p75 / p95 of \|Σ Δlog M\| over spans of the same length in training (4 quarters, 1973–2014: 0.12 / 0.20 / 0.34) |
+  | reversion | half-life ≥ 14 years; only when stated |
+
+  Each path's us_equity residual is shifted so the statement holds, and the other equities follow through their
+  residual regression on it.
+- **Wording.** Every 估值假设 carries 「相当于直接假设股价」. The scenario detail prints 「估值假设：这一条相当于直接假设美股价格
+  在这 N 个季度里 ±X%（其中基本面腿 +Y%）」 from `qreadout.extras()["valuation_statements"]`.
+- **The narrative test.** Valuation statements are refused in test mode, and the realized multiple appears only in
+  arm V, labelled 恒等式上界（不是模型能力）.
+- **GET /api/q/valuation** (`valview.view()`):
+  - today's states with their percentile since 1973: CAPE 41.2 at the start of 2026Q4, P/D, ECY, the FCF proxy,
+    BusEq P/B;
+  - the identity by window, for example 2007Q3–2009Q2: price −0.468, CAPE multiple −0.491, P/D −0.460, P/Ê +1.005;
+  - the correlation of each leg with price and its share of price variance;
+  - the re-rating drift by train end;
+  - the caveats: E estimates, the FCF proxy, the QQQ limitation (纳指的估值只能用全市场 CAPE 近似).
+
+### Rollout, the adapter and /api/q (rollout.py, adapter.py, api.py)
+
+- **The stack.** `rollout.get_stack()` caches the forward stack. It is the factor and asset layers fitted at the last
+  complete data quarter, with the forward anchors, starting from today's quarter.
+- **Path mode** (`run_path(stack, statements, valuation, H, n_paths, seed, continuation, cma, cycle_odds, mode)`). It
+  draws the whole H-quarter factor path at once, conditioned on every statement, so a statement about a later quarter
+  shapes the earlier ones. The asset layer and Φ then run over it.
+  - **Continuation:** K quarters after H are the same model without statements, which is exactly "the scenario, then
+    the model unconditionally toward its anchors".
+  - **Limits:** at most `ROLLOUT_MAX_QUARTERS` = 160 quarters and 20,000 paths.
+- **Step mode** (`Stepper`). It draws one quarter for N particles, each with its own state and point pins, as the agent
+  tree branches. Pins are read in three ways:
+  - "reduced": an observation;
+  - "do": an intervention on a field with a policy shock;
+  - "do_last": set after the quarter's draw (d_tariff, d_lf).
+
+  Path mode with statements only in quarter 1 gives step mode's distribution (a KS test).
+- **Exports.**
+  - `summary` (the API's JSON);
+  - `attribution`;
+  - `core_view_draws` (the instruments' CoreView.from_quarterly input);
+  - `disaggregate`: monthly paths for monthly consumers, labelled 季内月度路径为历史季度形态拆分（假设）;
+  - `tail_flags`: paths that diverge (GZ > 15, unemployment > 20%, a quarterly US-equity log return beyond ±100%).
+- **The adapter** (`MSL_AGENT_MODEL=scenariolab.qmodel.adapter:make_adapter`). It is `Stepper` on the forward stack
+  behind the agent tree's ModelAdapter contract:
+  - version; stub False; capabilities {"structural", "rarity", "impute"};
+  - x_fields (the card's 52), field_info() with historical percentiles, root_state(n), complete(), update_state(),
+    rarity(), impute();
+  - Draws.y holds log total returns and y["mult"] = Δlog CAPE multiple; `drawn` holds the residual quarters.
+  `python -m scenariolab.qmodel.adapter --check` runs the tree's validate_adapter().
+
+**HTTP** (APIRouter `/api/q`, included before the static mount; Chinese error details):
+
+| Method | Path | Body → result |
+|---|---|---|
+| GET | `/api/q/card` | the model card with today's start-of-quarter states |
+| GET | `/api/q/card/view` | the 变量卡片 view (`cardview.view()`, schema card-view/1) |
+| POST | `/api/q/run` | `{qtable, narrative?, source?}` or `{scenario: <built-in id>}`, plus `n_paths` (100..4000, default 1000), `seed`, `mode` (path \| step), `continuation` (path mode, up to 160 − H quarters), `cma` (historical \| no_rerate), `validation_mode` (production \| test) → `{id, status}`. The QTable is read synchronously (strict: a 400 names the first error or refusal); the run is a background job (`API_WORKERS` = 2 at once, the last `API_MAX_JOBS` = 32 kept, identical requests share a job) |
+| GET | `/api/q/run/{id}` | `{id, status: queued \| running \| done \| error, result \| error, elapsed_s}`. The result is `rollout.summary` plus validation (the report without the table), anchors, qtable_notes, cells and channels (qview), valuation_statements, y_fund, attribution_by_h {"4", "40"} and regimes (qreadout) |
+| POST | `/api/q/validate` | `{qtable, narrative?, mode?, source?}` → the validation report |
+| POST | `/api/q/translate/estimate` | `{narrative, mode?, n_quarters?}` → calls, tokens, seconds, cached, needs_confirmation (no call) |
+| POST | `/api/q/translate` | `{narrative, mode?, n_quarters?, refresh?, confirm?}` → the translation. Only this machine's own JSON requests are served (403 otherwise). With a real backend, an uncached call needs `confirm: true`: without it the answer is 409 with the estimate. A pause (usage limit, login, CLI) is 503 with `pause` and `reset_at` |
+| GET | `/api/q/valuation` | `valview.view()` |
+| GET | `/api/q/scenarios`, `/api/q/scenarios/{id}` | the 13 reviewed QTables; one with its text, conversion record and validation report |
+| POST | `/api/q/phase_spec` | `{qtable}` → the monthly engine's phase spec of the same table, with what it dropped |
+
+While the quarterly panel is missing, /api/q/run and /api/q/phase_spec return 503 and /api/q/valuation 404, with
+「季度面板还没有生成：请运行 python -m scenariolab.qmodel.panel」. The first run fits the forward stack, which takes a
+few seconds; a 1,000-path run with the readouts takes about 4–6 s.
+
+### Evaluation (harness.py, factor_checks.py, evalview.py)
+
+- **The harness** (`evaluation/harness.py`). It answers one question: given the realized factor path (the oracle,
+  standing in for a perfect scenario), how close is a transmission model fitted to the train end?
+  - Models plug in as `model_fn(train, train_end)`.
+  - Protocols: "split" (train ends 1994 / 2004 / 2014, windows inside the next decade) and "rolling" (refit every
+    January, origins from 1985).
+  - Metrics: R² against the training-mean drift with a 90% block-bootstrap interval, n_indep, corr, MAE, bias, 80%
+    coverage, PIT, CRPS and its skill.
+  - The valuation anatomy is placebo-corrected (§6.6). corr(miss, Δmultiple)² is never a headline, because a constant
+    forecast scores 0.83–1.00 on it.
+- **T-F and T-C** (`factor_checks.py` → data/results/qmodel.json `factor_layer`).
+  - T-F: posterior predictive checks F1–F10 at the train ends 1994Q4 / 2004Q4 / 2014Q4 / 2026Q3, 52 quarters, 2,000
+    paths. History's value must lie within the simulated [p05, p95], with non-overlapping windows.
+  - T-C: completion R², CRPS and coverage under three masks (a random 50%; only E0 and E0p stated; only financial
+    conditions stated). w and the regime covariance are selected on validation origins to 2014Q4, and the test is
+    2015–2026.
+  - The file holds pass / fail and is not a gate. The frozen records are P5's.
+  - On this branch's computed file (2026-11-02 04:35, before P4b), 48 of 61 T-F checks pass. The failures are:
+    - CPI y/y's 4-quarter autocorrelation (4 train ends);
+    - the low-inflation stock–bond correlation (3);
+    - the bounds F6 (4);
+    - F9 at 2026Q3;
+    - F7.
+
+    T-C's gate fails on the 10-year term premium (completion R² −0.021 against the −0.02 floor).
+- **Pre-registered records.**
+  - **Where they live:**
+    - T-A, T-C and T-S: `scenariolab/qmodel/preregistered/<date>_T?.json` (P5);
+    - T-N: `scenariolab/evaluation/narrative/preregistered/2026-11-02_TN.json`.
+  - **Rule:** a record is frozen before any run, and a run, a status or a note only appends to its `results`. A
+    protocol change is a new dated record that names the one it supersedes (`<date>-<tag>_T?.json`). The switch
+    evaluator appends its results to a sibling `<stem>.results.jsonl` and never edits the record.
+  - **Reading:** `evalview` discovers records in the three folders and reads `results` (a list), `result` (a dict) or
+    the sibling file. A record whose shape it does not know still shows, with its raw JSON.
+- **GET /api/evaluation** (`evalview.summary()`, schema evaluation-view/1). It returns records, tests {TA, TC, TS,
+  TN}, asset_layer (T-A's latest result), conditional and anatomy (results/evaluation.json, written by P5's opt-in
+  evaluation step), ablation, factor_layer, delivery, switch_gate, ledger, narrative {headline_run, headline_kind}
+  and conclusion.
+  - Section A quotes the narrative test only through the headline run's `report.headline`. That run is the newest
+    real run, else the research run, and never a mock run.
+  - GET /api/evaluation/records/{rid} returns one record in full.
+- **The research ablation** (`evaluation/research/oracle_ablation.json`, rebuilt by `tools/import_oracle_ablation.py`).
+  Pooled rolling mean10 R² at 1 / 4 / 12 / 20 quarters:
+
+  | Model | R² |
+  |---|---|
+  | F | +0.226 / +0.223 / −0.007 / −0.030 |
+  | F without GZ | +0.128 / +0.118 / −0.119 / −0.133 |
+  | F without either credit spread | −0.003 / −0.016 / −0.258 / −0.285 |
+  | pure macro | −0.081 / −0.145 / −0.373 / −0.421 |
+  | GZ alone | +0.165 / +0.149 / +0.110 / +0.108 |
+
+  n_indep is 167 / 41 / 13 / 8. The 12- and 20-quarter columns are anecdotes.
+
+### The narrative test (evaluation/narrative/)
+
+A historical episode is described in words, with no years, names or places. The LLM translates the words into a
+QTable under the blind protocol. The quarterly stack, and the monthly engine on the identical translation, simulate
+the episode from its origin with a model fitted only on data before it. The result is scored against what happened,
+next to oracle arms that are given the realized factor paths.
+
+- **Episodes and the sealed key.**
+  - The spec's 18 episodes: 14 clean (at least 56 training quarters; the headline set, 5 busts with DD ≤ −0.20) and 4
+    short-training ones, reported apart. Plus 8 synthetic episodes written by code from the model's own paths
+    (synth.py).
+  - Registry codes are X01–X18 and S01–S08, shuffled with a fixed seed.
+  - `key.py` alone reads data/evaluation/key.json (code → window, origin, train end, useq, DD, bust; the synthetic
+    truths). Its importers are the scorer, the audit, the seal command, and the CLI and API when they turn a spec code
+    such as E05 into a registry code. A test checks that prompts.py and runner.py can never import it.
+  - `registry.json` (episodes.py) is public. It holds sets, lengths, narratives, stand-ins, the frozen N-wrong pairs,
+    each origin's blind state table (percentile bands computed at seal time) and the key's sha256, so a changed key
+    is noticed.
+  - `seal [--force]` writes both files.
+- **Arms** (§8.3):
+
+  | Arm | What it is given |
+  |---|---|
+  | U | no statement |
+  | O-A | realized E0 + E0p + x_oil_cause |
+  | O-A′ | O-A + E1c |
+  | O-B | O-A′ + E1 |
+  | O-full | O-B + E2, every x field |
+  | V | O-full + the realized CAPE multiple; us_equity only, the identity bound |
+  | N1, N2, N3 | the translated narratives: macro; + 金融条件; no digits |
+  | N-wrong | the paired episode's N1, translated with this episode's prompt |
+  | N-synth | the synthetic episodes |
+  | H-SEP | the Fed's real-time SEP medians as a QTable by code (sep.py; the ALFRED download needs the user's approval and has not run) |
+
+  Every arm runs on engine Q (the quarterly stack, train-end anchors) and, on request, E (the monthly engine running
+  F, through `to_phase_spec`), under both CMA arms, with common random numbers.
+- **Blind protocol** (§8.4):
+  - test-mode prompts with percentile bands and template signs only;
+  - synthetic few-shots;
+  - N3 translated first, every call separate;
+  - every byte sent kept under `sent/<sha256>.txt`;
+  - a recognition probe on N1 and N3, 「这段叙事描述的是哪段时期？不知道就写 unknown」, scored against the key and
+    never fed back.
+
+  The audit (audit.py) reports the prompt scans, the recognition rate, the contamination index with its two baselines,
+  the N3 recall flags (corr > 0.9 with realized), delivery and refusals. At 100% recognition a run is labelled
+  识别出年代的回放（不是盲测）.
+- **Backends.**
+  - mock (tests, CI, the build step): the research round's 36 stand-in tables replace the v1 translations (QTable/1
+    legacy, labelled 研究轮代译（无引文）), and the synthetic reference translations are replayed.
+  - claude_code: the real backend, used only from a confirmed run.
+  - api: refused.
+- **Running it** (`python -m scenariolab.evaluation.narrative`):
+
+  ```
+  estimate [--backend B] [--episodes clean|all|short|X03,E05] [--narratives v1|v2] [--arms N1,N2,N3,wrong,synth]
+           [--probe|--no-probe] [--engines Q,E] [--refresh]   -> calls, tokens, minutes, an estimate id; no call
+  run --estimate <id> [--i-understand-this-uses-my-plan]      -> asks 「确认运行？」 on a TTY; --i-understand-this-is-billed is refused
+  resume <run_id> [--estimate <id>]                           -> prices the run's own remaining calls now; asks (or
+                                                                 needs the flag) when one is uncached; an estimate of
+                                                                 another plan is refused
+  score <run_id> [--engines] [--paths] | report <run_id> | list
+  import-standin --from <sim_redesign> [--check] | research | seal [--force] [--no-synth]
+  sep plan | sep status | sep fetch --i-approve-download
+  build [--episodes all] [--engines Q] [--paths N]            -> the mock + stand-in run (always the mock backend)
+  ```
+
+  - **Estimates:** saved under `data/results/narrative/estimates/<id>.json`. A run needs one issued in the last 600 s
+    (`ESTIMATE_FRESH_S`) whose plan has not changed since.
+  - **Pauses:** a usage limit pauses the run, which resumes by its id.
+  - **Pytest:** under pytest only the mock may run.
+  - **Build step:** `build` has scenariolab.build's step signature but is not in `build.STEPS` yet (the shared list is
+    pinned by tests/test_build.py); a full mock build of 26 episodes takes about 8.5 minutes.
+- **A run's files** (`data/results/narrative/<run_id>/`):
+  - run.json, plan.json, manifest.json (every call's hashes);
+  - `translations/<code>__<arm>.json`, `probes/`, `sent/`;
+  - score_rows.csv (one row per code, set, engine, arm, cma, asset and horizon, with y, q10, q50, q90, err, crps,
+    cov80 and pit);
+  - fields.csv, episodes.json, stats.json, audit.json and report.json.
+- **Statistics** (stats.py).
+  - Cells use the research scorer's definitions, so its stored rows and a new run's rows compare.
+  - The episode is the unit: 2,000 bootstrap draws over episodes, paired differences on common cells, and the minimum
+    detectable effect (z0.95 + z0.80)·sd/√n printed beside every claim.
+  - Favourable and unfavourable paired intervals are counted against chance.
+  - Strata: clean (the headline), short, bust, ordinary, synthetic.
+  - The decomposition: (N − O-full) is the hypothesis and translation error; (O-full − realized) is the simulation
+    error.
+- **Claims** (from the T-N record; the generated text may say nothing stronger):
+
+  | Id | Claim | Condition |
+  |---|---|---|
+  | C1 | 叙事带来了改进 | N2 − U and N2 − N-wrong equity9 window-end MAE both have upper bounds below 0; otherwise 「没有可检出的改进（最小可检出差异约 X）」 |
+  | C2 | 金融条件承载了结果 | O-B − O-A′ upper bound below 0 |
+  | C3 | 季度模型比月度引擎好 | Q − E upper bound below 0 on O-B and on N2 |
+  | C4 | recognition rate and contamination index | always shown |
+- **report.json** (report.py, format narrative-report/1) is what the evaluation tab's section C renders: claims,
+  headline, legend (display names, never ids), scoreboard, groups, paired, decomposition, discrimination, strata,
+  per-episode series, blindness, ts_inputs and calibration.
+- **The research run.** `research_2026_11_01` is always available from the committed archive
+  (`narrative/research/`: episodes_v1.json, score_rows.csv.gz, published.json). Its statistics are recomputed from
+  the scorer's stored rows: 3,164 pooled numbers reproduce to 1e-10, and the critic's paired differences within their
+  printed precision. The critic's corrections are applied: E03 moved to the short set, so the clean research set is
+  10 episodes; the label 识别出年代的回放（不是盲测）; the engine ran B0 with post-2008 anchors.
+- **HTTP** (`/api/evaluation/narrative`). Every POST is served only to this machine's own JSON requests (Host, Origin,
+  content type; 403 otherwise).
+
+  | Method | Path | Body → result |
+  |---|---|---|
+  | GET | `""` | the registry summary (no windows), runs, defaults, legend, the active job, SEP status, backend |
+  | GET | `/runs` | the research run, then mock and real runs |
+  | GET | `/runs/{id}` | the run's report.json, or its status while running |
+  | GET | `/runs/{id}/progress` | status, progress, pause, error |
+  | POST | `/estimate` | `{episodes, narratives, arms, probe, engines, backend?}` → the estimate with its id |
+  | POST | `/run` | `{estimate_id, confirm: true, label?}` → `{run_id, status}`. 400 without an estimate id, 409 with needs_confirm and the estimate without `confirm: true`, 409 stale for an old or changed estimate. One run at a time; the scoring holds one of the server's backtest slots |
+  | POST | `/runs/{id}/resume` | `{estimate_id, confirm: true}`; the estimate must be of this run's remaining calls (`POST /estimate {run_id}`), else 409 |
+  | POST | `/runs/{id}/cancel` | stop after the call in flight |
+
+### The switch gate T-S (evaluation/switch.py)
+
+The quarterly stack replaces the monthly engine as the default for the 13 scenarios, the 未来一年 tab, 组合评估 and
+提取与破产概率 only when every condition holds on the narrative test's clean set, equity9, CMA "historical":
+
+| Id | Condition |
+|---|---|
+| TF | T-F passes (a frozen TF record's latest result, else every computed check in qmodel.json) |
+| `O:<arm>:<h>` | O-A, O-B and O-full: the Q − E MAE difference has a 90% upper bound below +0.02, at 4Q and at the window end |
+| PIT | Q's mean \|PIT − 0.5\| is at most E's + 0.02, on the cells both engines have |
+| `N:<arm>:<h>` | N1–N3 on identical translations: Q − E has an upper bound below +0.03, at 4Q and at the window end |
+| `IN:*` | the run is finished and scored by both engines; E ran the selected F; one stack version; every clean episode covered; the narrative tables are a real LLM's translations or the research stand-ins, never the minimal fallback |
+
+The T-S record's own thresholds win over these defaults, and the result says which were used.
+
+**Evaluation.**
+- **Fail closed:** a condition with missing inputs is "not evaluated", and T-S then does not pass.
+- **Statistics:** every comparison is recomputed from the run's stored rows with the narrative test's statistics.
+- **Writing:** `evaluate(run_id="latest")` returns the result (schema switch-gate/1). `--write` stores it in
+  data/results/switch_gate.json; `--append` also adds a line to the record's `<stem>.results.jsonl`.
+
+**`state()`** is the single switch every default reads. It is on only when all of these hold:
+- a stored result was written by this module;
+- it passed;
+- it is internally consistent (every required condition is present and the bounds re-check);
+- it was made against the current T-S record (the digest of the record without its results);
+- it was made on the current model version (the rollout, factor and asset VERSION constants; a data update does not
+  count).
+
+Otherwise the status is not_evaluated, failed, stale or invalid, and the reasons travel with it in Chinese, with their
+numbers. A hand-written {passed: true} switches nothing.
+
+**Consumers.**
+- `portfolio.service.resolve_set`;
+- `analysis.scenario_mix` (the forecast tab's default engine);
+- `evalview`;
+- the build's portfolio step;
+- the pages, through GET /api/evaluation/switch (`_switch.js` renders the notice wherever a default is shown).
+
+**The real evaluation** runs by hand after P5's records are merged and the v2 narratives are written: a real run
+(`narrative estimate --backend claude_code ...`, then `narrative run --estimate <id>`), then
+`python -m scenariolab.evaluation.switch evaluate --run latest --write --append` (first without `--write`, to see how
+the record was read). The narrative conditions are evaluated only on a run of kind real covering every clean episode
+(the frozen record may opt into stand-ins with `narrative_sources` and into partial coverage with
+`narrative_coverage: with_narratives`); `narrative build --engines Q,E` (mock backend + stand-ins) is a pipeline check
+whose narrative conditions are not evaluated, and `--append` refuses it. Once switched, the portfolio and withdrawal
+services take the quarterly set as the default only when its index's model version is the one T-S certified. Today's state is
+not_evaluated. It lists three reasons: there is no T-S record on this branch yet, T-F fails 13 of 61 computed checks,
+and no narrative run is scored on both engines.
+
+### 未来一年：情景条件模拟 (analysis/scenario_mix.py)
+
+The forecast tab (id `forecast`, renamed from 一年期预测) mixes the built-in scenarios' next four quarters with the
+probabilities the reader sets. It is not a forecast: the probabilities are the only predictive part.
+
+- **Engines.** data/results/forecast_mix.json has one block per engine:
+  - "monthly": the monthly engine's scenario paths aggregated to quarter-ends. It is the default until T-S passes.
+  - "quarterly": each reviewed QTable in path mode on the quarterly stack, labelled 试运行.
+- **Per scenario and asset:** the cumulative total return at the four quarter-ends as a quantile grid (`GRID`: 0 and
+  100 are the path minimum and maximum), its mean and P(loss).
+- **The mixture.** The page inverts the mixture CDF Σ w_i F_i exactly over the union of the grid knots, with the same
+  rule in JS (`forecast.js` gridCdf / mixQuantile) and in Python (`mix_quantile`).
+- **Probabilities.** The default is the hand-set prior_prob, normalised (U-9). The engine's posterior is offered as an
+  alternative.
+- **Also in the file:**
+  - each scenario's stated fields for the four quarters (qview cells with badges);
+  - macro fans;
+  - the unconditional band of each engine (无情景基准);
+  - the analog band, only where it differs;
+  - base rates (a contraction within 4 quarters, CPI y/y > 4% at the fourth quarter-end, the policy rate up ≥ 1 pp)
+    against history;
+  - the forward ledger.
+- **Exclusions.** A scenario with no finite path is left out and its probability spread over the others, with a
+  visible note. The quarterly mixture also leaves out paths that `rollout.tail_flags` marks.
+- **The forward ledger** (data/results/ledger/forecast_ledger.jsonl, forecast_ledger/1).
+  - Every build appends the default-probability mixture's quarter-end quantiles, keyed by origin, engine, model, card
+    and probability versions.
+  - It is append-only and idempotent per key, and a torn line is skipped.
+  - Entries are scored (80% coverage, PIT, CRPS from the grid) once their quarters have arrived.
+  - It is separate from the monthly one-year forecast's ledger in data/ledger/, which the 历史回放（相似起点法） section
+    below the mixture keeps.
+- **Serving.** GET /api/forecast/scenario_mix (also /api/forecast_mix through RESULT_NAMES).
+
+### Quarterly scenario sets for 组合评估 and 提取 (portfolio/qsets.py, portfolio/service.py)
+
+`evaluate_portfolio(..., rebalance=None, scenario_set=None)` and `evaluate_withdrawal(..., scenario_set=None)` take
+a scenario set:
+
+| Set | What |
+|---|---|
+| `monthly` (alias `builtin`) | the existing set; a monthly request computes exactly what it did before |
+| `quarterly` | scenario_paths_q.npz + scenarios_q.json |
+| `agent:<id>` | `data/agents/sets/<id>.npz` + `.json`, the layout the agent tree's export writes |
+| `None` | the switch's default: monthly until T-S passes, with a note while the quarterly set is not built |
+
+A set has `step_months`. On a quarterly set (step_months = 3):
+- there are 4 steps a year, and volatility, Sharpe and Sortino are annualized with √4;
+- "monthly" rebalancing is refused with a Chinese message; "quarterly" rebalances every 3 / step_months steps on both
+  sets, and "annual" every 12 / step_months;
+- drawdowns are quarter-end figures (季末口径), with the understatement note (the median quarter-end / monthly maximum
+  drawdown is 0.888 for US equity);
+- yearly withdrawals are unchanged;
+- the set's own continuation (the cont_* arrays) replaces continuation_paths.npz;
+- a monthly custom scenario is summed to quarter-ends;
+- tickers are refused.
+
+Responses gain `step_months` and a `scenario_set` block. GET /api/portfolio/sets lists the sets, the default and the
+switch.
+
+**The quarterly set** (`python -m scenariolab.portfolio.qsets build`, 600 paths, seed 20261102).
+- **Paths.** Each reviewed QTable runs in path mode for 60 quarters, and the same model goes on without statements to
+  quarter 160.
+- **npz arrays:** total and income (S, N, 60, 13) as simple returns per step; cpi (S, N, 61); ids, assets, labels
+  (quarter-end months), probs, step_months; and cont_total_y, cont_price_y, cont_income_y, cont_cpi_y, cont_labels,
+  cont_start, cont_offset, cont_info.
+- **Diverging paths.** A path flagged inside the 60 quarters is replaced by a clean path of the same scenario; a path
+  flagged only in its continuation has just the continuation replaced. A scenario with more than half its paths
+  flagged is left out. The shares are in the set's quality block.
+- **This branch's trial build** (pre-P4b stack) keeps 11 of 13 scenarios: ai_bust has no finite path and
+  reacceleration diverges on 98% of its paths. It is labelled 试运行 and is not the default.
+
+### Web app
+
+- **Tabs** (app.js TABS, 17 in four groups). 验证 now starts with `evaluation` 情景条件检验 and holds `forecast` under
+  its new name 未来一年：情景条件模拟; 说明 adds `card` 变量卡片 after method. Tab ids, order and every older deep link
+  are unchanged.
+- **情景条件检验** (evaluation.js). Data: /api/evaluation, /api/evaluation/narrative, /api/q/valuation and
+  /api/evaluation/switch. Sections, each with its own deep link:
+  - A 结论: the tests' status, the switch-gate conditions with 满足 / 未满足 / 不能评估;
+  - B 已知因子路径时能复现多少: T-A, the oracle arms, the ablation card;
+  - C 叙事检验: run selector, claims, scoreboard, paired differences, decomposition, discrimination, small multiples,
+    blindness, and the button 「用真实大模型重跑叙事检验…」 (estimate → tick box → `confirm: true` → progress);
+  - D 估值账本;
+  - E 因子引擎检验: T-F, F1, F7, F8, F9 / F10, T-C, the built-ins' delivery;
+  - F 前瞻账本;
+  - G 预注册与选择记录: every record with date, sha256, selection, result and raw JSON.
+
+  Deep links are `#evaluation?conclusion | oracle | narrative | valuation | engine | ledger | records` and
+  `#evaluation?run=<id>`.
+- **变量卡片** (card.js). All 101 rows with today's value, percentile and a sparkline, searchable and filtered by 槽位,
+  同期/前定, 时点, 内生性 and 到资产的路径; rows link to their evidence. `#card?<field>` opens a row. The exported
+  `fieldLabel` / `attachCardTip` give the lab's QTable headers their tooltips.
+- **Scenario detail** (`_scenario_detail.js` + `_qdetail.js`). Every built-in gets a 季度模型（试运行） section that
+  runs its QTable when scrolled into view. It shows:
+  - the per-quarter 情景说了什么 / 模型补了什么 table with the badges 文字数字 / 文字定性 / 推算 / 模型补全 / 锚 / 干预;
+  - the rarity per quarter and the asset fans;
+  - the valuation block (mode, implied CAPE and P/D bands, 「你必须相信的估值」);
+  - attribution bars at 4 quarters, 40 quarters and the full horizon;
+  - the financial-conditions block, the regime readout on quarterly paths, delivery, and 计算口径与局限.
+
+  Once T-S has passed, the section comes first and is labelled 默认.
+- **Lab** (lab.js + `_qlab.js`). A mode switch between 季度情景表 (the default) and the monthly spec editor. The
+  flow is narrative → /api/q/translate (409 → the estimate and a tick box → `confirm: true`; 503 → the pause) → live
+  validation (/api/q/validate) → a run on the quarterly stack or, through /api/q/phase_spec, on the monthly engine
+  with the dropped views listed. Per-quarter cells, a stance select, a valuation-mode control and a JSON editor edit
+  the table. `#lab?q=<built-in id>` opens a built-in's QTable.
+- **The other pages.**
+  - The forecast tab renders forecast_mix.json (sections 1–7 of §9) with the old rolling record below as
+    历史回放（相似起点法）.
+  - Portfolio and withdrawal have a set picker (`#portfolio?set=quarterly`, `rebalance=quarterly`).
+  - method gains a quarterly chapter (Q1–Q7); diagnostics moves the monthly R² tiles into 月度传导（参考）.
+  - backtest shows quarterly and annual R², both fan_cond arms (宏观 + 金融条件 / 只有宏观) and the train-end anchors.
+  - valuation adds section 9 (`#valuation?quarterly`).
+  - `_switch.js` shows the switch notice (default engine, gate status, reasons, how to evaluate) wherever a default
+    is shown.
+- **Rules** (§10.6, tested in tests/test_quarterly_ui.py and tests/test_evaluation_tab.py):
+  - 「预测」 only for Layer 1 and the ledger;
+  - 12–20-quarter figures carry the anecdote label;
+  - 估值假设 always with 「相当于直接假设股价」;
+  - no improvement claimed unless a pre-registered claim passes;
+  - no LLM or record text through innerHTML (`h()` and textContent; the raw answer in a `<pre>`);
+  - the K-line colours only for returns;
+  - 1,100 px and 375 px with no horizontal scroll.
+
+### Testing
+
+The quarterly test files are:
+
+| File | What it covers |
+|---|---|
+| test_qmodel_panel, test_qmodel_assets, test_qmodel_factors, test_qmodel_rollout | P1–P4 |
+| test_anchors, test_term_premium_override | P0.1, P0.6 |
+| test_qtable | P6: 89 tests, 48 of them refusal fixtures |
+| test_narrative | P7 |
+| test_quarterly_ui, test_evaluation_tab | P8 |
+| test_switch, test_qsets | P9 |
+
+Every LLM path runs on the mock. The narrative runner refuses a real backend under pytest, and conftest's
+`no_live_llm` makes any Claude Code process fail.
+
+Data-dependent tests skip without data/:
+- `needs_panel` and the quarterly panel checks;
+- the two research-archive checks, gated on `MSL_RESEARCH_DIR` pointing at the research folder:
+  `import_oracle_ablation --check` and `import-standin --check`.
+
+CI has no Playwright: the page checks in CI are static (no innerHTML, the wording rules, deep links).
+
+### Known limits on this branch
+
+- **Factor-layer defects (factors.py).** P4b on feat/quarterly-model bounds the long-horizon tails; whether it also
+  removes the dollar-hold defect is to be checked after the merge.
+  - The dollar hold subtracts the cross-path mean of d_usd, so one non-finite path makes every path's dollar, and
+    with it every asset, NaN. ai_bust has no finite asset path, and the mixture and the quarterly set leave it out.
+  - Long horizons diverge on some paths: 16–21% of 60-quarter paths are flagged as tails. The 40-quarter attribution
+    and the 10-year CAPE are fragile until P4b lands.
+- **c_q.anchors** are validated and recorded (W-ANCHOR) but not applied: the steady state is fixed when the factor
+  layer is fitted. `to_phase_spec` does pass r_star and a_tp to the monthly engine.
+- **No slot for the user's own P/E number.** QTable/1's c_q.valuation is qualitative (hold, or rerate with a size).
+- **Narratives.**
+  - The v2 narratives (writer protocol v2) are not written yet: the narrative arms run on the research round's v1 for
+    12 episodes, and N13–N18 have no narratives.
+  - The H-SEP arm needs the ALFRED download, which needs the user's approval.
+- **Build wiring.** `narrative` is not in `build.STEPS`, and P5's build steps are not on this branch.
+- **The T-N record** (P7) is a protocol document without P5's frozen block and hash, so P5's integrity check does not
+  cover it yet.
+- **Unconditional behaviour.** The quarterly stack's unconditional run raises the policy rate by at least 1 pp within
+  four quarters on 63% of paths (history 23%) and puts CPI y/y above 4% at the fourth quarter-end on 41% (history 32%).
+  Every scenario's quarterly numbers inherit this.
+
 ## Web app (web/)
 
 No build step: index.html loads the vendored ECharts 5.5.1
@@ -2138,11 +3035,13 @@ check it against the registry's `dist.integrity`, keep only
 `dist/echarts.min.js`, LICENSE and NOTICE, and update the version comment in
 index.html and the README.
 
-* **Router** (app.js). `TABS` lists 14 tabs in four groups: 历史与因果
-  (overview 总览, eras 历史时代画像, regimes 宏观体制, causality 因果传导), 验证 (forecast
-  一年期预测, backtest 回测：模拟 vs 实际, diagnostics 诊断与迭代, valuation
-  估值与盈利), 未来 (scenarios 未来情景, lab 情景实验室（LLM）, instruments 标的推演,
-  portfolio 组合评估, withdrawal 提取与破产概率), 说明 (method 方法与数据). A route
+* **Router** (app.js). `TABS` lists 17 tabs in four groups: 历史与因果
+  (overview 总览, eras 历史时代画像, regimes 宏观体制, causality 因果传导), 验证 (evaluation
+  情景条件检验, forecast 未来一年：情景条件模拟 (formerly 一年期预测; the id is unchanged), backtest
+  回测：模拟 vs 实际, diagnostics 诊断与迭代, valuation 估值与盈利), 未来 (scenarios 未来情景,
+  lab 情景实验室（LLM）, instruments 标的推演, agents 智能体推演, portfolio 组合评估, withdrawal
+  提取与破产概率), 说明 (method 方法与数据, card 变量卡片). The quarterly stack's pages and
+  deep links are in "季度模型" (Web app). A route
   `#<tab>?<param>` lazy-imports `./tabs/<tab>.js` and calls
   `render(root, ctx)`; root is a fresh container that is detached when the
   reader navigates away, so a slow render can never draw on the next page.
@@ -2347,9 +3246,10 @@ index.html and the README.
 
 ## Testing
 
-`.venv/bin/python -m pytest -q` runs the whole suite: 558 tests in 22 files
-(plus conftest.py) at the time of writing, about 4 minutes (558 passed in about 256 s
-after the full build of 2026-11-02, none skipped). No test ever starts the real
+`.venv/bin/python -m pytest -q` runs the whole suite: 1282 tests in 45 files
+(plus conftest.py) at the time of writing, about 9 minutes (1280 passed and 2 skipped in 515 s on the
+local build of 2026-11-02 with the quarterly files; the two skips are the research-archive checks that
+need `MSL_RESEARCH_DIR`, see "季度模型" → Testing). No test ever starts the real
 Claude Code CLI or spends plan usage (conftest.py, below). Tests that need local
 data skip themselves until
 it exists: `needs_panel` / an inline check skip without
@@ -2378,8 +3278,9 @@ and status caches; the `fake_cli` fixture is the only way back.
 test_build.py covers the build steps and the sources with the network mocked.
 The server tests that run a custom scenario write into data/results/custom (and
 delete it) or into a temporary directory. A fresh clone (no data/) runs
-357 passed / 201 skipped with the llm extra and 352 passed / 178 skipped without it, as CI
-installs it (`.[dev]`; about 40 s; test_translator.py is then skipped as a whole). The exact check-value
+957 passed / 325 skipped with the llm extra (about 2 minutes, measured on a copy of the tree without data/) and
+about 951 passed / 300 skipped without it, as CI installs it (`.[dev]`; test_translator.py is then skipped as a
+whole: 6 passed and 26 skipped tests become one skipped module). The exact check-value
 tests of the regime layer skip unless
 panel_meta.json ends in 2026-09 (`CHECK_MONTH` in tests/test_regimes.py), so a
 data update skips them instead of failing.

@@ -20,7 +20,8 @@ const TABS = [
   { id: 'regimes', name: '宏观体制' },
   { id: 'causality', name: '因果传导' },
   { group: '验证' },
-  { id: 'forecast', name: '一年期预测' },
+  { id: 'evaluation', name: '情景条件检验' },
+  { id: 'forecast', name: '未来一年：情景条件模拟' },
   { id: 'backtest', name: '回测：模拟 vs 实际' },
   { id: 'diagnostics', name: '诊断与迭代' },
   { id: 'valuation', name: '估值与盈利' },
@@ -33,6 +34,7 @@ const TABS = [
   { id: 'withdrawal', name: '提取与破产概率' },
   { group: '说明' },
   { id: 'method', name: '方法与数据' },
+  { id: 'card', name: '变量卡片' },
 ];
 
 const nav = document.getElementById('nav');

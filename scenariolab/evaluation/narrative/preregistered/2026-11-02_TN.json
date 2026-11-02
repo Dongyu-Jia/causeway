@@ -1,0 +1,51 @@
+{
+ "id": "TN",
+ "version": 1,
+ "date": "2026-11-02",
+ "title": "叙事检验（T-N）的预注册记录：片段、臂、统计与可以说的话",
+ "spec": "SIM_DESIGN §8（2026-11-02）",
+ "frozen": "在这个协议的任何一次运行之前写定；研究轮的运行是导入的，不是按本协议重跑。改动只能另立新版本，不能改这一份。",
+ "episodes": {
+  "clean": ["E11", "N13", "E07", "E02", "N14", "E12", "E01", "E05", "N15", "E04", "E09", "E08", "E10", "N18"],
+  "short": ["E06", "E03", "N16", "N17"],
+  "clean_rule": "训练期至少 56 个季度（14 年）；只有干净集进标题",
+  "bust_rule": "窗口内美股季度价格路径（从 0 起算）的最大回撤 <= -0.20；大跌对普通是次要分层",
+  "codes": "编号用固定种子 20261102 打乱（key.py）；编号与窗口的对应只有评分器读",
+  "pairing": "错叙事（N-wrong）：每个干净片段配窗口长度最接近、起点相隔至少 20 个季度的干净片段，平局按编号顺序；封存时冻结"
+ },
+ "arms": ["U", "OA", "OAp", "OB", "OF", "V", "N1", "N2", "N3", "NW", "NS", "HS", "HS0"],
+ "engines": {"Q": "季度模型（试运行，L0 资产层；T-A 若采纳 G 则另加）", "E": "月度引擎跑因子轮 F，经 qtable.to_phase_spec 读同一张情景表"},
+ "cma": {"headline": "historical", "also": ["no_rerate"]},
+ "anchors": "训练期末可知的长期锚（§5.5，engine/anchors.py；季度模型 anchors='train_end'）",
+ "paths": {"Q": 1000, "E": 400, "seed": "11 + 片段在登记表里的序号"},
+ "horizons": ["1Q", "2Q", "4Q", "8Q", "end"],
+ "measure": "累计对数价格回报（现金为总回报）；中位数误差、MAE、CRPS、PIT、80% 覆盖率；跨片段 corr(中位数, 实现值)",
+ "groups": {"equity9": "美股、纳指、六个行业、REITs", "gold": "黄金", "crude": "原油", "rates": "国债与现金"},
+ "statistics": {
+  "unit": "片段是独立单位",
+  "bootstrap": {"over": "片段", "draws": 2000, "seed": 20261102, "interval": 0.90},
+  "paired": "两个变体在双方都有的单元上，每个片段的平均差，再对片段取平均",
+  "mde": "(z0.95 + z0.80) × sd(d) / √n：单侧 5%、检验力 80%",
+  "chance": "叙事对无叙事的成对区间（股票类 9 个，各期限，N1–N3，各引擎）里排除 0 的个数，与每侧 5% 的偶然水平比"
+ },
+ "decomposition": {
+  "total": "N − 实现值 = (N − O-full)（假说与翻译误差） + (O-full − 实现值)（模拟误差）",
+  "financial_conditions": "O-B − O-A′：金融条件那部分假说承载了多少",
+  "sep": "H-SEP − O-A：美联储当时预测的假说误差"
+ },
+ "claims": [
+  {"id": "C1", "text": "叙事带来了改进",
+   "all": [{"a": "Q:N2", "b": "Q:U", "assets": "equity9", "horizon": "end", "set": "clean", "hi90_below": 0.0},
+           {"a": "Q:N2", "b": "Q:NW", "assets": "equity9", "horizon": "end", "set": "clean", "hi90_below": 0.0}],
+   "otherwise": "没有可检出的改进（最小可检出差异约 {mde}）"},
+  {"id": "C2", "text": "金融条件承载了结果",
+   "all": [{"a": "Q:OB", "b": "Q:OAp", "assets": "equity9", "horizon": "end", "set": "clean", "hi90_below": 0.0}],
+   "otherwise": "没有检出金融条件承载的部分（最小可检出差异约 {mde}）"},
+  {"id": "C3", "text": "季度模型比月度引擎好",
+   "all": [{"a": "Q:OB", "b": "E:OB", "assets": "equity9", "horizon": "end", "set": "clean", "hi90_below": 0.0},
+           {"a": "Q:N2", "b": "E:N2", "assets": "equity9", "horizon": "end", "set": "clean", "hi90_below": 0.0}],
+   "otherwise": "没有证据说季度模型比月度引擎好（最小可检出差异约 {mde}）"},
+  {"id": "C4", "text": "识别率与污染指数", "always": true}
+ ],
+ "wording": "生成的文字不能比通过的声明说得更强；识别率 100% 时结果标「识别出年代的回放（不是盲测）」；模拟后端的运行只是流程检验"
+}
