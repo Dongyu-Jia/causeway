@@ -142,7 +142,7 @@ export async function renderBrowser(root, env) {
   const sum = tree.summary;
   let metaEl = metaCard(env, sum);
   const runBar = h('div', { class: 'agents-sticky' });
-  C.put(root, runBar, metaEl, honestyCard(env));
+  C.put(root, runBar, metaEl, honestyCard(env, sum));
   const paintRunBar = () => {
     const m = src.kind === 'snapshot' ? (tree.summary?.manifest || {}) : (tree.summary || {});
     const st = m.settings || {};
@@ -450,19 +450,89 @@ export async function renderBrowser(root, env) {
 }
 
 // ================================================================ honesty (计算口径与局限; AGENT_DESIGN §13 and UI §14)
-export function honestyCard(env) {
+// the pricing model of a run or snapshot (manifest / run.json pricing_model; older folders: the stub flag)
+export function pricingModel(env, m) {
+  const pm = m?.pricing_model;
+  if (pm) return pm;
+  if (m && m.stub !== undefined) return { stub: !!m.stub, label: m.stub ? '桩模型（不是资产模型）' : '季度模型' };
+  return env.cfg?.model || { stub: env.stub };
+}
+// a pricing model as readers see it: the label and the fit, never the version string
+export function pricingText(pm) {
+  if (!pm) return '';
+  return `${pm.label || (pm.stub ? '桩模型（不是资产模型）' : '季度模型')}${pm.fit ? `（${pm.fit}）` : ''}`;
+}
+// why a run or snapshot cannot be handed to portfolio and withdrawal, in plain words (old folders stored parameter
+// names in their reasons, so the text is rebuilt from the pricing model and whether quarterly paths were kept)
+export function exportText(pm, m) {
+  const st = m?.settings || {};
+  const kept = st.keep_paths === 'full' || (st.keep_paths === 'auto' && Number(st.depth) <= 20);
+  const out = ['组合评估与提取服务还不能读取季度情景集：交给组合评估暂时禁用'];
+  if (pm?.stub) out.push('桩模型的推演不能导出（资产价格只用于检查流程）');
+  else if (pm?.trial) out.push('季度模型仍在试运行（切换门未通过）：服务支持后，导出也要带这个标注');
+  if (m && !kept) out.push('没有保存逐季路径：导出需要重新运行一次并保存逐季路径');
+  return out.join('；');
+}
+// tail particles the pricing model produced (P14): the level stats' mass-weighted shares (tree.tail_stats)
+export function tailSummary(m) {
+  const lv = Array.isArray(m?.levels) ? m.levels.filter(l => l && typeof l === 'object') : [];
+  if (!lv.length || !lv.some(l => l.tail_share !== undefined)) return null;
+  const xs = lv.map(l => Number(l.tail_share) || 0);
+  const last = lv[lv.length - 1] || {};
+  return { mean: xs.reduce((a, b) => a + b, 0) / xs.length, max: Math.max(...xs), hit: xs.filter(v => v > 0).length,
+    levels: lv.length, peak: Math.max(...lv.map(l => Number(l.tail_max) || 0)),
+    cum: C.isNum(last.tail_cum) ? Number(last.tail_cum) : null, cumMax: C.isNum(last.tail_cum_max) ? Number(last.tail_cum_max) : null };
+}
+const TAIL_RULE = '季末 GZ 信用利差 > 15、失业率 > 20%、政策利率 > 20%、10 年期收益率 < 0、核心 CPI 同比不在 −2%…15%、CPI 同比不在 −4%…17%、任一资产单季对数回报超过 ±100%（原油 ±150%）或出现非有限数';
+export function tailText(ts) {
+  if (!ts) return null;
+  if (!ts.hit) return `季度模型的长期尾部：这次没有粒子超出模型的界限（${TAIL_RULE}）。`;
+  const cum = ts.cum !== null ? `按路径累计（1 − Π(1 − 每季比例)），到最后一季按质量加权有 ${C.pct(ts.cum, 1)} 的路径至少被重抽过一次（单个节点最高 ${C.pct(ts.cumMax ?? ts.cum, 1)}）：每季的比例小，长期的截断并不小。` : '';
+  return `季度模型的长期尾部：${ts.levels} 季中有 ${ts.hit} 季出现超出模型界限（${TAIL_RULE}）的粒子，按质量加权平均每季 ${C.pct(ts.mean, 2)}，最高一季 ${C.pct(ts.max, 2)}（单个候选节点最高 ${C.pct(ts.peak, 1)}）；这些粒子在同一动作簇内丢弃，并从其余粒子重抽补足。${cum}季度模型修正长期尾部之后这些比例应接近 0。`;
+}
+// the books' identities the level stats saw fail (tree.ident_stats)
+function identText(m) {
+  const lv = Array.isArray(m?.levels) ? m.levels.filter(l => l && typeof l === 'object' && l.ident_fail !== undefined) : [];
+  if (!lv.length) return null;
+  const bad = lv.filter(l => Number(l.ident_fail_n) > 0);
+  if (!bad.length) return `账户恒等式（I1–I10）：${lv.length} 季的候选节点全部通过。`;
+  return `账户恒等式（I1–I10）：${lv.length} 季中有 ${bad.length} 季出现未通过的候选节点（按质量加权最高 ${C.pct(Math.max(...bad.map(l => Number(l.ident_fail) || 0)), 1)}，最大残差 ${C.num(Math.max(...bad.map(l => Number(l.ident_max) || 0)), 0)}）：这些节点的账户读数不可靠。`;
+}
+// the adapter's notes the level stats counted (tree.notes_stats): floors, bounds, the ±4 sd saturation
+function notesText(m) {
+  const lv = Array.isArray(m?.levels) ? m.levels.filter(l => l && typeof l === 'object' && l.model_notes) : [];
+  if (!lv.length) return null;
+  const tot = {};
+  for (const l of lv) for (const [k, v] of Object.entries(l.model_notes)) tot[k] = (tot[k] || 0) + (Number(v) || 0);
+  const zh = { floor: '政策利率钉在下限以下、按下限交付', floor_short: '降息被模型的下限截短', bound: '失业率或信用利差钉到模型下界以下、按下界交付', saturation: '输入超出历史范围、按 ±4 个标准差截断', qe_paths: '量化宽松按模板写入干预路径', tail: '尾部粒子' };
+  const parts = Object.entries(tot).filter(([k]) => zh[k]).map(([k, v]) => `${zh[k]} ${v} 个粒子·季`);
+  return parts.length ? `模型的边界与截断（各季的动作簇合计）：${parts.join('；')}。` : null;
+}
+const STRUCTURAL_TEXT = '动作按结构识别写入：美联储的利率决定是干预（同季宏观不受它影响，市场当季响应），关税与移民在本季抽样之后才设定，国会的财政工具按各自的政策冲击写入，到期的承诺按做出它的选项同样写入，石油供给与地缘风险的贡献是观测值；每个动作簇与季前运行共用同一组随机数，簇之间的差别只来自动作。美联储的选项是本季两次会议合计的目标变动，按模型的口径（季末月的月均）换算后写入，季末的目标利率另记为节点状态。';
+
+export function honestyCard(env, sum) {
   const { ui } = env.ctx;
   const li = (t) => h('li', {}, t);
+  const m = env.source?.kind === 'snapshot' ? (sum?.manifest || {}) : (sum || {});
+  const pm = sum ? pricingModel(env, m) : (env.cfg?.model || { stub: env.stub });
+  const ts = sum ? tailSummary(m) : null;
+  const tr = (sum ? m.transmission : null) || (pm.stub ? null : env.cfg?.transmission) || null;
   return h('details', { class: 'card', style: { marginTop: '12px' } },
     h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '计算口径与局限'),
     h('ul', { class: 'list', style: { fontSize: '13px', marginTop: '8px' } },
       li('行为者只选动作，后果由合成器给出，价格只来自季度模型。'),
-      li('账户是记账，不写价格，也不是模型的学习输入；每个粒子的账户按它自己的动作更新。'),
+      li('账户是记账，不写价格，也不是模型的学习输入；每个粒子的账户按它自己的动作更新。联邦赤字/GDP 以每季 4.7% 的速度回到基线（1973–2019 年的历史回归；基线随立法动作移动），公众持有的债务不低于 0。'),
       li('大模型知道历史：任何历史回放都会泄漏信息（状态本身就能定年），只能当管道测试；能干净检验的只有护栏与恒等式、不调用大模型的先验树、合成状态上的变形测试，以及从今天起的前瞻账本，而账本要好几年才能分辨中等程度的偏差。'),
       li('概率是蓝色，涨跌颜色跟随 K 线配色；每个行为者的大模型权重、上限与精度权重都是判断值，尚未校准。'),
       li('束搜索每层只保留 B 个节点：被剪掉的分支的质量与粒子并入最近的保留节点，不会丢掉；一个子节点只能带一种离散状态（事实、政治状态、承诺），没有单独成支的少数状态在节点详情里标出比例。'),
       li('第 D 季之后没有智能体：按历史平均反应函数推演；回撤是季末口径。'),
-      env.stub ? li('现在用的是高斯桩模型（不是资产模型）：资产价格只用于检查流程，不能当作结果，也不能导出。') : null),
+      pm.stub ? li('现在用的是高斯桩模型（不是资产模型）：资产价格只用于检查流程，不能当作结果，也不能导出。')
+        : li(`资产价格来自${pricingText(pm)}，试运行：切换门未通过。${STRUCTURAL_TEXT}`),
+      ...((tr?.zh || []).map(t => li(t))),
+      pm.stub ? null : li('政策利率不低于模型的下限 0.1%：离下限不足的降息选项不进菜单；10 月议息会议是锁定事实时，模型的季前分布只在相容的选项上重新归一（模型树不做这一步，它的选项就是模型自己的利率分布分档）。'),
+      ts ? li(tailText(ts)) : null,
+      sum ? (identText(m) ? li(identText(m)) : null) : null,
+      sum ? (notesText(m) ? li(notesText(m)) : null) : null),
     ui.notice('前瞻 · 未经验证：从今天出发的推演要等这些季度过去才能检验。', 'info'));
 }
 
@@ -486,11 +556,12 @@ function metaCard(env, sum) {
   const chips = h('div', { class: 'agents-chips' },
     status === 'done' ? C.chip(src.kind === 'snapshot' ? '已冻结（只读）' : '完成', 'good') : status === 'paused' ? C.chip(`已暂停：${pause?.message || pause?.reason || ''}`, 'warn')
       : C.chip({ building: '构建中', running: '运行中', queued: '排队中', failed: '失败', cancelled: '已取消', cancelling: '正在停止' }[status] || status || '—', status === 'failed' ? 'bad' : 'accent'),
-    m.stub ? C.chip('桩模型（不是资产模型）', 'warn', '资产价格来自高斯桩模型，只能检查流程') : null,
+    pricingModel(env, m).stub ? C.chip('桩模型（不是资产模型）', 'warn', '资产价格来自高斯桩模型，只能检查流程')
+      : C.chip(pricingModel(env, m).label || '季度模型', 'accent', `这个${src.kind === 'snapshot' ? '快照' : '推演'}的定价模型：${pricingText(pricingModel(env, m))}`),
     C.chip('前瞻 · 未经验证', 'accent'),
     unconf ? C.chip(`构建时 ${unconf} 项锁定事实未确认`, 'warn', '快照与推演保留它们开始时的事实；之后的修改不改变它们') : C.chip('锁定事实全部已确认', 'good'),
     Object.keys(sum.overlay || {}).length ? C.chip(`覆盖层：${Object.keys(sum.overlay).length} 个即时生成的节点`, 'accent') : null);
-  const exportWhy = `组合评估与提取服务尚不支持季度情景集${m.stub ? '；桩模型的结果也不能导出' : ''}`;
+  const exportWhy = exportText(pricingModel(env, m), m);
   return ui.card({ title, sub: src.kind === 'snapshot' ? '快照是一次束搜索的冻结结果：打开即用，不再运行模型。' : '推演的设置、版本与调用。',
     actions: h('div', { class: 'agents-export' }, h('button', { class: 'btn', type: 'button', disabled: true, title: exportWhy }, '导出到组合评估'),
       h('span', { class: 'why' }, `暂不可用：${exportWhy}`)) },
@@ -509,7 +580,7 @@ function metaCard(env, sum) {
     row('后果合成器', st.synth ? `${{ off: '关闭', gated: '门控', every: '每个节点' }[st.synth.mode] || st.synth.mode}，前 ${st.synth.depth} 季` : null),
     row('大小', C.isNum(m.size_mb) ? `${m.size_mb.toFixed(1)} MB` : null),
     row('引擎版本', C.versionLabel(ver.engine)), row('提示词版本', C.versionLabel(ver.prompts)), row('行为者目录', C.versionLabel(ver.catalogue)),
-    row('资产模型', C.versionLabel(ver.model_adapter)), row('账户', C.versionLabel(ver.accounts)), row('先验', C.versionLabel(ver.priors)),
+    row('资产模型', pricingText(pricingModel(env, m))), row('账户', C.versionLabel(ver.accounts)), row('先验', C.versionLabel(ver.priors)),
     row('树哈希', m.tree_hash ? h('code', { class: 'mono' }, m.tree_hash) : null)));
 }
 
@@ -1034,7 +1105,8 @@ async function drawDetail(B, key, { scroll = false } = {}) {
       ...(rec.flags || []).map(f => C.chip(flagsZh[f] || '标记', f === 'synth_default' || f === 'prior_only' ? 'warn' : '')),
       rec.overlay?.replayed ? (rec.overlay.replay_exact === false
         ? C.chip('近似重放', 'warn', '粒子云由父节点保存的粒子云重放一个季度得到；保存精度（float32）让个别粒子落到分区边界另一侧，这里取离散状态相同的格子')
-        : C.chip('由父节点重放', '', '粒子云由父节点保存的粒子云（构建时并入了被剪节点、重抽样到 N）重放一个季度得到')) : null),
+        : C.chip('由父节点重放', '', '粒子云由父节点保存的粒子云（构建时并入了被剪节点、重抽样到 N）重放一个季度得到')) : null,
+      rec.overlay?.model_changed ? C.chip('定价模型已更新', 'warn', `这个分支由新的模型拟合定价（${rec.overlay.model_fit || '数据或模型已更新'}），与冻结核心的拟合不同：同一棵树里的数字不完全可比`) : null),
     h('div', { class: 'agents-actions', style: { marginTop: '8px' } },
       h('button', { class: 'btn primary', type: 'button', onclick: () => env.go('story', { node: rec.key, page: rec.level }) }, '在连环画里播放'),
       h('button', { class: 'btn', type: 'button', onclick: () => B.pathBox.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '整条路径'),
@@ -1383,11 +1455,11 @@ function tabPackets(x) {
     C.fill(box);
     const pk = d?.packets || {};
     if (!Object.keys(pk).length) { C.put(box, ui.notice(AG.packetSide === 'parent' ? (rec.level ? '父节点没有保存观察包。' : '起点没有上一季。') : '这个节点没有展开：没有下一季的观察包。', 'info')); return; }
-    C.put(box, h('p', { class: 'agents-why' }, '每个行为者做决定时看到的全部内容：自己的账户（三张表的中位数与区间）、共享的宏观状态、代码写的新闻摘要和各方的公开表态。原文照录。'));
+    C.put(box, h('p', { class: 'agents-why' }, '每个行为者做决定时看到的全部内容：自己的账户（三张表的中位数与区间）、共享的宏观状态、代码写的新闻摘要和各方的公开表态。原文照录（只把字段代码换成了中文名）。'));
     for (const [a, p] of Object.entries(pk).sort((x1, y1) => C.actorStage(x1[0]) - C.actorStage(y1[0]))) {
       C.put(box, h('details', { class: 'agents-cluster', style: { marginBottom: '8px' } },
         h('summary', { style: { cursor: 'pointer' } }, h('b', {}, C.actorName(a)), h('span', { class: 'muted' }, ` · ${p.chars ?? '—'} 字，约 ${p.tokens_est ?? '—'} token`)),
-        h('pre', { class: 'agents-pre' }, p.text || '')));
+        h('pre', { class: 'agents-pre' }, C.humanize(p.text || ''))));
     }
   };
   C.put(body, seg, h('div', { style: { height: '8px' } }), box);
@@ -1406,7 +1478,15 @@ function histPos(f, v) {
   return pts[pts.length - 1][0];
 }
 const ENDO_ZH = { E0: '数量', E0p: '政策工具', E1: '金融价格', E1c: '商品价格', E2: '调查与新闻', S: '状态' };
-const SRC_ZH = { actor: '行为者写入', 'synth:partition': '后果合成 · 分区', 'synth:mechanism': '后果合成 · 机制', a0_pinned: '两步法固定（季前运行）', model: '模型推断' };
+const SRC_ZH = { actor: '行为者写入', 'synth:partition': '后果合成 · 分区', 'synth:mechanism': '后果合成 · 机制', a0_pinned: '固定在季前运行值', model: '模型推断' };
+// a categorical field's float as its label (x_oil_cause: 0 需求推动 / 0.5 供需混合 / 1 供给推动)
+function enumText(f, v) {
+  const en = f?.enum, zh = f?.enum_zh || {};
+  if (!en || !C.isNum(v)) return null;
+  let best = null;
+  for (const [k, x] of Object.entries(en)) if (best === null || Math.abs(x - v) < Math.abs(en[best] - v)) best = k;
+  return zh[best] || best;
+}
 
 function tabInputs(x) {
   const { B, rec, body } = x;
@@ -1419,8 +1499,8 @@ function tabInputs(x) {
   rows.sort((a, b) => order.indexOf(a.src) - order.indexOf(b.src) || (a.f?.zh || '').localeCompare(b.f?.zh || '', 'zh'));
   C.put(body, ui.table([
     { key: 'fid', label: '字段', wrap: true, fmt: (v, r) => h('span', {}, C.fieldName(v), r.f?.endo ? ' ' : '', r.f?.endo ? C.chip(ENDO_ZH[r.f.endo] || '其他', '', `类别 ${r.f.endo}：谁可以写这个字段由类别决定（数量与政策工具可由行为者或合成器写；金融价格只由模型给出）`) : null) },
-    { key: 'p50', label: '中位数', fmt: (v, r) => `${C.num(v, 2)} ${r.f?.unit || ''}` },
-    { key: 'p10', label: '10–90%', fmt: (v, r) => `${C.num(r.p10, 2)} ~ ${C.num(r.p90, 2)}` },
+    { key: 'p50', label: '中位数', fmt: (v, r) => enumText(r.f, v) || `${C.num(v, 2)} ${r.f?.unit || ''}` },
+    { key: 'p10', label: '10–90%', fmt: (v, r) => (r.f?.enum ? `${enumText(r.f, r.p10)} ~ ${enumText(r.f, r.p90)}` : `${C.num(r.p10, 2)} ~ ${C.num(r.p90, 2)}`) },
     { key: 'src', label: '来源', fmt: (v) => C.chip(SRC_ZH[v] || '模型推断', v === 'actor' ? 'accent' : v?.startsWith('synth') ? 'warn' : '') },
     { key: 'pos', label: '历史位置', fmt: (v, r) => { const q = histPos(r.f, r.p50); if (q === null) return '—'; const i = h('i'); i.style.left = `${(q * 100).toFixed(0)}%`; return h('span', { style: { display: 'inline-flex', gap: '6px', alignItems: 'center' } }, h('span', { class: 'agents-hist', style: { width: '90px' } }, i), `${Math.round(q * 100)}%`); } },
   ], rows, { stack: true }));

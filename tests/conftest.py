@@ -1,7 +1,8 @@
 """Shared fixtures. No test ever starts the real Claude Code CLI or spends plan usage.
 
 * `no_live_llm` (every test): MSL_LLM_BACKEND=mock, so the translator, the agent tree and the server answer from
-  MockClaude (scenariolab/llm/mock.py); every Claude Code process fails as if the CLI were not installed
+  MockClaude (scenariolab/llm/mock.py), and MSL_AGENT_MODEL=stub, so the agent tree prices with the Gaussian stub
+  (tests of the real quarterly model opt in and skip without data/); every Claude Code process fails as if the CLI were not installed
   (claude_code._exec and _popen are replaced); the mock's fixture queue, the CLI flag probe, the in-flight lock
   table and the translator's response and status caches are per test.
 * `mock_llm`: the MockClaude instance, to queue fixtures (malformed JSON, refusals, timeouts, usage limits, …).
@@ -42,6 +43,9 @@ def no_live_llm(monkeypatch, tmp_path):
     monkeypatch.setattr(cc, "_exec", _no_live_cli)
     monkeypatch.setattr(cc, "_popen", _no_live_cli)
     monkeypatch.setenv("MSL_LLM_BACKEND", "mock")
+    # the agent tree prices with the Gaussian stub in tests (scenariolab.agents.model_adapter.load_adapter would
+    # otherwise pick the quarterly stack when data/ exists); tests of the real model opt in and skip without data
+    monkeypatch.setenv("MSL_AGENT_MODEL", "stub")
     for var in MOCK_VARS:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(cc, "_FLAGS", {})

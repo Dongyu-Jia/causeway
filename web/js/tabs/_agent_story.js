@@ -8,7 +8,7 @@
 import * as C from './_agent_common.js';
 import * as D from './_agent_data.js';
 import { emblem, sprite, gauge, thinkingDots, s as svgEl } from './_agent_art.js';
-import { generate, expectedCalls, genNotice, assetZh, needsConfirm } from './_agent_tree.js';
+import { generate, expectedCalls, genNotice, assetZh, needsConfirm, pricingModel, pricingText } from './_agent_tree.js';
 
 const { h } = C;
 
@@ -368,7 +368,8 @@ class Story {
       leaves.length ? h('optgroup', { label: '换一条（末端节点，按概率）' }, leaves.map((l, i) => h('option', { value: l.key }, `#${i + 1} ${l.quarter || ''} 末端 ${C.prob(l.p)} · ${pathTag(tree, l, leaves)}`))) : null);
     C.fill(this.top, h('span', {}, '路径'), sel,
       h('button', { class: 'btn', type: 'button', onclick: () => this.env.go('browse', { node: this.path[this.page] || this.focusKey }) }, '在情景树里看这一页'),
-      this.env.stub ? C.chip('桩模型：价格只用于检查流程', 'warn') : null,
+      ((pm) => (pm.stub ? C.chip('桩模型：价格只用于检查流程', 'warn') : C.chip(`${pm.label || '季度模型'}定价`, 'accent', pricingText(pm))))(
+        pricingModel(this.env, this.src?.kind === 'snapshot' ? (tree.summary?.manifest || {}) : (tree.summary || {}))),
       this.reduced ? C.chip('已按系统设置减少动画：静态画面', '') : null);
   }
 

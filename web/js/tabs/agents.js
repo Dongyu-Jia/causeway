@@ -8,7 +8,7 @@
 // Module state (AG) survives re-renders (the K-line toggle) and visits within the page load.
 import * as C from './_agent_common.js';
 import * as D from './_agent_data.js';
-import { renderBrowser } from './_agent_tree.js';
+import { renderBrowser, exportText } from './_agent_tree.js';
 import { renderStory } from './_agent_story.js';
 
 const { h } = C;
@@ -168,7 +168,8 @@ export async function render(root, ctx) {
     '每个季度，美联储、国会、总统、中国、欧佩克+、超大型科技公司等行为者各自给出几个可能的动作和概率；后果合成器把联合动作变成几种可能的后果；',
     '资产价格只由按历史估计的季度模型给出，再作为下一季的起点。分支 = 动作簇 × 后果，概率沿路径相乘。预测只发生在情景层。'));
   const chips = h('div', { class: 'agents-chips', style: { marginBottom: '12px' } },
-    env.stub ? C.chip(cfg.model?.label || '桩模型（不是资产模型）', 'warn', '季度资产模型还在设计中：现在用的是高斯桩模型，资产价格只用于检查流程，不能当作结果') : null,
+    env.stub ? C.chip('新推演的定价：桩模型（不是资产模型）', 'warn', `这台服务器上新建的推演与快照用高斯桩模型定价，资产价格只用于检查流程，不能当作结果${cfg.model?.why_stub ? `：${cfg.model.why_stub}` : ''}；已保存的推演与快照按各自构建时的模型显示`)
+      : C.chip(`新推演的定价：${cfg.model?.label || '季度模型'}`, 'accent', `这台服务器上新建的推演与快照用按历史估计的季度模型定价（试运行，切换门未通过${cfg.model?.fit ? `；${cfg.model.fit}` : ''}）；已保存的推演与快照按各自构建时的模型显示`),
     C.chip('前瞻 · 未经验证', 'accent', '从今天出发的推演要等这些季度过去才能检验'),
     env.mock ? C.chip('模拟后端：不调用模型，不消耗额度', 'good', llm?.reason || '')
       : llm?.available ? C.chip('本机 Claude Code', '', `${llm.model || ''} · ${llm.cli_version || ''}`)
@@ -291,7 +292,7 @@ function defaultSource(env) {
 
 function snapLabel(s) {
   const st = { done: '完成', building: '构建中', paused: '已暂停' }[s.status] || s.status || '';
-  return `快照 ${s.id} · 束宽 ${s.B ?? '—'} × ${s.depth ?? '—'} 季 · ${st}${s.stub ? ' · 桩模型' : ''}`;
+  return `快照 ${s.id} · 束宽 ${s.B ?? '—'} × ${s.depth ?? '—'} 季 · ${st}${s.stub ? ' · 桩模型' : (s.model_kind === 'quarterly' ? ' · 季度模型' : '')}`;
 }
 function runLabel(r) {
   return `推演 ${r.name || r.id} · ${r.depth ?? '—'} 季 · 束宽 ${r.B ?? '—'} · ${STATUS_ZH[r.status] || r.status || ''}`;
@@ -659,8 +660,10 @@ function renderSettings(grid, env, progressBox) {
         h('label', { class: 'inl' }, h('input', { type: 'checkbox', checked: dr.prior_trees ? true : null, onchange: (e) => { dr.prior_trees = e.target.checked; changed(); } }), '同时生成两棵对照树（0 次调用）'))),
     h('div', { class: 'row' }, h('label', { class: 'inl' }, '名称', h('input', { type: 'text', value: dr.name, placeholder: '可选',
       oninput: (e) => { dr.name = e.target.value.slice(0, 80); } }))),
-    h('div', { class: 'agents-chips' }, C.chip('两步法条件化', '', '季度模型还不能按结构条件化：先跑一次不含行为者杠杆的模型，再把动作写入的字段固定'),
-      env.stub ? C.chip(cfg.model?.label || '桩模型（不是资产模型）', 'warn') : null));
+    h('div', { class: 'agents-chips' }, cfg.model?.structural
+      ? C.chip('结构条件化', '', `季度模型按结构识别动作：美联储的利率决定是干预（同季宏观不受它影响，市场当季响应），关税与移民本季最后设定，国会的财政工具按各自的政策冲击写入；每个动作簇与季前运行共用同一组随机数。${(cfg.transmission?.zh || []).join('')}`)
+      : C.chip('两步法条件化', '', '定价模型不能按结构条件化：先跑一次不含行为者杠杆的模型，再把动作写入的字段固定'),
+      env.stub ? C.chip(cfg.model?.label || '桩模型（不是资产模型）', 'warn') : C.chip(cfg.model?.label || '季度模型', 'accent')));
 
   C.put(grid, ui.card({ title: '运行设置', sub: '每一项改动都会立刻重算右侧的预计用量（不调用大模型）。', cls: 'span-2' }, form),
     ui.card({ title: '预计用量', sub: '运行前估算：调用次数、轮次、时间与额度，不调用大模型。' }, estBox));
@@ -1081,13 +1084,15 @@ async function renderSaved(root, env) {
   if (!env.alive()) return;
   let sets = null;
   try { sets = await D.get('agents/sets'); } catch (_) { sets = null; }
-  const exportWhy = `${sets?.reason || '组合评估与提取服务尚不支持季度情景集'}${env.stub ? '；桩模型的推演也不能导出' : ''}`;
+  // the general reason below the tables; each row says its own (its pricing model, whether paths were kept)
+  const exportWhy = sets?.reason || '组合评估与提取服务还不能读取季度情景集：交给组合评估暂时禁用';
+  const rowExport = (r) => C.chip('不能导出', '', exportText(r.pricing_model || { stub: !!r.stub, trial: r.model_kind === 'quarterly' }, { settings: { keep_paths: r.keep_paths || 'none', depth: r.depth } }));
 
   // snapshots
   const snapRows = env.snaps.map(s => ({ ...s }));
   C.put(root, ui.card({ title: '快照', sub: '束搜索的冻结结果：只读，打开即用，不再运行模型；点击没有生成的分支会即时生成并存入覆盖层（核心文件不变）。' },
     snapRows.length ? ui.table([
-      { key: 'id', label: '快照', fmt: (v, r) => h('span', {}, h('b', {}, v), r.stub ? ' ' : null, r.stub ? C.chip('桩模型', 'warn') : null) },
+      { key: 'id', label: '快照', fmt: (v, r) => h('span', {}, h('b', {}, v), ' ', r.stub ? C.chip('桩模型', 'warn') : (r.model_label ? C.chip(r.model_label, 'accent', r.model_fit || '') : null), ' ', rowExport(r)) },
       { key: 'status', label: '状态', fmt: (v, r) => C.chip({ done: '完成', building: '构建中', failed: '失败', cancelling: '正在停止',
         paused: `已暂停${{ usage_limit: '（用量上限）', budget: '（达到调用上限）', server_restart: '（服务重启）', cancelled: '（已取消）' }[r.pause?.reason] || ''}` }[v] || v,
       v === 'done' ? 'good' : v === 'paused' ? 'warn' : v === 'failed' ? 'bad' : 'accent') },
@@ -1133,7 +1138,7 @@ async function renderSaved(root, env) {
     const rows = env.runs.filter(r => !q || (r.name || '').includes(q) || r.id.includes(q));
     if (!rows.length) { C.fill(runsBox, h('div', { class: 'muted' }, q ? '没有匹配的推演。' : '还没有推演。')); return; }
     C.fill(runsBox, ui.table([
-      { key: 'name', label: '名称', fmt: (v, r) => nameCell(env, r, drawRuns) },
+      { key: 'name', label: '名称', fmt: (v, r) => h('span', {}, nameCell(env, r, drawRuns), ' ', rowExport(r)) },
       { key: 'status', label: '状态', fmt: (v, r) => statusChip(v, r) },
       { key: 'depth', label: '规模', fmt: (v, r) => `${v ?? '—'} 季 · 束宽 ${r.B ?? '—'}${r.tree_kind && r.tree_kind !== 'agent' ? (r.tree_kind === 'model' ? ' · 模型树' : ' · 历史基率树') : ''}` },
       { key: 'calls_new', label: '调用（新/缓存）', fmt: (v, r) => `${v ?? 0} / ${r.calls_cached ?? 0}` },

@@ -2126,6 +2126,152 @@ the beam search; agents/snapshot.py freezes one run as a snapshot; agents/jobs.p
   bars, 各季动作分布, a 分支 × 资产 table and the 8-quarter agent-vs-base-rate KPI; the two-stage sankey is not
   built (the overview canvas shows the same flow).
 
+### On the real quarterly model (phase P14)
+
+The tree prices with the history-estimated quarterly stack (scenariolab/qmodel/adapter.py, QAdapter on
+rollout.Stepper) instead of GaussianStub. The tree still never imports the model: everything goes through the
+adapter contract in agents/model_adapter.py. The engine is `agent-tree-4` (the P14 review's fixes); folders built by
+an earlier engine can be browsed, but an unsaved branch of theirs is not replayed.
+
+* **Which model prices a run.** `MA.load_adapter()`: `MSL_AGENT_MODEL` when set (`stub` or `<module>:<factory>`,
+  validated once per adapter object; an explicit spec that cannot load is a Chinese ValueError, a 503 from
+  `/api/agents/config`, never a fallback); else the quarterly stack when `data/processed/panel_quarterly.csv` and
+  `panel_monthly.csv` exist and it fits (about 4 s, once per process); else the stub, with the reason kept for
+  `MA.model_info()` (fresh clones and CI have no data/). tests/conftest.py pins `MSL_AGENT_MODEL=stub`; the real
+  model's tests (tests/test_agents_real_model.py) opt in and skip without data. `model_info()` ({kind, stub,
+  version, identity, label, fit, structural, trial, why_stub, fallback}) goes into run.json and the snapshot
+  manifest (`pricing_model`), `/api/agents/config`, the snapshot CLI (定价模型：…) and the UI, which shows the
+  label and the fit (训练截至 2026Q3), never the version string. Real Claude Code calls are never priced by a
+  stub the default fell back to (`snapshot.refuse_fallback_stub`, in the CLI, `JobManager.start`, `resume` and
+  `start_snapshot`): the stub is allowed only when `MSL_AGENT_MODEL=stub` says so.
+* **Identity.** `MA.identity(adapter)` is the adapter's version with the quarterly stack's file-time digest
+  (rollout._panel_digest hashes panel_quarterly.csv's mtime) replaced by a hash of the bytes (the panel, the asset
+  selection file and the panel meta's input and card digests). It keys the root (`Engine.root`), every LLM cache
+  entry (`tree.versions()["model_adapter"]`) and the version checks below, so a byte-identical copy or rebuild of
+  data/ keeps the tree hash and the cache. (A content-based `_panel_digest` in the quarterly round would make this
+  unnecessary.)
+* **Resume and extension.** A run or snapshot continues with the fit it was priced with, whatever the environment
+  or the server's default says (`snapshot.folder_adapter` → `MA.resume_adapter`: the stub for a stub build, the
+  quarterly stack for a quarterly one, then the exact identity). Another fit of the same family (a refit after the
+  data changed) is refused in Chinese naming both fits, unless `--allow-model-change`; the switch is recorded in the
+  manifest's `pricing_history` and a `model_changed` journal event, and `run_started` / `run_resumed` carry
+  `model_info`. On-demand branches may use a refit (the clouds replay); their overlay entries carry
+  `model_changed` and the UI marks them 定价模型已更新. A budget pause resumes from the server too: `start_snapshot`
+  keeps the previous pause as `resume_pause` for `build()`, which raises the hard cap to the calls already paid plus
+  1.2 × the remaining estimate. `JobManager.cached_levels` counts a folder only when its versions (engine, catalogue,
+  accounts, priors, prompts, the model's identity) and its LLM backend equal the current ones.
+* **Conditioning (structural adapter, no two-step protocol).** Pins go where the actor's action means them:
+
+  | Lever | How B_k pins it |
+  |---|---|
+  | Fed d_ff | `given`, "do" (the adapter's given_modes); in the model's units (below) |
+  | Fed balance sheet d_bs (an attribute option) | `given`, "do" |
+  | President d_tariff, immigration d_lf (an attribute) | `given` / `structural=`, "do_last" |
+  | Congress d_transfers, d_deficit, d_perstax | `structural=` (do by u_tr, u_def, u_ptax) |
+  | Hyperscaler fallback on d_itinv (thin) | `structural=`, do_last |
+  | A commitment due this quarter (the second half of a law, the hyperscaler plan's quarters 2–4) | like the option that made it: its writes carry the protocol (`actors.commitments_of`; older saved commitments fall back to the catalogue's protocol for the field) |
+  | Oil-supply composite (belligerents, OPEC+, the strategic reserve), GPR contributions | `given`, reduced form, x_oil_cause = 1 (supply) where |Σz| ≥ 0.5 |
+  | Hazard fields no action wrote (d_metals_oil, d_gpr) | `structural=`, do_last at A0 |
+
+  Attribute options (the Fed's balance sheet, immigration, the strategic reserve) write like main options; before
+  the review they never reached the model. Only the particles an action wrote are pinned; the rest are free.
+* **Transmission is measured, not assumed.** `tree.transmission()` probes every lever the catalogue writes as the
+  engine routes it: +1 sd on each particle's own A0 draw against a placebo pinned at the draw in the same mode,
+  common random numbers, over the quarter and the two after it, in 15 macro and financial fields and five asset
+  returns (cached per identity, about 0.5 s). On the stack only the ten core variables (CPI, services CPI, IP,
+  unemployment, the shadow rate, real oil, the real 10-year yield, the Baa and GZ spreads, the dollar) carry lags
+  into each other; the 42 satellites (GDP, consumption, investment, the fiscal fields, d_bs, d_tariff, d_lf,
+  d_itinv, …) follow the core but never feed back, and u_bs, u_tr, u_def, u_ptax reach only later-ordered
+  financial and survey satellites on impact (≤ 1.2·10⁻⁴ sd of any response field). So d_bs, d_transfers,
+  d_deficit, d_perstax, d_tariff, d_lf and d_itinv are inert (d_ff moves the response fields by up to 0.27 sd).
+  For an inert lever the engine: (1) sets its channel class to "absent" (`meta[f]["inert"]`; the synthesizer's
+  gate G1 opens and its mechanisms are eligible); (2) keeps AGENT_DESIGN §6.3's response table: transfers → goods
+  consumption +2.1% annualized per pp, a reduced-form pin the model completes the quarter around (the end of a
+  stimulus payment now lowers output: GDP −0.85 against A0 for −2pp, where reading the transfer itself as an
+  observation raised it +0.58); (3) writes QE's intervention paths (SIM_DESIGN §5.3, template G08) for `bs_qe`:
+  d_tp10 −1 sd and d_y2 −0.5 sd (判断值) set last, d_gz −2 ± 0.5 sd as an observation (it is a core variable; the
+  stack refuses it as an intervention, `Engine._intervenes`). Taxes, purchases, tariffs, immigration and the
+  hyperscaler fallback have no stand-in beyond the synthesizer (its depth, 4 quarters by default). The probe's
+  result goes into the manifest and run.json (`transmission`), `/api/agents/config`, the CLI estimate (传导：…) and
+  the honesty card. It also measures the policy rate's own response: a +50bp "do" raises core CPI y/y by +0.08 over
+  quarters 4–8 and unemployment +0.09 at quarter 12, a price puzzle the card discloses.
+* **The Fed in the model's units.** The schema's s_ff is the monthly average of the quarter's last month and d_ff the
+  change between two such averages (panel lvl_ff; the stub was fitted on the same definition), while the Fed's
+  options are the quarter's total target move. Each quarter's first meeting falls in its first or second month, the
+  second in the last month, which sees only the days after the decision (2026: Mar 17–18, Jun 16–17, Sep 15–16,
+  Dec 8–9; later years assumed to keep the pattern, 判断值). `Engine.fed_units`: d_ff = carry + a + b·m per particle,
+  with carry = the end-of-quarter target minus s_ff, b = (1 + f)/2 for a free quarter (f the last month's share
+  after the second meeting) and, with a pinned first meeting m1 (October 2026), a = m1·(1 − f), b = f. The target is
+  a node state (`ff_target`, rolled with the moves the delivered d_ff implies); the root's is 3.88 (FRED DFF after the
+  September hike; s_ff 3.75 is September's average), so a December hold is d_ff +0.13 in the model's units, not 0.
+  A0 bins, the bin actors' labels and the menu's room to cut read target moves (`implied_moves`); the shared state
+  table and every packet show the target range (政策利率目标（季末）：区间约 3.75–4.00%，有效利率 3.88%).
+* **Common random numbers.** B_k (and a mechanism's re-completion) is drawn with A0's own random stream over the
+  node's particles (`Engine.complete_crn`), so clusters differ only by their actions. A pin is still not neutral in
+  the stack even at a particle's own A0 value (its ±4 sd saturation and the dollar hold), so the tree pins nothing
+  it does not have to: an instrument of a prior-only actor on an A0-bin prior (c used 0) is left to the model's own
+  reaction function, each particle labelled with the option whose bin its A0 draw falls in; when other actors'
+  reduced-form pins re-draw it, the share of particles that left their labelled bin is reported (`bin_drift` in the
+  detail's clusters). Everything that resamples a cluster's particles (the tail rule, nature's mixture) goes through
+  `Engine.take_bk`, which re-indexes rows, the draw, `given`, `structural`, the state and the slots together (before
+  the review nature's mixture left `structural` behind: 19% of a cluster's fiscal pins sat on other particles).
+* **Priors and sizes.** The policy-rate floor is the model's (`field_info()["d_ff"]["level_floor"]` 0.1; the stub's 0):
+  a cut is floored on the target and on the model's level, and a cut the floor delivers short is flagged
+  (`floor_short`, a note). A0 bins of adjacent menu options split at the midpoint of the nearest ends of their value
+  sets. In 2026Q4 the pinned October hold leaves −25 / 0 / +25bp and the model's A0 prior is renormalized over them
+  (71% of the root's A0 mass is incompatible: −25bp 0.36, hold 0.20, +25bp 0.43); the model tree builds its Fed
+  menu without the pinned trimming (its options are plain bins of the model's own distribution). Only decision
+  instruments read A0 priors (`A0_DECISION_ACTORS`: the Fed); the President's tariff prior is the decision-history
+  table (the stack's d_tariff drifts: 0.92 on tariff_down at the root), except in the model tree. A ranged Fed
+  option's default size is the A0 median in its bin when the bin holds at least 30 particles.
+* **R-A1–R-A4.** agents/overlay.json (built by `python -m scenariolab.agents.overlay`, checked by a test) is the
+  agents overlay on schema-revise-2 3.0: 94 fields with cls / synth / axis / channel_class / lag_discipline / key;
+  x_oil_cause is `event_label` with the enum demand 0, mixed 0.5, supply 1 (the UI shows 需求推动 / 供需混合 /
+  供给推动); y_mult (Draws.y["mult"]) is Δlog CAPE multiple; s_ecyc and y_eps are display-only, as is s_pe.
+  `Draws` carries the optional `drawn` and `notes` through take / concat; the notes (floors, bounds, the ±4 sd
+  saturation, QE paths, short cuts) are summed per cluster (`tree.merge_notes`) into the detail, the node summary,
+  the level stats (`model_notes`) and the honesty card.
+* **Books.** The books take the model's headline d_cpi. The deficit level returns to its baseline at 4.7% a quarter
+  (the cumulated d_deficit regressed on its lag, 1973–2019; the baseline is the root's level moved by actions'
+  discretionary changes, which the engine passes as a private draw column), because the models draw d_deficit
+  without its level and the books integrated it as a random walk (deficit/GDP −21% … +42% by 2046 and public debt
+  below zero in 59 of 500 particles). A surplus repays debt down to zero and the rest stays in the TGA; foreign and
+  Fed holdings never exceed the debt (I5); the foreign share has no 0/0. Identity failures are level stats
+  (`ident_fail`, `ident_fail_n`, `ident_max`) and a line of the honesty card; a real-model test asserts them over 20
+  quarters. Root levels differ from the model's by data vintage and definition and are not forced together.
+* **Tail particles.** `MA.tail_mask` flags a particle whose draw or rolled state is not finite or whose quarter ends
+  beyond the bounds: the stack's own (GZ > 15, unemployment > 20%, |US-equity log return| > 1) and, from the
+  review, every asset's |quarterly log return| > 1 (crude oil 1.5), the policy rate > 20%, the 10-year yield < 0
+  (the Treasury price formula keeps a negative coupon there: −69% a quarter at −5%), core CPI y/y outside −2…15
+  and headline outside −4…17 (`tail_reasons` names them). `Engine.sanitize` drops and resamples them within the
+  cluster (`take_bk`); A0's tail particles are left out of the priors and nature's masses. Each child's
+  `summary.tail` has the quarter's share, the reasons and the share cumulated along its path, 1 − Π(1 − s); the
+  level stats have `tail_share`, `tail_max`, `tail_cum` and `tail_cum_max`; the card shows both.
+* **Neutrality.** The model tree against the stack's own step rollout with the same tail rule: means within 3.5
+  Monte Carlo standard errors per seed, medians within 0.1 sd and the 10–90% width within 0.9–1.1 on average over
+  four seeds (the real-model test, depth 3). Not the sd: unemployment's right tail is heavy, and a leaf mixture of
+  B · N resampled particles understates a heavy-tailed sd (eight seeds: unemployment's sd ratio 0.75–1.18, mean
+  0.91, the same with either tail rule).
+* **Estimates.** `tree.memory_estimate` measures a probe cloud the pricing model advanced two quarters. The size
+  estimate now applies the depth factor level by level (`tree.level_bytes_factor`: the root's identical particles
+  0.09 of the probe, level 1 0.71, level 2 1.0, rising to 1.10 by level 6, and a wide level's fewer distinct
+  particles per node, (parents · K / kept)^0.6). Against the review's measured sizes this brings B 30 × 4 from
+  +46% to +27% and keeps the deeper builds within +8%; a deep, wide check, B 15 × 20 on the stack: 209 MB against
+  an estimate of 219 MB (+5%), peak memory 570 MB against 540 MB.
+* **Hand-off.** Still disabled for real-model runs (AGENT_DESIGN §14, D14): the portfolio and withdrawal services do
+  not read quarterly scenario sets yet, a stub run is never exported, a quarterly export must carry the 试运行
+  label, and a snapshot keeps no quarterly paths. Each run and snapshot row says its own reasons in plain words.
+* **Measured on the final code** (mock LLM, the stack, data to 2026-09): the beam 2 × 80 snapshot builds in
+  75 s, 120.3 MB (estimate 127 MB, +5%), peak memory 320 MB (estimate 332 MB), no
+  runtime warning, no identity failure; tail particles in 77 of 80 quarters, 1.7% a quarter on
+  average (at most 3.7%), 75% of the paths resampled at least once by 2046Q3.
+* **The first real snapshot** (beam 2 × 80, claude-opus-5-5 at effort medium, the local CLI):
+  `MSL_AGENT_MODEL=scenariolab.qmodel.adapter:make_adapter python -m scenariolab.agents.snapshot --beam 2 --quarters
+  80 --dry-run`, then the same with `--yes` (and `--resume --yes` after a pause). Setting MSL_AGENT_MODEL makes a
+  missing panel fail in Chinese instead of falling back. The dry run: 173 calls (166 actor, 7 synthesizer), 88
+  rounds, 0.49–1.47 h at 20–60 s a call, about 2.4M input and 0.58M output tokens (assumed sizes), hard cap 208,
+  about 127 MB, peak memory about 332 MB, about 1 minute of model time.
+
 ## Web app (web/)
 
 No build step: index.html loads the vendored ECharts 5.5.1

@@ -564,8 +564,11 @@ def agents_config():
     from .agents import snapshot as S
     from .agents import synthesizer as SY
     from .agents import tree as T
-    adapter = MA.load_adapter()
-    resolver = A.FieldResolver(fields=set(adapter.x_fields) | set(adapter.field_info()), info=adapter.field_info())
+    from .agents import overlay as OV
+    adapter = _agents_adapter()
+    info = OV.merge(adapter.field_info())
+    resolver = A.FieldResolver(fields=set(adapter.x_fields) | set(info), info=info)
+    model = MA.model_info(adapter)
     return _json({"catalogue": A.catalogue(resolver), "defaults": T.TreeSettings().to_dict(),
                   "snapshot_defaults": S.default_settings().to_dict(),
                   "limits": {"max_depth": 80, "max_B": 30, "max_K": 4, "max_M": 4, "particles": [50, 5000]},
@@ -573,18 +576,40 @@ def agents_config():
                             "caps": [SY.CAP_BRANCH, SY.CAP_TOTAL], "channel_w": SY.CHANNEL_W, "gates": SY.GATE_ZH},
                   "llm": {"model": "claude-opus-5-5", "effort": "medium", "hard_cap_factor": T.HARD_CAP_FACTOR},
                   "starts": {"today": {"quarter": T.FIRST_QUARTER, "root_quarter": T.ROOT_QUARTER, "data_end": "2026-09"}},
-                  "versions": T.versions(adapter), "model": {"version": adapter.version, "stub": bool(adapter.stub),
-                                                             "capabilities": sorted(adapter.capabilities),
-                                                             "label": MA.STUB_LABEL if adapter.stub else ""},
-                  "export_enabled": False})
+                  "versions": T.versions(adapter), "model": model, "transmission": _agents_transmission(adapter),
+                  "export_enabled": False, "export": T.export_status(model, "none")})
+
+
+def _agents_transmission(adapter) -> dict | None:
+    """What the default pricing model's interventions reach (tree.transmission, cached per model), for the setup
+    view and the honesty card; None for a model without the structural capability."""
+    from .agents import snapshot as S
+    from .agents import tree as T
+    if "structural" not in (getattr(adapter, "capabilities", ()) or ()):
+        return None
+    try:
+        return S.engine_transmission(T.Engine(T.TreeSettings(), adapter=adapter, root_accounts=None))
+    except Exception:  # noqa: BLE001 - the probe is information for readers; the config must still load
+        return None
+
+
+def _agents_adapter():
+    """The agent tree's default pricing model; an explicit MSL_AGENT_MODEL that cannot load is a 503 with the
+    Chinese reason (never a traceback, never a silent fallback)."""
+    from .agents import model_adapter as MA
+    try:
+        return MA.load_adapter()
+    except ValueError as err:
+        raise HTTPException(503, f"智能体推演的定价模型无法加载：{err}") from err
 
 
 @app.get("/api/agents/schema")
 def agents_schema():
     from .agents import model_adapter as MA
-    adapter = MA.load_adapter()
-    info = adapter.field_info()
-    return _json({"version": adapter.version, "stub": bool(adapter.stub), "x_fields": list(adapter.x_fields),
+    from .agents import overlay as OV
+    adapter = _agents_adapter()
+    info = OV.merge(adapter.field_info())
+    return _json({"version": MA.identity(adapter), "stub": bool(adapter.stub), "x_fields": list(adapter.x_fields),
                   "assets": list(adapter.assets), "fields": [{"id": k, **v} for k, v in sorted(info.items())]})
 
 

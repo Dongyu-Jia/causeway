@@ -27,6 +27,43 @@ The three trees of every run (§9.4): 智能体树 (tree_kind "agent", the run's
 c = 0, shift levers with their decision-record priors, the synthesizer's default partition) and 模型树 ("model":
 c = 0, instruments as bins of A0, shift levers at the status quo, nature at its tail masses; its leaf mixture is the
 model's own distribution).
+
+On the real quarterly model (phase P14; capability "structural"):
+
+* conditioning: no two-step protocol. The Fed's d_ff and d_bs pins are interventions ("do", the adapter's
+  given_modes), d_tariff and d_lf are set last ("do_last"); Congress's fiscal levers go through structural= (do on
+  d_deficit, d_transfers, d_perstax by their shocks, do_last on d_corptax and d_defense) and so does the hyperscaler
+  fallback on d_itinv (a thin lever, do_last); a commitment due later is routed like the option that made it (the
+  protocol travels with its write); the oil-supply composite and GPR contributions stay reduced-form observations
+  (the schema's own supply signature carries their identification) and label x_oil_cause = 1 (supply) when
+  |Σz| ≥ 0.5; the hazard event fields an action did not write are held at A0 by do_last; attribute options (the
+  Fed's balance sheet, immigration, the strategic reserve) write like main options;
+* transmission (P14 review): what an intervention reaches is measured, not assumed (transmission(): a probe with
+  common random numbers over the quarter of the action and the two after it). On the quarterly stack the satellites
+  never feed back into the macro core, so every satellite lever (the balance sheet, Congress's fiscal tools, tariffs,
+  immigration, the hyperscaler fallback) is inert: its channel class becomes "absent" (the synthesizer's gate G1 and
+  its mechanisms), transfers keep AGENT_DESIGN §6.3's response table (goods consumption +2.1 per pp, an observation
+  the model completes the quarter around) and QE writes SIM_DESIGN §5.3's intervention paths (template G08: d_tp10,
+  d_y2 set last, d_gz observed);
+* common random numbers: B_k is completed with A0's own random stream (same particles, same seed), so a particle
+  nothing pins gives back its A0 draw and the clusters differ only by their actions. A pin, even at a particle's
+  own A0 value, is not neutral in the quarterly stack (its ±4 sd saturation and dollar hold re-shape the draw), so
+  nothing is pinned that an action did not write;
+* instruments: the Fed's options are target moves (both meetings of the quarter) and the model's d_ff is the change
+  of the last month's average rate, so options are pinned in the model's units (fed_units: the carry-over of last
+  quarter's late meeting plus the share of this quarter's moves the last month sees) and the end-of-quarter target
+  is a node state ("ff_target"); the floor is the model's (field_info level_floor 0.1, the stub's 0); A0 bins
+  (of the moves the A0 draws imply) split adjacent options at the midpoint of their value sets (the catalogue bins
+  when every option is on the menu); a pinned first meeting renormalizes the A0 prior over the compatible options;
+  a ranged Fed option's default size is the median of A0 inside its bin (≥ 30 particles); the President's tariff
+  prior is the decision-history table (the model's d_tariff drifts; it is not a decision rule); prior-only bin actors
+  (c = 0 on an A0-bin prior) leave their instrument to the model's own reaction function (no pin), each particle
+  labelled with the bin of its A0 draw;
+* robustness: tail particles (MA.tail_mask: not finite, GZ > 15, unemployment > 20%, the policy rate > 20%, the
+  10-year yield < 0, CPI y/y outside history, any asset's |quarterly log return| > 1) are dropped and resampled
+  within their cluster; the share is in the node summary (per quarter and cumulated along the path), the detail,
+  the level stats and the journal (tail_particles), and no float32 cast overflows. The adapter's notes (floors,
+  bounds, ±4 sd saturation) are aggregated per cluster into the detail, the level stats and the journal.
 """
 from __future__ import annotations
 
@@ -50,10 +87,12 @@ from .. import config
 from . import accounts as AC
 from . import actors as A
 from . import model_adapter as MA
+from . import overlay as OV
 from . import priors as P
 from . import synthesizer as SY
 
-ENGINE_VERSION = "agent-tree-2 (2026-11-02; per-particle books, discrete split, follower marginals)"
+ENGINE_VERSION = ("agent-tree-4 (2026-11-02; P14 review: measured transmission, commitments routed by their protocol, "
+                  "attribute writes, the Fed in the model's units, wider tail rule)")
 LEDGER_NAME = "calls_paid.tsv"              # the run's paid-calls ledger (cache key, level), append-only
 AGENTS_DIR = config.DATA_DIR / "agents"
 RUNS_DIR = AGENTS_DIR / "runs"
@@ -69,7 +108,7 @@ CUM_SCALE = 0.08                            # cumulative US-equity log return in
 BAND_FIELDS = ("d_ff", "d_unrate", "d_rgdp", "d_core", "d_cpi_goods", "d_gz", "d_spread", "d_y10", "d_oil",
                "d_metals_oil", "d_tariff", "d_itinv", "d_capex", "d_cons_serv", "d_sent", "d_infexp1", "d_gpr",
                "d_usd", "d_transfers", "d_deficit")
-STATE_ROWS = (("s_ff", "政策利率（联邦基金）", "%"), ("s_unrate", "失业率", "%"), ("s_core_yoy", "核心 CPI 同比", "%"),
+STATE_ROWS = (("s_ff", "政策利率（联邦基金，季末月的月均：模型口径）", "%"), ("s_unrate", "失业率", "%"), ("s_core_yoy", "核心 CPI 同比", "%"),
               ("s_infexp1", "1 年通胀预期（密歇根）", "%"), ("s_spread", "Baa − 10 年利差", "pp"),
               ("s_term", "期限利差（10 年 − 政策利率）", "pp"), ("s_y10", "10 年期收益率", "%"),
               ("s_real_y10", "10 年实际收益率", "%"), ("s_cape", "log 席勒 CAPE", "log"),
@@ -83,6 +122,23 @@ ACCOUNT_HEADLINE = (("fiscal.limit_headroom", "联邦债务上限余量"), ("fed
                     ("bigtech.fcf", "五家云公司自由现金流"), ("households.saving_rate", "家庭储蓄率"),
                     ("fiscal.debt_gdp", "公众持有债务/GDP"))
 MEMORY_MAX = 1500
+
+
+def key_scales(meta: Mapping | None = None) -> tuple:
+    """((state key, sd), …) of the node distances: the model's 1985–2019 quarterly sd of each start-of-quarter state
+    (field_info hist.sd_q_1985_2019, else sd_q), else KEY_STATE's constants (the stub's values)."""
+    out = []
+    for k, sd0 in KEY_STATE:
+        h = ((meta or {}).get(k) or {}).get("hist") or {}
+        v = h.get("sd_q_1985_2019") or h.get("sd_q")
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = None
+        out.append((k, v if v is not None and math.isfinite(v) and v > 0 else sd0))
+    return tuple(out)
+
+
 MAX_PROFILES = 512
 BRANCH_MODAL = 0.85                          # an actor whose modal option has ≥ 0.85 does not branch (v1 rule)
 MAX_BRANCHING = 3
@@ -94,6 +150,50 @@ SPLIT_WEIGHT = {"political": 3.0, "main": 1.0, "attribute": 0.5}   # which discr
                                              # elections and other political changes, then actors' main decisions
 COMMITMENT_KEEP = 0.7                        # prior that a commitment due this quarter is executed (判断值)
 FED_FLOOR_FIELD = "s_ff"
+
+# ---------------------------------------------------------------- the Fed in the model's units (P14 review)
+# The schema's s_ff is the monthly average of the quarter's last month and d_ff the change between two such averages
+# (panel lvl_ff; the stub was fitted on the same definition), while the Fed's options are the quarter's total target
+# move (both meetings). Each quarter's first meeting falls in its first or second month (fully in the last month's
+# average); the second falls in the last month, which sees only the days after the decision took effect. Share of
+# the last month after the second meeting (2026 FOMC dates: Mar 17–18, Jun 16–17, Sep 15–16, Dec 8–9; later years are
+# assumed to keep this pattern, 判断值):
+FOMC_LAST_MONTH_SHARE = {1: 13 / 31, 2: 13 / 30, 3: 14 / 30, 4: 22 / 31}
+# the effective rate after the September 2026 hike, held at the pinned October meeting (FRED DFF 3.88% on 2026-10-29,
+# IORB 3.90%, target range 3.75–4.00%; actors.INSTITUTION_DEFAULTS fomc_2026_10): the root's end-of-quarter target
+ROOT_FF_TARGET = 3.88
+FF_TARGET_KEY = "ff_target"                  # the engine's own state key (adapters carry it like any other key)
+DEFICIT_ACTION_KEY = "_agent_deficit_action"  # a private draw column: actions' discretionary deficit change (books)
+FF_TARGET_STEP = 0.25
+
+# ---------------------------------------------------------------- transmission (P14 review)
+# Fields whose response to an intervention says whether a lever reaches the economy or asset prices (the probe's
+# quarter and the two after it: a VAR with two lags would show any feedback by then)
+TRANSMISSION_FIELDS = ("d_rgdp", "d_unrate", "d_ip", "d_core", "d_cpi_goods", "d_cpi_serv", "d_cons_goods",
+                       "d_cons_serv", "d_capex", "d_wage", "d_y10", "d_gz", "d_spread", "d_usd", "d_oil")
+TRANSMISSION_ASSETS = ("us_equity", "nasdaq", "treasury_10y", "gold", "crude_oil")
+TRANSMISSION_QUARTERS = 3
+TRANSMISSION_PARTICLES = 64
+TRANSMISSION_TOL = 0.01                      # a +1 sd intervention that moves no response field by 1% of its sd
+                                             # (quarterly stack: the fiscal shocks reach ≤ 1.2e-4 sd, d_bs 0)
+_TRANSMISSION: dict = {}                     # identity -> probe result (one probe per adapter per process)
+_TRANSMISSION_LOCK = threading.Lock()
+# AGENT_DESIGN §6.3's response table, used on models without the "structural" capability and, on structural models,
+# for a lever whose intervention the model does not transmit: transfers -> goods consumption, +2.1% annualized per pp
+# of personal income (the nondurables estimate, se 0.18; W_C01 A5; consistent with the 2008 payments, Parker et al.
+# 2013); tax and purchase changes are small in the quarter (Romer–Romer 2010; Ramey 2019): no entry
+RESPONSE_TABLE = {"transfers_chg": (("d_cons_goods", 2.1),)}      # lever role -> (field, R per unit)
+# SIM_DESIGN §5.3 and template G08: u_bs alone moves no asset (26 quarters, 4 programs), so on a model whose d_bs does
+# not transmit, QE comes with its intervention paths, in each field's quarterly sd (1985–2019): d_tp10 −1 sd (G08),
+# d_gz −1…−3 sd (G08; −2 ± 0.5), d_y2 down (G08 gives no size: −0.5 ± 0.25 sd, 判断值). Satellites (d_tp10, d_y2) are
+# set last (structural=): the asset layer prices them and nothing is read into them; the GZ spread is in the
+# quarterly stack's core, so it is an observation the model completes the quarter around (financial conditions)
+QE_PATHS = {"bs_qe": (("d_tp10", -1.0, 0.3), ("d_y2", -0.5, 0.25), ("d_gz", -2.0, 0.5))}
+QE_PATHS_NOTE = "量化宽松按 2008–14 年的足迹写干预路径：期限溢价 −1 sd、2 年期收益率 −0.5 sd（判断值）、GZ 利差 −2 sd"
+# a ranged option's default size from the A0 bin: only for decision instruments (the Fed's reaction function), and
+# only with enough particles in the bin (P14 review: 4–8 particles made tariff sizes jump from 1.9 to 5.4)
+A0_DECISION_ACTORS = ("fed",)
+A0_MAGNITUDE_MIN = 30
 
 
 # =====================================================================================================================
@@ -411,6 +511,41 @@ def recombine(p: np.ndarray, D: np.ndarray, same: np.ndarray, eps: float) -> np.
     return a
 
 
+def clip_tail(state: Mapping, d, bounds: Mapping) -> MA.Draws:
+    """The all-tail fallback of Engine.sanitize (no healthy particle to resample from): non-finite public values
+    become 0 (no change this quarter); the GZ and unemployment levels and |US-equity log return| are clipped to the
+    bounds."""
+    def fix(v):
+        a = np.asarray(v, float)
+        return np.where(np.isfinite(a), a, 0.0)
+    x = {k: (v if str(k).startswith("_") else fix(v)) for k, v in d.x.items()}
+    y = {k: fix(v) for k, v in d.y.items()}
+    inc = {k: fix(v) for k, v in (getattr(d, "inc", None) or {}).items()}
+    cpi = None if getattr(d, "cpi_q", None) is None else fix(d.cpi_q)
+    if "d_gz" in x and "s_gz" in state and "s_gz" in bounds:
+        x["d_gz"] = np.minimum(x["d_gz"], float(bounds["s_gz"]) - np.asarray(state["s_gz"], float))
+    if "d_unrate" in x and "s_unrate" in state and "s_unrate" in bounds:
+        x["d_unrate"] = np.minimum(x["d_unrate"], float(bounds["s_unrate"]) - np.asarray(state["s_unrate"], float))
+    if "us_equity" in y and "us_equity" in bounds:
+        y["us_equity"] = np.clip(y["us_equity"], -float(bounds["us_equity"]), float(bounds["us_equity"]))
+    return MA.Draws(x, y, inc, cpi, getattr(d, "drawn", None), list(getattr(d, "notes", None) or []))
+
+
+def merge_notes(notes: Iterable[Mapping]) -> list[dict]:
+    """The adapter's and the engine's notes of one cluster summed by (field, code, text): [{field, code, particles,
+    text}], largest first (floors, bounds, the ±4 sd saturation, QE paths, cuts the floor delivered short)."""
+    acc: dict = {}
+    for nt in notes or []:
+        if not isinstance(nt, Mapping):
+            continue
+        key = (str(nt.get("field") or ""), str(nt.get("code") or ""), str(nt.get("text") or "")[:160])
+        row = acc.setdefault(key, {"field": nt.get("field"), "code": nt.get("code"), "particles": 0, "text": key[2]})
+        row["particles"] += int(nt.get("particles") or nt.get("paths") or 0)
+        if nt.get("fields"):
+            row["fields"] = list(nt["fields"])[:8]
+    return sorted(acc.values(), key=lambda r: (-r["particles"], str(r["code"] or ""), str(r["field"] or "")))
+
+
 def wquantiles(values: np.ndarray, weights: np.ndarray, qs=(0.05, 0.5, 0.95)) -> list[float]:
     v = np.asarray(values, float)
     w = np.asarray(weights, float)
@@ -545,7 +680,8 @@ class Store:
         cl = nd.cloud
         lean = Cloud(cl.state, cl.acc, {}, cl.y, cl.cum, cl.cpi, cl.path, {})
         a, meta = cloud_arrays(lean, "full|")
-        arr = {k: (v.astype(dtype) if v.dtype == np.float64 else v) for k, v in a.items()}
+        arr = {k: (MA.to_float32(v) if (v.dtype == np.float64 and dtype == np.float32) else
+                   (v.astype(dtype) if v.dtype == np.float64 else v)) for k, v in a.items()}
         d = self.root / "leaves"
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / f".{nd.key}.{os.getpid()}.tmp.npz"
@@ -559,7 +695,7 @@ class Store:
         income are not kept (an expansion reads the child's own)."""
         cl = nd.cloud
         a, meta = cloud_arrays(Cloud(cl.state, cl.acc, {}, cl.y, cl.cum, cl.cpi, None, {}), "full|")
-        arr = {k: (v.astype(np.float32) if v.dtype == np.float64 else v) for k, v in a.items()}
+        arr = {k: MA.to_float32(v) for k, v in a.items()}
         d = self.root / "frontier"
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / f".{nd.key}.{os.getpid()}.tmp.npz"
@@ -697,15 +833,22 @@ class Engine:
     def __init__(self, settings: TreeSettings, *, adapter=None, llm=None, deep_llm=None, root_accounts=None,
                  institutions: list | None = None, journal: Journal | None = None, priors_tables=None):
         self.st = TreeSettings.coerce(settings)
-        self.model = adapter or MA.stub()
+        self.model = adapter if adapter is not None else MA.load_adapter()
         self.llm = llm
         self.deep_llm = deep_llm
         self.journal = journal or Journal()
         self.root_acc = root_accounts
         self.items = institutions if institutions is not None else A.load_institutions()
         self.inst = A.institution_values(self.items)
-        self.meta = self.model.field_info()
+        self.meta = OV.merge(self.model.field_info())          # the overlay's tree keys on the model's metadata
         self.sd = {f: self._sd(f) for f in self.model.x_fields}
+        self.structural = "structural" in (getattr(self.model, "capabilities", ()) or ())
+        self.ff_floor = MA.field_floor(self.meta, "d_ff",
+                                       float((getattr(self.model, "level_floor", None) or {}).get("d_ff", 0.0)))
+        self.given_modes = {f: (self.meta.get(f) or {}).get("given_mode") for f in self.model.x_fields
+                            if (self.meta.get(f) or {}).get("given_mode")}
+        self.tail_bounds = dict(getattr(self.model, "tail_bounds", None) or MA.TAIL_BOUNDS)
+        self.key_scales = key_scales(self.meta)
         fields = set(self.model.x_fields) | {k for k in self.meta if k.startswith("s_")}
         self.resolver = A.FieldResolver(fields=fields, info=self.meta)
         self.support = {f: (self.meta.get(f) or {}).get("hist") or {} for f in self.model.x_fields}
@@ -722,6 +865,28 @@ class Engine:
         self.assets = tuple(self.model.assets)
         self._payload_cache: dict = {}
         self._lock = threading.Lock()
+        self.identity = MA.identity(self.model)
+        # what the model's interventions reach (structural models only: without the capability the two-step protocol
+        # and the response table of §6.3 apply as before); inert levers' channel is absent for the synthesizer
+        self.transmission = transmission(self.model, self) if self.structural else {}
+        self.inert = sorted(f for f, r in (self.transmission.get("levers") or {}).items() if r.get("inert"))
+        if self.inert:
+            self.meta = {k: dict(v) for k, v in self.meta.items()}
+            for f in self.inert:
+                row = self.meta.setdefault(f, {})
+                row["channel_class_model"] = row.get("channel_class")
+                row["channel_class"] = "absent"
+                row["inert"] = True
+
+    # ---------------------------------------------------------------- routing of an action's writes
+    def route(self, fid: str, kind: str, protocol: str | None) -> str:
+        """Where a write goes: "structural" (an intervention by structural=: do by its shock, else do_last; shift
+        levers whose protocol is an intervention, on structural models) or "given" (instrument points through the
+        adapter's given_modes, and every reduced-form observation)."""
+        if (self.structural and kind == "shift" and protocol in self.STRUCTURAL_PROTOCOLS
+                and protocol != "signature"):
+            return "structural"
+        return "given"
 
     def _sd(self, f: str) -> float:
         h = (self.meta.get(f) or {}).get("hist") or {}
@@ -737,6 +902,7 @@ class Engine:
     def root(self) -> Node:
         n = int(self.st.n_particles)
         state = self.model.root_state(n)
+        state[FF_TARGET_KEY] = np.full(n, self.root_ff_target(state))
         acc = None
         if self.root_acc is not None:
             acc = AC.Accounts.from_root(self.root_acc, n, institutions=self.inst, resolver=self.resolver,
@@ -746,7 +912,7 @@ class Engine:
         cloud = Cloud(state, acc, {}, {}, cum, np.zeros(n), path, {})
         rs = A.root_state(self.items)
         facts = {k: v for k, v in rs["facts"].items()}
-        key = hashlib.sha256(f"root|{self.st.first_quarter}|{self.model.version}|{canonical(facts)}".encode()).hexdigest()[:16]
+        key = hashlib.sha256(f"root|{self.st.first_quarter}|{self.identity}|{canonical(facts)}".encode()).hexdigest()[:16]
         nd = Node(key=key, parent=None, level=0, quarter=A.quarter_add(self.st.first_quarter, -1), facts=facts,
                   political=dict(rs["political"]), cloud=cloud, memory="", lineage=[])
         if self.root_acc is not None:
@@ -767,7 +933,10 @@ class Engine:
 
     def _covariates(self, nd: Node) -> dict:
         cl = nd.cloud
-        st = MA.medians(cl.state, [k for k, v in cl.state.items() if not k.startswith("_") and np.ndim(v) == 1])
+        st = MA.medians(cl.state, [k for k, v in cl.state.items() if not k.startswith("_") and np.ndim(v) == 1
+                                   and not (self.meta.get(k) or {}).get("display_only")])
+        st["ff_floor"] = float(self.ff_floor)                # the model's policy-rate floor (menus: room to cut)
+        st["ff_target"] = float(np.median(self.ff_target(cl.state)))     # the end-of-quarter target (room to cut)
         if cl.acc is not None:
             st["spr_inventory_mb"] = float(np.median(cl.acc.s["spr"]))
         if "s_spread" in st:
@@ -787,7 +956,70 @@ class Engine:
         return A.NodeContext(quarter=q, state=self.covariates(nd), facts=dict(nd.facts), political=dict(nd.political),
                              institutions=self.inst, gates=gates or {}, commitments=due,
                              stress_mode=bool(self.st.stress_mode), resolver=self.resolver,
-                             leader_choices=dict(leaders or {}))
+                             leader_choices=dict(leaders or {}), pinned_meeting=not self.neutral)
+
+    # ---------------------------------------------------------------- the Fed in the model's units (P14 review)
+    def root_ff_target(self, state) -> float:
+        """The root's end-of-quarter policy-rate target: ROOT_FF_TARGET (the effective rate after the mid-September
+        hike) when the model's root s_ff is the September average of that path (within 0.5), else the model's own
+        s_ff (another origin: no carry-over assumed)."""
+        s = float(np.median(np.asarray(state[FED_FLOOR_FIELD], float)))
+        return float(ROOT_FF_TARGET) if abs(ROOT_FF_TARGET - s) <= 0.5 else s
+
+    def ff_target(self, state) -> np.ndarray:
+        """Per particle: the policy-rate target at the end of the quarter the state starts after (FF_TARGET_KEY;
+        a cloud saved before it existed: the model's s_ff, no carry-over)."""
+        v = state.get(FF_TARGET_KEY)
+        if v is None:
+            return np.asarray(state[FED_FLOOR_FIELD], float).copy()
+        return np.asarray(v, float)
+
+    def fed_pin(self, q: str) -> dict | None:
+        """The pinned first meeting of quarter q ({"move", "option"}), or None (actors.FOMC_PINNED)."""
+        pin = A.FOMC_PINNED.get(q)
+        if not pin:
+            return None
+        opt = str(self.inst.get(pin["id"]) or "hold")
+        mv = A.PINNED_MEETING_MOVE.get(opt)
+        return None if mv is None else {"move": float(mv), "option": opt, "meeting": pin["id"]}
+
+    def fed_units(self, state, q: str, pinned: Mapping | None = None) -> dict:
+        """The map between a quarter's total target move m (both meetings: the Fed's options) and the model's d_ff
+        (the change of the last month's average rate): d_ff = carry + a + b·m per particle. carry = the end-of-
+        quarter target minus s_ff (the part of last quarter's late meeting the model's level has not seen yet);
+        f = the share of the last month after the second meeting (FOMC_LAST_MONTH_SHARE). A free quarter splits the
+        move between the meetings evenly in expectation (a = 0, b = (1 + f)/2); with a pinned first meeting m1 the
+        rest is the second meeting's (a = m1·(1 − f), b = f)."""
+        f = float(FOMC_LAST_MONTH_SHARE[int(str(q)[-1])])
+        carry = self.ff_target(state) - np.asarray(state[FED_FLOOR_FIELD], float)
+        if pinned and pinned.get("move") is not None:
+            m1 = float(pinned["move"])
+            return {"carry": carry, "a": m1 * (1.0 - f), "b": f, "f": f, "pinned": m1}
+        return {"carry": carry, "a": 0.0, "b": 0.5 * (1.0 + f), "f": f, "pinned": None}
+
+    @staticmethod
+    def implied_moves(units: Mapping, d_ff) -> np.ndarray:
+        """The target moves the model's d_ff draws imply (the inverse of model_units)."""
+        return (np.asarray(d_ff, float) - units["carry"] - units["a"]) / units["b"]
+
+    @staticmethod
+    def model_units(units: Mapping, move) -> np.ndarray:
+        return units["carry"] + units["a"] + units["b"] * np.asarray(move, float)
+
+    def instrument_view(self, nd: Node, q: str, aid: str, x: Mapping) -> Mapping:
+        """An actor's instrument as its options read it: the Fed's d_ff draws as the target moves they imply (A0
+        bins, bin labels); other instruments as they are."""
+        if aid != "fed":
+            return x
+        f_ff = self.resolver.field("policy_rate_chg")
+        if f_ff not in x:
+            return x
+        units = self.fed_units(nd.cloud.state, q, self.fed_pin(q))
+        return {**x, f_ff: self.implied_moves(units, x[f_ff])}
+
+    def _instrument_field(self, aid: str) -> str | None:
+        roles = {w.role for o in A.ACTORS[aid].main.options for w in o.writes if w.kind == "point"}
+        return next((self.resolver.field(r) for r in sorted(roles) if self.resolver.field(r)), None)
 
     # ---------------------------------------------------------------- payloads
     def payload(self, aid: str, oid: str, magnitude=None, custom: dict | None = None,
@@ -858,8 +1090,31 @@ class Engine:
             c *= float(self.st.c_scale)
         return float(min(max(c, 0.0), 1.0))
 
-    def a0_bins(self, aid: str, ids: list, a0x: Mapping) -> dict | None:
-        """The model's own prior: the share of A0 particles in each option's bin (merged to cover the support)."""
+    @staticmethod
+    def bin_edges(aid: str, kept: list) -> dict:
+        """{option: (lo, hi]} covering the real line for the kept instrument options: adjacent options split at the
+        midpoint of the nearest ends of their value sets (A.option_value_range), i.e. each A0 draw is labelled with
+        the kept option whose decision is nearest. With every option kept these are the catalogue bins."""
+        rows = []
+        for o, lo, hi in A.instrument_bins(aid):
+            if o not in kept:
+                continue
+            vr = A.option_value_range(aid, o) or (lo, hi)
+            rows.append((o, float(vr[0]), float(vr[1]), lo))
+        rows.sort(key=lambda t: (t[1], t[3]))
+        out = {}
+        for i, (o, vlo, vhi, _) in enumerate(rows):
+            lo = -math.inf if i == 0 else 0.5 * (rows[i - 1][2] + vlo)
+            hi = math.inf if i == len(rows) - 1 else 0.5 * (vhi + rows[i + 1][1])
+            out[o] = (lo, hi)
+        return out
+
+    def a0_bins(self, aid: str, ids: list, a0x: Mapping, ok: np.ndarray | None = None,
+                pinned: Mapping | None = None) -> dict | None:
+        """The model's own prior: the share of A0 particles in each option's bin (bins cover the real line; tail
+        particles, `ok` False, are not counted). A pinned first meeting (2026Q4) renormalizes over the compatible
+        regular options: the A0 mass of the catalogue bins the pin rules out is dropped, as the probit prior does
+        (priors.fed_pinned_renormalize), because the model cannot condition on the pinned decision."""
         bins = [(o, lo, hi) for o, lo, hi in A.instrument_bins(aid) if o in ids]
         if not bins:
             return None
@@ -867,20 +1122,55 @@ class Engine:
         fid = next((self.resolver.field(r) for r in sorted(roles) if self.resolver.field(r)), None)
         if fid is None or fid not in a0x:
             return None
-        bins = sorted(bins, key=lambda t: t[1])
-        edges = [(-math.inf if i == 0 else lo, math.inf if i == len(bins) - 1 else hi)
-                 for i, (o, lo, hi) in enumerate(bins)]
-        for i in range(1, len(edges)):            # contiguous: each bin starts where the previous one ends
-            edges[i] = (edges[i - 1][1], edges[i][1])
-        v = np.asarray(a0x[fid])
+        v = np.asarray(a0x[fid], float)
+        if ok is not None and np.any(ok):
+            v = v[np.asarray(ok, bool)]
+        v = v[np.isfinite(v)]
+        if not len(v):
+            return None
         out = {"p": {}, "edges": {}, "field": fid, "source": "a0_bins", "label": "模型自身 A0 分箱", "kind": "model",
                "values": v}
-        for (o, _, _), (lo, hi) in zip(bins, edges):
+        if pinned and aid == "fed":
+            cat = self.bin_edges(aid, [o for o, _, _ in A.instrument_bins(aid)])      # the seven catalogue bins
+            first = float(pinned.get("move", 0.0))
+            okv = {round(first + s, 2) for s in (-0.25, 0.0, 0.25)}
+            regular = [o for o in ids if o in A.FED_OPTION_VALUE and round(A.FED_OPTION_VALUE[o], 2) in okv]
+            raw = {o: float(np.mean((v > cat[o][0]) & (v <= cat[o][1]))) for o in regular if o in cat}
+            tot = sum(raw.values())
+            if tot <= 0:
+                return None
+            out["p"] = {o: raw.get(o, 0.0) / tot for o in ids}
+            out["edges"] = {o: cat[o] for o in regular if o in cat}
+            out["pinned"] = dict(pinned)
+            out["renormalized_mass"] = float(tot)
+            out["label"] = (f"模型自身 A0 分箱：10 月会议锁定为 {pinned.get('option')}，在相容选项上重新归一"
+                            f"（A0 中 {1 - tot:.0%} 的质量与锁定的决定不相容，已去掉）")
+            return out
+        edges = self.bin_edges(aid, [o for o, _, _ in bins])
+        for o, (lo, hi) in edges.items():
             out["p"][o] = float(np.mean((v > lo) & (v <= hi)))
             out["edges"][o] = (lo, hi)
         for o in ids:
             out["p"].setdefault(o, 0.0)
         return out
+
+    def a0_bin_magnitude(self, aid: str, o: Mapping, pr: Mapping) -> float | None:
+        """A ranged option's default size under an A0-bin prior: the median of the A0 draws inside its bin, clipped
+        to the option's range and step (the model's own typical size for that decision), else None."""
+        par = o.get("param")
+        edges = (pr.get("edges") or {}).get(o["id"])
+        vals = pr.get("values")
+        if not par or edges is None or vals is None:
+            return None
+        v = np.asarray(vals, float)
+        sel = v[(v > edges[0]) & (v <= edges[1])]
+        if len(sel) < A0_MAGNITUDE_MIN:              # a handful of particles is not a typical size (P14 review)
+            return None
+        lo, hi = float(min(par["lo"], par["hi"])), float(max(par["lo"], par["hi"]))
+        m = float(np.clip(np.median(sel), lo, hi))
+        if par.get("step"):
+            m = float(np.clip(round(m / float(par["step"])) * float(par["step"]), lo, hi))
+        return m
 
     def decide(self, nd: Node, q: str, a0, gates: dict, calls: list, report: list) -> dict:
         """Per active actor: menu, prior, LLM answer, pooled probabilities (and follower conditionals)."""
@@ -896,7 +1186,9 @@ class Engine:
             out["actors"][aid] = self._actor_block(aid, m, ctx, a0, nd)
             out["order"].append(aid)
         self._followers(out, ctx)
-        hz = SY.hazard_masses(a0.x)
+        ok = getattr(a0, "ok", None)
+        hz = SY.hazard_masses({k: np.asarray(v)[ok] for k, v in a0.x.items() if not str(k).startswith("_")}
+                              if ok is not None and np.any(ok) and not np.all(ok) else a0.x)
         table = {r.get("id"): r for r in P.hazard_table(self.tables)} if hasattr(P, "hazard_table") else {}
         for h, info in hz.items():
             out["hazards"][h] = {**info, "zh": A.HAZARDS.get(h, {}).get("zh", h), "p_llm": None, "p": info["m"],
@@ -919,8 +1211,13 @@ class Engine:
         if ext:
             pr = {"p": P.normalize({k: float(v) for k, v in ext.items()}, ids, 0.0), "source": "market", "label": "用户输入的市场赔率",
                   "kind": "market"}
-        if pr is None and self.prior_src == "a0":
-            pr = self.a0_bins(aid, ids, a0.x)
+        if pr is None and self.prior_src == "a0" and (self.neutral or aid in A0_DECISION_ACTORS):
+            # the model's own prior for decision instruments (the Fed's reaction function); the model tree reads
+            # every instrument from A0 (exact neutrality). Not the President's tariff: the model's d_tariff drifts
+            # with import composition and refunds (0.92 on tariff_down at the root), it is not a decision rule
+            pinned = None if self.neutral else main.get("pinned_first")
+            pr = self.a0_bins(aid, ids, self.instrument_view(nd, ctx.quarter, aid, a0.x), ok=getattr(a0, "ok", None),
+                              pinned=pinned)
         if pr is None:
             pr = P.prior(aid, ids, ctx, tables=self.tables)
         sq = next((o["id"] for o in main["options"] if o.get("status_quo")), ids[0])
@@ -943,10 +1240,15 @@ class Engine:
             if o["id"] not in live:
                 continue
             mag = (o.get("param") or {}).get("default")
+            mag_src = "default"
+            if pr.get("source") == "a0_bins" and o.get("param") and aid in A0_DECISION_ACTORS:
+                m_a0 = self.a0_bin_magnitude(aid, o, pr)
+                if m_a0 is not None:
+                    mag, mag_src = m_a0, "a0_bin_median"
             opts.append({"id": o["id"], "label": o.get("zh") or o["id"], "status_quo": bool(o.get("status_quo")),
                          "p_prior": float(merged.get(o["id"], 0.0)), "p_llm": None, "p_used": None, "magnitude": mag,
-                         "signal": None, "rationale": "", "source": "menu", "param": o.get("param"),
-                         "bin": (pr.get("edges") or {}).get(o["id"]), "summary": o})
+                         "magnitude_source": mag_src, "signal": None, "rationale": "", "source": "menu",
+                         "param": o.get("param"), "bin": (pr.get("edges") or {}).get(o["id"]), "summary": o})
         attrs = []
         for d in m.get("attributes") or []:
             dids = [o["id"] for o in d["options"]]
@@ -961,9 +1263,25 @@ class Engine:
                           "options": [{"id": o["id"], "label": o.get("zh") or o["id"], "p": float(dp.get(o["id"], 0.0))}
                                       for o in d["options"]]})
         return {"id": aid, "zh": m.get("zh") or A.ACTORS[aid].zh, "stage": A.ACTORS[aid].stage, "domain": main["domain"],
-                "menu": m, "options": opts, "prior": {k: pr.get(k) for k in ("source", "label", "kind")},
+                "menu": m, "options": opts, "prior": {k: pr.get(k) for k in ("source", "label", "kind", "pinned")},
                 "c": self.c_of(aid), "attributes": attrs, "fallback": False, "flags": [], "follower_of": None,
                 "cond": None, "cond_prior": None, "answer": None, "required": list(main.get("required") or [])}
+
+    def is_bin_actor(self, ab: Mapping) -> bool:
+        """The actor's instrument is left to the model (no pin) and each particle carries the option whose bin its A0
+        draw falls in: the model tree's instruments, and a prior-only actor (c used 0, no intervention) whose prior
+        is the A0 bins without a pinned renormalization and whose every option is a bin (the base-rate tree's and a
+        c = 0 agent tree's instruments: the model's own reaction function, AGENT_DESIGN §4.3 payload kind "bin";
+        with common random numbers a particle nothing else pins keeps its very A0 draw)."""
+        opts = ab.get("options") or []
+        if not opts or not any(o.get("bin") for o in opts):
+            return False
+        if self.neutral:
+            return True
+        pr = ab.get("prior") or {}
+        return (pr.get("source") == "a0_bins" and not pr.get("pinned") and float(ab.get("c_used") or 0.0) == 0.0
+                and "intervened" not in (ab.get("flags") or []) and all(o.get("bin") for o in opts)
+                and not any(o.get("source") == "custom" for o in opts))
 
     def _keeps_commitment(self, ids, pr: Mapping) -> bool:
         return "as_committed" in ids and not self.neutral and pr.get("source") != "market"
@@ -994,20 +1312,17 @@ class Engine:
         tot = sum(out.values())
         if tot <= 0:
             return {o: 1.0 / len(live) for o in live}
-        if pr.get("edges"):
-            # A0 bins: the kept bins widen over the trimmed ones, and each kept option's prior is the share of A0
-            # particles in its widened bin (so masses and particles agree exactly: neutrality)
-            edges = pr["edges"]
-            kept = sorted(live, key=lambda o: edges[o][0])
-            new = {}
-            for i, o in enumerate(kept):
-                lo = -math.inf if i == 0 else new[kept[i - 1]][1]
-                hi = math.inf if i == len(kept) - 1 else edges[kept[i + 1]][0]
-                new[o] = (lo, hi)
-            pr["edges"] = new
-            v = np.asarray(pr.get("values"), float)
-            if v.size:
-                return {o: float(np.mean((v > new[o][0]) & (v <= new[o][1]))) for o in live}
+        if pr.get("edges") and not pr.get("pinned"):
+            # A0 bins: the kept bins cover the trimmed ones (each A0 draw goes to the kept option whose decision is
+            # nearest, bin_edges), and each kept option's prior is the share of A0 particles in its bin (so masses
+            # and particles agree exactly: neutrality)
+            kept = [o for o in live if o in pr["edges"]]
+            if len(kept) == len(live):
+                new = self.bin_edges(aid, kept)
+                pr["edges"] = new
+                v = np.asarray(pr.get("values"), float)
+                if v.size:
+                    return {o: float(np.mean((v > new[o][0]) & (v <= new[o][1]))) for o in live}
         return {o: v / tot for o, v in out.items()}
 
     def _followers(self, out: dict, ctx) -> None:
@@ -1084,6 +1399,11 @@ class Engine:
             live = {o["id"] for o in ab["options"]}
             menu = copy.deepcopy(ab["menu"])
             menu["main"]["options"] = [o for o in menu["main"]["options"] if o["id"] in live]
+            for o in menu["main"]["options"]:          # an A0-bin prior's size: the model's median in the bin
+                ao = next((x for x in ab["options"] if x["id"] == o["id"]), {})
+                if ao.get("magnitude_source") == "a0_bin_median" and o.get("param"):
+                    o["param"] = {**o["param"], "default": ao["magnitude"]}
+                    o["note"] = ((o.get("note") or "") + f"（默认幅度 {ao['magnitude']:g} = 模型 A0 在该档内的中位数）").strip()
             prior = {"p": {o["id"]: o["p_prior"] for o in ab["options"]}, "source": ab["prior"].get("label") or "",
                      "kind": ab["prior"].get("kind")}
             rules = A.custom_option_rules(aid, self.resolver)
@@ -1105,7 +1425,8 @@ class Engine:
                                               instruments=[inst] if inst else [], packet=own, private="",
                                               commitments=due)
             out["packets"][aid] = AC.packet(aid, own, AC.news_digest([tuple(t) for t in nd.digest]),
-                                            self.board_text(nd, aid))
+                                            self.board_text(nd, aid),
+                                            dashboard_ref=f"（共享状态表见第一节；{self.target_text(nd)}）")
         return specs
 
     def _reaction_specs(self, out: dict) -> list:
@@ -1359,32 +1680,59 @@ class Engine:
         member = np.repeat(np.arange(len(cl["members"])), allocate([m["p"] for m in cl["members"]], n))
         rng.shuffle(member)
         assign: dict = {}
-        bin_actors = [aid for aid in dec["order"] if self.neutral and any(o.get("bin") for o in acts[aid]["options"])]
+        bin_actors = [aid for aid in dec["order"] if self.is_bin_actor(acts[aid])]
+        by_bin = None
         if bin_actors:
-            # the model tree: a particle's bin option is the bin its own A0 draw falls in
+            # a particle's bin option is the bin its own A0 draw falls in (the model tree's instruments; prior-only
+            # instrument actors on an A0-bin prior): the instrument keeps the model's own draw, exactly
             keep = np.ones(n, bool)
+            br_bin = [aid for aid in bin_actors if acts[aid].get("branching")]
+            q = A.quarter_add(nd.quarter, 1)
             for aid in bin_actors:
                 ab = acts[aid]
-                fid = (self.a0_bins(aid, [o["id"] for o in ab["options"]], a0.x) or {}).get("field")
-                v = np.asarray(a0.x[fid])
+                view = self.instrument_view(nd, q, aid, a0.x)       # the Fed: the target moves its draws imply
+                fid = (self.a0_bins(aid, [o["id"] for o in ab["options"]], view) or {}).get("field")
+                v = np.asarray(view[fid], float)
                 code = np.full(n, -1)
                 for k, o in enumerate(ab["options"]):
                     lo, hi = o["bin"]
                     code[(v > lo) & (v <= hi)] = k
+                if np.any(code < 0):              # a non-finite A0 draw (a tail particle): its nearest-mass bin
+                    code[code < 0] = int(np.argmax([o["p_used"] for o in ab["options"]]))
                 assign[aid] = code
-                if ab.get("branching"):
-                    ok = np.zeros(n, bool)
-                    for m in cl["members"]:
-                        ok |= code == [o["id"] for o in ab["options"]].index(m["options"][aid])
-                    keep &= ok
+            sig_of = lambda m: tuple([o["id"] for o in acts[a]["options"]].index(m["options"][a]) for a in br_bin)  # noqa: E731
+            sigs = [sig_of(m) for m in cl["members"]]
+            if br_bin:
+                X = np.stack([assign[a] for a in br_bin], axis=1)
+                keep = np.zeros(n, bool)
+                for s in set(sigs):
+                    keep |= np.all(X == np.array(s), axis=1)
             rows = np.flatnonzero(keep)
             member = np.zeros(len(rows), int)
-            for i, m in enumerate(cl["members"]):
-                sel = np.ones(len(rows), bool)
-                for aid, oid in m["options"].items():
-                    if aid in bin_actors:
-                        sel &= assign[aid][rows] == [o["id"] for o in acts[aid]["options"]].index(oid)
-                member[sel] = i
+            groups: dict = {}
+            for i, s in enumerate(sigs):
+                groups.setdefault(s, []).append(i)
+            share = {}
+            for s, mids in sorted(groups.items()):
+                sel = np.arange(len(rows)) if not br_bin else \
+                    np.flatnonzero(np.all(np.stack([assign[a][rows] for a in br_bin], axis=1) == np.array(s), axis=1))
+                share[s] = float(len(sel)) / max(n, 1)
+                if len(mids) == 1:
+                    member[sel] = mids[0]
+                    continue
+                lab = np.repeat(np.array(mids), allocate([cl["members"][i]["p"] for i in mids], len(sel)))
+                rng.shuffle(lab)
+                member[sel] = lab
+            # members' masses with the bin actors' joint A0 share in place of the product of their marginals
+            marg = []
+            for m in cl["members"]:
+                pb = 1.0
+                for a in br_bin:
+                    pb *= float(next((o["p_used"] for o in acts[a]["options"] if o["id"] == m["options"][a]), 0.0))
+                marg.append(pb)
+            by_bin = {"actors": list(bin_actors), "branching": br_bin, "share": {str(list(s)): v for s, v in share.items()},
+                      "p": [float(m["p"]) * (share[sigs[i]] / marg[i] if marg[i] > 0 else 0.0) if br_bin else float(m["p"])
+                            for i, m in enumerate(cl["members"])]}
             assign = {k: v[rows] for k, v in assign.items()}
         m_n = len(rows)
         for aid in dec["order"]:                    # branching actors: the slot's member profile
@@ -1439,23 +1787,126 @@ class Engine:
                 code = np.repeat(np.arange(len(d["options"])), cnt)
                 rng.shuffle(code)
                 attr[(aid, d["domain"])] = code
-        return {"rows": rows, "assign": assign, "attr": attr, "member": member}
+        return {"rows": rows, "assign": assign, "attr": attr, "member": member, "by_bin": by_bin}
+
+    STRUCTURAL_PROTOCOLS = ("response_table", "thin")      # shift levers that are interventions (structural=)
+
+    def _write_protocol(self, w: Mapping, pay: Mapping) -> str | None:
+        """A write's conditioning protocol: its own (a commitment carries the option's that made it), else the
+        payload's, else the catalogue's for the field (commitments saved before protocols travelled with them)."""
+        return w.get("protocol") or pay.get("protocol") or (self._levers().get(w.get("field")) or {}).get("protocol")
+
+    def _levers(self) -> dict:
+        lv = self.__dict__.get("_lever_fields")
+        if lv is None:
+            lv = lever_fields(self.resolver)
+            self.__dict__["_lever_fields"] = lv
+        return lv
+
+    def _intervenes(self, fid: str) -> bool:
+        """Whether the model takes `fid` through structural= (a satellite it can set last, or a field with a policy
+        shock): probed once per engine on two root particles; a model that refuses it gets the pin as an
+        observation (the quarterly stack's core variables, e.g. the GZ spread)."""
+        memo = self.__dict__.setdefault("_intervenes_memo", {})
+        if fid not in memo:
+            ok = bool(self.structural) and fid in self.model.x_fields
+            if ok:
+                try:
+                    s = self.model.root_state(2)
+                    self.model.complete(s, MA.Given.empty(2), np.random.default_rng(0), structural={fid: np.zeros(2)})
+                except Exception:  # noqa: BLE001 - the model cannot take it as an intervention
+                    ok = False
+            memo[fid] = ok
+        return memo[fid]
 
     def build_bk(self, nd: Node, cl: dict, dec: dict, a0, alloc: dict, rng: np.random.Generator) -> dict:
-        """B_k: levers pinned per particle under the two-step protocol, the rest completed by the model."""
+        """B_k: levers pinned per particle (only the particles an action wrote; the rest are free), then the model
+        completes everything else, with A0's own random stream (common random numbers). Main options and attribute
+        options (the Fed's balance sheet, immigration, the strategic reserve) write alike; a commitment due this
+        quarter is routed by the protocol of the option that made it.
+
+        Structural adapters (the quarterly stack): instrument points through `given` (the adapter's given_modes:
+        d_ff and d_bs "do", d_tariff "do_last"); shift levers whose protocol is an intervention (Congress's fiscal
+        components, the response_table protocol; thin levers such as the hyperscaler fallback on d_itinv and
+        immigration on d_lf) through `structural=` (do by their policy shocks where the field has one, else
+        do_last); the oil-supply composite and GPR contributions as reduced-form observations in `given`, with
+        x_oil_cause = 1 (supply) where |Σz| ≥ 0.5; the hazard event fields an action did not write held at A0 by
+        do_last. A lever the model does not transmit (self.inert, transmission()) keeps the response table of
+        §6.3 (transfers -> goods consumption, an observation) and QE its G08 intervention paths. The Fed's target
+        moves are pinned in the model's units (fed_units). Other adapters: everything in `given` and the two-step
+        protocol of §6.3 (lag-protected E0 pinned at A0 for lagged and thin levers, the response table)."""
         acts = dec["actors"]
         rows = alloc["rows"]
+        n_all = nd.cloud.n
         m = len(rows)
+        q = A.quarter_add(nd.quarter, 1)
         state = MA.take_state(nd.cloud.state, rows)
-        a0x = {k: np.asarray(v)[rows] for k, v in a0.x.items()}
-        pins: dict = {}
-        shifts: dict = {}
-        oil_a, oil_b2 = np.zeros(m), np.zeros(m)
-        gpr_a, gpr_b2 = np.zeros(m), np.zeros(m)
+        a0x = {k: np.asarray(v)[rows] for k, v in a0.x.items() if not str(k).startswith("_")}
+        nan = lambda: np.full(m, np.nan)                       # noqa: E731
+        pins: dict = {}                    # given: reduced-form observations, or the adapter's given_modes
+        spins: dict = {}                   # structural=: interventions (structural adapters only)
+        shifts: dict = {}                  # field -> (Δ per particle, written mask, protocols)
+        ev = {"oil_a": np.zeros(m), "oil_b2": np.zeros(m), "gpr_a": np.zeros(m), "gpr_b2": np.zeros(m)}
         protocols: set = set()
         written: dict = {}
         flags: list = []
-        point_writes = {}
+        notes: list = []
+        point_writes: dict = {}
+        own_a0: set = set()                # instruments of prior-only bin actors: left to the model (not written)
+        bin_actors = set((alloc.get("by_bin") or {}).get("actors") or [])
+        qe_mask = np.zeros(m, bool)
+
+        def apply(aid: str, o: Mapping, pay: Mapping, sel: np.ndarray, main: bool) -> None:
+            if pay.get("protocol"):
+                protocols.add(pay["protocol"])
+            flags.extend(pay.get("flags") or [])
+            for w in pay.get("writes", []):
+                if int(w.get("dq", 0)) > 0 or w["kind"] == "label":
+                    continue
+                fid = w["field"]
+                if fid not in self.model.x_fields:
+                    continue
+                prot = self._write_protocol(w, pay)
+                if prot:
+                    protocols.add(prot)
+                if main and aid in bin_actors and o.get("bin") and w["kind"] in ("point", "bin", "normal"):
+                    # a prior-only bin actor follows the model's own reaction function: its instrument is not
+                    # pinned (a pin, even at the particle's own A0 value, is not neutral in the quarterly stack:
+                    # its ±4 sd saturation and dollar hold re-shape the draw); each particle carries the option
+                    # whose bin its A0 draw falls in, and with common random numbers keeps that very draw
+                    own_a0.add(fid)
+                    continue
+                if w["kind"] == "bin":                # A0 particles inside the option's own bin, resampled
+                    lo = -math.inf if w.get("lo") is None else float(w["lo"])
+                    hi = math.inf if w.get("hi") is None else float(w["hi"])
+                    base = np.asarray(a0x[fid], float)
+                    pool = base[(base > lo) & (base <= hi) & np.isfinite(base)]
+                    arr = pins.setdefault(fid, nan())
+                    arr[sel] = rng.choice(pool, len(sel)) if len(pool) else np.clip(base[sel], lo, hi)
+                    written.setdefault(fid, []).append(float(np.mean(arr[sel])))
+                    point_writes.setdefault(fid, set()).add(aid)
+                    continue
+                written.setdefault(fid, []).append(float(w.get("a") or 0.0))
+                if w["kind"] == "point":
+                    arr = pins.setdefault(fid, nan())
+                    arr[sel] = float(w["a"])
+                    point_writes.setdefault(fid, set()).add(aid)
+                elif w["kind"] == "normal":
+                    arr = pins.setdefault(fid, nan())
+                    arr[sel] = float(w["a"]) + float(w.get("b") or 0.0) * rng.standard_normal(len(sel))
+                    point_writes.setdefault(fid, set()).add(aid)
+                else:
+                    d, mk, prs = shifts.setdefault(fid, (np.zeros(m), np.zeros(m, bool), set()))
+                    d[sel] += float(w.get("a") or 0.0) + float(w.get("b") or 0.0) * rng.standard_normal(len(sel))
+                    mk[sel] = True
+                    prs.add(prot)
+            for e in pay.get("events", {}).get("oil_z", []):
+                ev["oil_a"][sel] += float(e["a"])
+                ev["oil_b2"][sel] += float(e["b"]) ** 2
+            for e in pay.get("events", {}).get("gpr", []):
+                ev["gpr_a"][sel] += float(e["a_sd"])
+                ev["gpr_b2"][sel] += float(e["b_sd"]) ** 2
+
         for aid in dec["order"]:
             ab = acts[aid]
             code = alloc["assign"][aid]
@@ -1465,101 +1916,198 @@ class Engine:
                     continue
                 if self.neutral and (o.get("bin") or o.get("status_quo")):
                     continue                              # the model tree: A0 draws (bins) and masked levers
-                pay = self._opt_payload(aid, o, nd)
-                if pay.get("protocol"):
-                    protocols.add(pay["protocol"])
-                flags += pay.get("flags") or []
-                for w in pay.get("writes", []):
-                    if int(w.get("dq", 0)) > 0 or w["kind"] == "label":
+                apply(aid, o, self._opt_payload(aid, o, nd), sel, True)
+            for dd in ab["attributes"]:                   # attribute options write like main options
+                codes = (alloc.get("attr") or {}).get((aid, dd["domain"]))
+                if codes is None:
+                    continue
+                for k, oo in enumerate(dd["options"]):
+                    sel = np.flatnonzero(np.asarray(codes) == k)
+                    if not len(sel):
                         continue
-                    fid = w["field"]
-                    if fid not in self.model.x_fields:
+                    pay = self.payload(aid, oo["id"])
+                    if not (pay.get("writes") or pay["events"]["oil_z"] or pay["events"]["gpr"]):
                         continue
-                    if w["kind"] == "bin":                # A0 particles inside the option's own bin, resampled
-                        lo = -math.inf if w.get("lo") is None else float(w["lo"])
-                        hi = math.inf if w.get("hi") is None else float(w["hi"])
-                        base = np.asarray(a0x[fid], float)
-                        pool = base[(base > lo) & (base <= hi)]
-                        arr = pins.setdefault(fid, base.copy())
-                        arr[sel] = rng.choice(pool, len(sel)) if len(pool) else np.clip(base[sel], lo, hi)
-                        written.setdefault(fid, []).append(float(np.mean(arr[sel])))
-                        point_writes.setdefault(fid, set()).add(aid)
-                        continue
-                    written.setdefault(fid, []).append(float(w.get("a") or 0.0))
-                    if w["kind"] == "point":
-                        arr = pins.setdefault(fid, np.array(a0x[fid], float))
-                        arr[sel] = float(w["a"])
-                        point_writes.setdefault(fid, set()).add(aid)
-                    elif w["kind"] == "normal":
-                        arr = pins.setdefault(fid, np.array(a0x[fid], float))
-                        arr[sel] = float(w["a"]) + float(w.get("b") or 0.0) * rng.standard_normal(len(sel))
-                    else:
-                        arr = shifts.setdefault(fid, np.zeros(m))
-                        arr[sel] += float(w.get("a") or 0.0) + float(w.get("b") or 0.0) * rng.standard_normal(len(sel))
-                for e in pay.get("events", {}).get("oil_z", []):
-                    oil_a[sel] += float(e["a"])
-                    oil_b2[sel] += float(e["b"]) ** 2
-                for e in pay.get("events", {}).get("gpr", []):
-                    gpr_a[sel] += float(e["a_sd"])
-                    gpr_b2[sel] += float(e["b_sd"]) ** 2
-        # Fed within-branch slopes (§6.6) on its point write, then the floor at the lower bound
+                    apply(aid, oo, pay, sel, False)
+                    if oo["id"] in QE_PATHS:
+                        qe_mask[sel] = True
+        # the Fed's decision (a quarter's target move): within-branch slopes (§6.6), the floor on the target, then
+        # the model's units (fed_units: carry-over + the share of the moves the last month's average sees) and the
+        # model's floor on its own level (the stub's 0, the stack's 0.1)
         f_ff = self.resolver.field("policy_rate_chg")
         if f_ff in pins and "fed" in point_writes.get(f_ff, set()):
+            mv = pins[f_ff]
+            on = np.isfinite(mv)
             corr = np.zeros(m)
             sl = P.FED_SLOPES
             zs = {"us_equity_logret": state.get("us_equity_l1"), "d_unrate": state.get("d_unrate_l1"),
                   "core_gap": None if state.get("s_core_yoy") is None else state["s_core_yoy"] - 2.0,
                   "d_ff_lag": state.get("d_ff_l1"), "ff_level": state.get(FED_FLOOR_FIELD)}
-            for k, v in zs.items():
-                if v is None or k not in sl:
+            for key, v in zs.items():
+                if v is None or key not in sl:
                     continue
                 v = np.asarray(v, float)
-                corr += float(sl[k]["b"]) * (v - float(np.median(v)))
-            pins[f_ff] = pins[f_ff] + np.clip(corr, -sl["clip_pp"], sl["clip_pp"])
-            pins[f_ff] = np.maximum(pins[f_ff], -np.asarray(state[FED_FLOOR_FIELD], float))
+                corr += float(sl[key]["b"]) * (v - float(np.median(v)))
+            want = mv + np.clip(corr, -sl["clip_pp"], sl["clip_pp"])
+            target = self.ff_target(state)
+            move = np.maximum(want, self.ff_floor - target)            # the target cannot go below the floor
+            units = self.fed_units(state, q, self.fed_pin(q))
+            d_model = self.model_units(units, move)
+            lo = self.ff_floor - np.asarray(state[FED_FLOOR_FIELD], float)
+            d_model = np.maximum(d_model, lo)
+            short = on & ((move - want > 1e-9) | (self.model_units(units, move) - lo < -1e-9))
+            pins[f_ff] = np.where(on, d_model, np.nan)
+            if short.any():
+                flags.append("floor_short")
+                notes.append({"field": f_ff, "code": "floor_engine", "particles": int(short.sum()),
+                              "text": f"降息受模型的政策利率下限 {self.ff_floor:g}% 限制：交付的降幅小于选项（{int(short.sum())} 个粒子）"})
+        elif f_ff in pins:
+            lo = self.ff_floor - np.asarray(state[FED_FLOOR_FIELD], float)
+            ok = np.isfinite(pins[f_ff])
+            pins[f_ff] = np.where(ok, np.maximum(pins[f_ff], lo), np.nan)
         # the event channels (§4.4): oil-supply composite and GPR contributions, as shifts on A0
-        if np.any(oil_a != 0):
+        oil_a, oil_b2, gpr_a, gpr_b2 = ev["oil_a"], ev["oil_b2"], ev["gpr_a"], ev["gpr_b2"]
+        oil_on = oil_a != 0
+        if np.any(oil_on):
             beta = A.OIL_COMPOSITE["beta_metals_oil_per_z"]
             fid = self.resolver.field("oil_supply_signature")
             if fid in self.model.x_fields:
-                shifts[fid] = shifts.get(fid, np.zeros(m)) + beta * oil_a + abs(beta) * np.sqrt(oil_b2) * rng.standard_normal(m)
+                d, mk, prs = shifts.setdefault(fid, (np.zeros(m), np.zeros(m, bool), set()))
+                d += np.where(oil_on, beta * oil_a + abs(beta) * np.sqrt(oil_b2) * rng.standard_normal(m), 0.0)
+                mk |= oil_on
+                prs.add("signature")
                 written.setdefault(fid, []).append(float(np.mean(beta * oil_a)))
-        if np.any(gpr_a != 0):
+            lab = self.resolver.field("oil_cause_label")          # R-A1: 1 = supply (0 demand, 0.5 mixed)
+            sup = np.abs(oil_a) >= A.OIL_COMPOSITE["cause_label_min_abs_z"]
+            if lab in self.model.x_fields and np.any(sup):
+                arr = pins.setdefault(lab, nan())
+                arr[sup] = OV.OIL_CAUSE["supply"]
+                written.setdefault(lab, []).append(OV.OIL_CAUSE["supply"])
+        gpr_on = gpr_a != 0
+        if np.any(gpr_on):
             fid = self.resolver.field("gpr_chg")
             if fid in self.model.x_fields:
                 sd = self.sd.get(fid, 22.15)
-                shifts[fid] = shifts.get(fid, np.zeros(m)) + gpr_a * sd + np.sqrt(gpr_b2) * sd * rng.standard_normal(m)
+                d, mk, prs = shifts.setdefault(fid, (np.zeros(m), np.zeros(m, bool), set()))
+                d += np.where(gpr_on, gpr_a * sd + np.sqrt(gpr_b2) * sd * rng.standard_normal(m), 0.0)
+                mk |= gpr_on
+                prs.add("signature")
                 written.setdefault(fid, []).append(float(np.mean(gpr_a * sd)))
-        for fid, d in shifts.items():
-            base = pins.get(fid, a0x[fid])
+        for fid, (d, mk, prs) in shifts.items():
+            base = pins.get(fid)
+            base = np.where(np.isfinite(base), base, a0x[fid]) if base is not None else np.asarray(a0x[fid], float)
             v = np.asarray(base, float) + d
             h = self.support.get(fid) or {}
             if h.get("min") is not None and h.get("max") is not None:
                 v = np.clip(v, float(h["min"]), float(h["max"]))
-            pins[fid] = v
-        # response tables (§6.3): transfers -> goods consumption, R = +2.1 per pp of personal income
-        f_tr, f_cg = self.resolver.field("transfers_chg"), "d_cons_goods"
-        if f_tr in shifts and f_cg in self.model.x_fields and f_cg not in pins:
-            pins[f_cg] = np.asarray(a0x[f_cg], float) + 2.1 * shifts[f_tr]
+            v = np.where(mk, v, np.nan)
+            if self.structural and prs & set(self.STRUCTURAL_PROTOCOLS) and "signature" not in prs:
+                spins[fid] = v                                    # an intervention (do by its shock, else do_last)
+            else:
+                pins[fid] = np.where(mk, v, pins[fid]) if fid in pins else v
+        # response tables (§6.3): transfers -> goods consumption, R = +2.1 per pp of personal income; on the two-step
+        # protocol, and on a structural model whose transfer intervention reaches nothing (transmission()), as an
+        # observation the model completes the quarter around (so output stays consistent with the consumption)
+        response = []
+        for role, table in RESPONSE_TABLE.items():
+            f_lev = self.resolver.field(role)
+            if f_lev not in shifts or (self.structural and f_lev not in self.inert):
+                continue
+            d, mk, _ = shifts[f_lev]
+            for f_resp, R in table:
+                if f_resp in self.model.x_fields and f_resp not in pins and f_resp not in spins and mk.any():
+                    pins[f_resp] = np.where(mk, np.asarray(a0x[f_resp], float) + R * d, np.nan)
+                    written.setdefault(f_resp, []).append(float(np.mean(R * d[mk])))
+                    response.append({"lever": f_lev, "field": f_resp, "R": R, "particles": int(mk.sum())})
+        # QE's intervention paths (SIM_DESIGN §5.3, template G08) where the model's balance sheet reaches nothing
+        f_bs = self.resolver.field("fed_bs_chg")
+        if qe_mask.any() and f_bs in self.inert:
+            for fid, a_sd, b_sd in QE_PATHS["bs_qe"]:
+                if fid not in self.model.x_fields:
+                    continue
+                sd = self.sd.get(fid, 1.0)
+                v = np.asarray(a0x[fid], float) + (a_sd + b_sd * rng.standard_normal(m)) * sd
+                v = np.where(qe_mask, v, np.nan)
+                tgt = spins if self._intervenes(fid) else pins
+                tgt[fid] = np.where(qe_mask, v, tgt[fid]) if fid in tgt else v
+                written.setdefault(fid, []).append(float(a_sd * sd))
+            notes.append({"code": "qe_paths", "particles": int(qe_mask.sum()), "text": QE_PATHS_NOTE})
         # the two-step protocol: lag-protected E0 at A0 for lagged / thin levers (unless the model is structural)
-        structural = "structural" in getattr(self.model, "capabilities", ())
-        if protocols & {"lagged", "thin"} and not structural:
+        if protocols & {"lagged", "thin"} and not self.structural:
             for fid in SY.LAG_PROTECTED:
                 if fid in self.model.x_fields and fid not in pins:
                     pins[fid] = np.asarray(a0x[fid], float)
-        # nature: the hazard event fields stay at their A0 draws unless an action wrote them
-        for h, (fid, _, _) in SY.HAZARD_REGION.items():
-            if fid in self.model.x_fields and fid not in pins and fid != "d_gz":
-                pins[fid] = np.asarray(a0x[fid], float)
-        if self.neutral and not pins.keys() - {f for _, (f, _, _) in SY.HAZARD_REGION.items()}:
-            draws = a0.take(rows)
+        # nature: the hazard event fields stay at their A0 draws unless an action wrote them (structural: do_last,
+        # so holding them moves nothing else in the quarter)
+        hazard_fields = {f for _, (f, _, _) in SY.HAZARD_REGION.items()}
+        for fid in sorted(hazard_fields - {"d_gz"}):
+            if fid not in self.model.x_fields:
+                continue
+            free = ~np.isfinite(pins[fid]) if fid in pins else np.ones(m, bool)
+            hold = np.where(free, np.asarray(a0x[fid], float), np.nan)
+            if self.structural:
+                spins[fid] = np.where(free, hold, spins[fid]) if fid in spins else hold
+            else:
+                pins[fid] = np.where(free, hold, pins[fid]) if fid in pins else hold
+        pins = {k: v for k, v in pins.items() if np.any(np.isfinite(v))}
+        spins = {k: v for k, v in spins.items() if np.any(np.isfinite(v))}
+        crn = False
+        if not (pins.keys() | spins.keys()) - hazard_fields and (self.neutral or self.structural):
+            # nothing but the hazard fields held at A0: B_k is A0 itself (exact; the hazard holds are A0's values)
+            draws = MA.as_draws(a0.take(rows))
             given = MA.Given.from_dict({}, m)
+            sgiven = MA.Given.from_dict({}, m)
+            crn = True
         else:
             given = MA.Given.from_dict(pins, m)
-            draws = self.model.complete(state, given, rng)
+            sgiven = MA.Given.from_dict(spins, m)
+            draws, crn = self.complete_crn(nd, rows, state, given, sgiven, a0)
+        f_def = self.resolver.field("deficit_chg")
+        if f_def in shifts:                           # the books' fiscal baseline moves with discretionary actions
+            d_def, mk_def, _ = shifts[f_def]
+            draws.x[DEFICIT_ACTION_KEY] = np.where(mk_def, d_def, 0.0)
+        notes = merge_notes(list(getattr(draws, "notes", None) or []) + notes)
+        # prior-only bin actors: the share of particles whose completed instrument left the bin they are labelled
+        # with (other actors' reduced-form pins re-draw it), reported rather than relabelled (the cluster is its bins)
+        drift = {}
+        for aid in sorted(bin_actors & set(dec["order"])):
+            ab = acts[aid]
+            fid = self._instrument_field(aid)
+            if fid is None or fid not in own_a0 or fid not in draws.x:
+                continue
+            v = np.asarray(draws.x[fid], float)
+            if aid == "fed":
+                v = self.implied_moves(self.fed_units(state, q, self.fed_pin(q)), v)
+            code = np.asarray(alloc["assign"][aid], int)
+            inb = np.zeros(m, bool)
+            for k, o in enumerate(ab["options"]):
+                if o.get("bin"):
+                    lo, hi = o["bin"]
+                    inb |= (code == k) & (v > lo) & (v <= hi)
+            drift[aid] = rnd(float(np.mean(~inb)), 4) if m else 0.0
         wr = {f: float(np.mean(v)) for f, v in written.items()}
-        return {"rows": rows, "draws": draws, "given": given, "written": sorted(wr), "write_means": wr,
-                "protocols": sorted(protocols), "flags": sorted(set(flags)), "state": state}
+        return {"rows": rows, "draws": draws, "given": given, "structural": sgiven, "written": sorted(wr),
+                "write_means": wr, "protocols": sorted(p for p in protocols if p), "flags": sorted(set(flags)),
+                "state": state, "crn": crn, "n_parent": n_all, "own_a0": sorted(own_a0), "notes": notes,
+                "bin_drift": drift, "response": response, "qe_particles": int(qe_mask.sum())}
+
+    def complete_crn(self, nd: Node, rows: np.ndarray, state: dict, given: MA.Given, sgiven: MA.Given, a0):
+        """model.complete for the particles `rows` of the node with A0's own random stream (common random numbers):
+        the same seed as A0 over the node's full particle set (pins NaN outside `rows`), then the rows taken, so
+        each particle draws exactly the innovations it drew in A0. Returns (draws, crn used)."""
+        n_all = nd.cloud.n
+        rng = seed_for(self.st.seed, nd.key, "a0")
+        kw = {"structural": sgiven.to_dict()} if (self.structural and len(sgiven.ids)) else {}
+        if len(rows) == n_all and np.array_equal(rows, np.arange(n_all)):
+            return MA.as_draws(self.model.complete(state, given, rng, **kw)), True
+        def expand(g: MA.Given) -> MA.Given:
+            vals = np.full((n_all, len(g.ids)), np.nan)
+            vals[rows] = g.values
+            return MA.Given(g.ids, vals)
+        g_all = expand(given)
+        kw_all = {"structural": expand(sgiven).to_dict()} if kw else {}
+        d = self.model.complete(nd.cloud.state, g_all, rng, **kw_all)
+        return MA.as_draws(d).take(rows), True
 
     # ---------------------------------------------------------------- the cell
     def expand(self, nd: Node) -> tuple[list[Node], dict]:
@@ -1572,8 +2120,7 @@ class Engine:
         calls: list = []
         report: list = []
         gates = AC.gates(cl0.acc) if cl0.acc is not None else {}
-        rng_a0 = seed_for(self.st.seed, nd.key, "a0")
-        a0 = self.model.complete(cl0.state, MA.Given.empty(cl0.n), rng_a0)
+        a0 = self.a0(nd)
         dec = self.decide(nd, q, a0, gates, calls, report)
         clusters = self.clusters(nd, dec)
         nature_branch = {}
@@ -1584,19 +2131,19 @@ class Engine:
         for cl in clusters:
             rng = seed_for(self.st.seed, nd.key, f"alloc|{cl['head_key']}")
             alloc = self.allocate_cluster(nd, cl, dec, a0, rng)
-            if self.neutral and len(alloc["rows"]) != cl0.n:
-                # bins of A0 partition the particles: a cluster's mass is its particles' share (joint, not the
-                # product of the actors' marginal bin shares)
-                cnt = np.bincount(alloc["member"], minlength=len(cl["members"])) if len(alloc["rows"]) else \
-                    np.zeros(len(cl["members"]))
-                for mm, c in zip(cl["members"], cnt):
-                    mm["p"] = float(c) / cl0.n
-                cl["p"] = float(len(alloc["rows"])) / cl0.n
+            by_bin = alloc.get("by_bin")
+            if by_bin and by_bin["branching"]:
+                # bins of A0 partition the particles: a member's mass carries the bin actors' joint A0 share (not the
+                # product of their marginal bin shares); the model tree's clusters are exactly their particles' share
+                for mm, pm in zip(cl["members"], by_bin["p"]):
+                    mm["p"] = float(pm)
+                cl["p"] = float(sum(by_bin["p"]))
                 if not len(alloc["rows"]):
                     continue
             kept_clusters.append(cl)
             bk = self.build_bk(nd, cl, dec, a0, alloc, seed_for(self.st.seed, nd.key, f"bk|{cl['head_key']}"))
             bk["alloc"] = alloc
+            bk = self.sanitize(nd, q, cl, bk)
             bk = self.apply_nature(nd, cl, bk, dec, nature_branch)
             bk["split"] = self.discrete_split(nd, dec, bk["alloc"])
             bks[cl["id"]] = bk
@@ -1642,6 +2189,81 @@ class Engine:
         detail = self.detail(nd, q, dec, clusters, bks, consequences, calls, report, a0)
         return children, detail
 
+    def a0(self, nd: Node):
+        """A0 = model.complete with every lever masked (§6.2 step 2), with `ok`: False for its tail particles
+        (MA.tail_mask), which the priors, nature's tail masses and the shown A0 bands do not count."""
+        a0 = MA.as_draws(self.model.complete(nd.cloud.state, MA.Given.empty(nd.cloud.n),
+                                             seed_for(self.st.seed, nd.key, "a0")))
+        a0.ok = ~MA.tail_mask(nd.cloud.state, a0, self.tail_bounds, end_state=self.end_state(nd.cloud.state, a0))
+        return a0
+
+    @staticmethod
+    def take_bk(bk: dict, idx) -> dict:
+        """bk with every per-particle entry re-indexed by idx: rows, the draw, given, structural (the interventions),
+        the state and the slots (alloc assign / attr / member). Everything that resamples a cluster's particles
+        (sanitize, nature's mixture) goes through here, so pins and slots stay with the particle they belong to."""
+        idx = np.asarray(idx, int)
+        out = dict(bk)
+        out["rows"] = np.asarray(bk["rows"])[idx]
+        out["draws"] = bk["draws"].take(idx)
+        out["given"] = bk["given"].take(idx)
+        if bk.get("structural") is not None:
+            out["structural"] = bk["structural"].take(idx)
+        out["state"] = MA.take_state(bk["state"], idx)
+        al = bk.get("alloc")
+        if al is not None:
+            m0 = len(bk["rows"])
+            out["alloc"] = {**al, "assign": {a: np.asarray(v)[idx] for a, v in al["assign"].items()},
+                            "attr": {a: np.asarray(v)[idx] for a, v in al["attr"].items()}}
+            if al.get("member") is not None and len(al["member"]) == m0:
+                out["alloc"]["member"] = np.asarray(al["member"])[idx]
+        return out
+
+    def end_state(self, state: Mapping, d) -> dict | None:
+        """The rolled state the tail rule's level bounds read (CPI y/y, the policy rate, the 10-year yield); None if
+        the adapter cannot roll this draw (the bounds then read start-of-quarter level + change)."""
+        try:
+            with np.errstate(all="ignore"):
+                return self.model.update_state(MA.take_state(state, np.arange(len(state[FED_FLOOR_FIELD]))), d)
+        except Exception:  # noqa: BLE001 - a draw with non-finite values may not roll; the draw-level checks remain
+            return None
+
+    def sanitize(self, nd: Node, q: str, cl: dict, bk: dict, *, rows_key: str = "") -> dict:
+        """Tail particles of a cluster's draw (MA.tail_mask on the draw and its rolled state: not finite, or beyond
+        the bounds) are dropped and replaced by particles resampled from the cluster's other ones (state, draw, pins
+        and slots together, take_bk), so books, clouds and charts only see finite draws inside the bounds. The
+        share goes to bk["tail"] (with the reasons; node summaries and details), the journal (tail_particles) and
+        the level stats. If no particle is left, the draw is clipped to the bounds instead and the cluster is
+        flagged tail_all."""
+        d = bk["draws"]
+        reasons = MA.tail_reasons(bk["state"], d, self.tail_bounds, end_state=self.end_state(bk["state"], d))
+        bad = np.zeros(len(bk["rows"]), bool)
+        for v in reasons.values():
+            bad |= v
+        m = len(bad)
+        k = int(bad.sum())
+        info = {"n": k, "of": m, "share": (k / m) if m else 0.0}
+        if k:
+            info["why"] = {r: int(v.sum()) for r, v in reasons.items() if v.any()}
+        bk = dict(bk)
+        bk["tail"] = info
+        if k == 0:
+            return bk
+        good = np.flatnonzero(~bad)
+        self.journal.emit("tail_particles", node=nd.key, level=nd.level, quarter=q, cluster=cl.get("id"),
+                          n=k, of=m, share=rnd(k / m, 4), why=info["why"], rule=MA.TAIL_RULE)
+        if not len(good):
+            info["all"] = True
+            bk["draws"] = clip_tail(bk["state"], d, self.tail_bounds)
+            bk["flags"] = sorted(set(bk.get("flags") or []) | {"tail_all"})
+            return bk
+        rng = seed_for(self.st.seed, nd.key, f"tail|{cl.get('head_key', '')}{rows_key}")
+        idx = np.arange(m)
+        idx[bad] = good[systematic(np.ones(len(good)), k, rng)]
+        out = self.take_bk(bk, idx)
+        out["tail"] = info
+        return out
+
     def _synth_on(self, nd: Node) -> bool:
         sy = self.st.synth or {}
         mode = sy.get("mode", "gated")
@@ -1674,10 +2296,7 @@ class Engine:
         if not np.allclose(w, 1.0):
             rng = seed_for(self.st.seed, nd.key, f"nature|{cl['head_key']}")
             idx = resample_rows(np.arange(m), m, rng, w)
-            bk = {**bk, "rows": bk["rows"][idx], "draws": bk["draws"].take(idx), "given": bk["given"].take(idx),
-                  "state": MA.take_state(bk["state"], idx),
-                  "alloc": {**bk["alloc"], "assign": {k: v[idx] for k, v in bk["alloc"]["assign"].items()},
-                            "attr": {k: v[idx] for k, v in bk["alloc"]["attr"].items()}}}
+            bk = self.take_bk(bk, idx)                 # every per-particle entry, the interventions included
         if best is not None:
             h, ph, mask = best
             nature_branch[cl["id"]] = {"hazard": h, "p": ph, "mask": mask}
@@ -1694,7 +2313,8 @@ class Engine:
             if any(fa["id"] == f for aid in dec["order"] for o in dec["actors"][aid]["options"]
                    for fa in self._opt_payload(aid, o, nd).get("facts", []) if o["p_used"] >= 0.5):
                 thin.append(f)
-        chi, k = SY.lever_rarity({f: v for f, v in bk["write_means"].items()}, self.sd)
+        chi, k = SY.lever_rarity({f: v for f, v in bk["write_means"].items()
+                                  if not (self.meta.get(f) or {}).get("enum")}, self.sd)     # labels are not levers
         regime = SY.regime_lines(self.covariates(nd), nd.facts, nd.stress)
         facts = [f for f, v in nd.facts.items() if v and f in A.FACTS and A.FACTS[f].get("exit") is not None]
         g = SY.gates(root=nd.level == 0, support_flags=support, thin_levers=thin, rarity=chi if k else None,
@@ -1943,10 +2563,37 @@ class Engine:
             return []
         idx = np.asarray(sel, int)
         d = draws.take(idx)
+        mech_tail = None
         if b["kind"] == "mechanism":
             pins = bk["given"].take(idx).to_dict()
             pins.update(SY.mechanism_pins(b, d.x, rng))
-            d = self.model.complete(MA.take_state(bk["state"], idx), MA.Given.from_dict(pins, len(idx)), rng)
+            sg = bk.get("structural")
+            sgiven = sg.take(idx) if sg is not None else MA.Given.from_dict({}, len(idx))
+            st_idx = MA.take_state(bk["state"], idx)
+            g = MA.Given.from_dict(pins, len(idx))
+            src_rows = rows_all[idx]
+            if len(np.unique(src_rows)) == len(src_rows):          # common random numbers with A0 and B_k
+                d, _ = self.complete_crn(nd, src_rows, st_idx, g, sgiven, a0)
+            else:                                                  # resampled duplicates: a fresh stream
+                kw = {"structural": sgiven.to_dict()} if (self.structural and len(sgiven.ids)) else {}
+                d = MA.as_draws(self.model.complete(st_idx, g, rng, **kw))
+            if DEFICIT_ACTION_KEY in draws.x:
+                d.x[DEFICIT_ACTION_KEY] = np.asarray(draws.x[DEFICIT_ACTION_KEY])[idx]
+            bad = MA.tail_mask(st_idx, d, self.tail_bounds, end_state=self.end_state(st_idx, d))
+            mech_tail = {"n": int(bad.sum()), "of": int(len(bad)), "share": float(bad.mean()) if len(bad) else 0.0}
+            if bad.any():
+                good = np.flatnonzero(~bad)
+                self.journal.emit("tail_particles", node=nd.key, level=nd.level, quarter=q, cluster=cl.get("id"),
+                                  branch=b.get("id"), n=int(bad.sum()), of=int(len(bad)),
+                                  share=rnd(float(bad.mean()), 4), rule=MA.TAIL_RULE)
+                if len(good):
+                    loc = np.arange(len(idx))
+                    loc[bad] = good[systematic(np.ones(len(good)), int(bad.sum()),
+                                               seed_for(self.st.seed, key0, "tail"))]
+                    idx, d = idx[loc], d.take(loc)
+                else:
+                    d = clip_tail(st_idx, d, self.tail_bounds)
+                    mech_tail["all"] = True
         src = rows_all[idx]
         assign = {k: v[idx] for k, v in bk["alloc"]["assign"].items()}
         attr = {k: v[idx] for k, v in bk["alloc"]["attr"].items()}
@@ -1969,6 +2616,20 @@ class Engine:
             self.child_state(nd, ch, q, cl, b, dec, a_sub, t_sub, split=split, cell=cell, cell_share=share)
             ch.summary = self.summarize(ch, nd, a0=a0, bk=bk, branch=b)
             ch.summary["discrete"] = ch.cluster.pop("_discrete", None)
+            tail = dict(bk.get("tail") or {"n": 0, "of": int(len(rows_all)), "share": 0.0})
+            if mech_tail is not None:
+                tail["mechanism"] = mech_tail
+            if ch.cloud.__dict__.get("_tail_state"):
+                tail["state"] = ch.cloud.__dict__.pop("_tail_state")
+            # cumulated along the path: the chance that a path of this node was resampled at some quarter so far,
+            # 1 − Π(1 − s) over its quarters (the per-quarter shares understate the truncation over 80 quarters)
+            s_q = 1.0 - (1.0 - float(tail.get("share") or 0.0)) * (1.0 - float((mech_tail or {}).get("share") or 0.0))
+            prev = float(((nd.summary or {}).get("tail") or {}).get("cum") or 0.0)
+            tail["cum"] = 1.0 - (1.0 - prev) * (1.0 - s_q)
+            ch.summary["tail"] = {k: (rnd(v, 4) if isinstance(v, float) else v) for k, v in tail.items()}
+            if bk.get("notes"):
+                ch.summary["notes"] = [{"kind": note_kind(nt), **{k: nt.get(k) for k in ("field", "particles")
+                                                                    if nt.get(k) is not None}} for nt in bk["notes"][:6]]
             out.append(ch)
         return out
 
@@ -1995,7 +2656,27 @@ class Engine:
         books are stepped with its own options' account actions (accounts.per_particle_actions), in one step."""
         parent = nd.cloud
         n = len(src)
-        state = self.model.update_state(MA.take_state(parent.state, src), d)
+        st_src = MA.take_state(parent.state, src)
+        state = self.model.update_state(st_src, d)
+        f_ff = self.resolver.field("policy_rate_chg")
+        if f_ff in d.x:                       # the target after the quarter: the moves the delivered d_ff implies
+            q = A.quarter_add(nd.quarter, 1)
+            mv = self.implied_moves(self.fed_units(st_src, q, self.fed_pin(q)), d.x[f_ff])
+            tgt = self.ff_target(st_src) + np.where(np.isfinite(mv), mv, 0.0)
+            state[FF_TARGET_KEY] = np.maximum(tgt, float(self.ff_floor))
+        bad = MA.state_tail_mask(state)
+        tail_state = None
+        if bad.any() and not bad.all():
+            # a safety net behind sanitize: a finite draw inside the bounds rolled into a non-finite state (not seen
+            # in the measured builds). Those particles are replaced by resampled healthy ones of the same child.
+            good = np.flatnonzero(~bad)
+            loc = np.arange(n)
+            loc[bad] = good[systematic(np.ones(len(good)), int(bad.sum()),
+                                       seed_for(self.st.seed, nd.key, f"tail_state|{int(src[0])}|{n}"))]
+            tail_state = {"n": int(bad.sum()), "share": float(bad.mean())}
+            state, d, src = MA.take_state(state, loc), d.take(loc), src[loc]
+            assign = {k: v[loc] for k, v in assign.items()}
+            attr = {k: v[loc] for k, v in attr.items()}
         acc = None
         if parent.acc is not None:
             acc = parent.acc.take(src)
@@ -2007,9 +2688,12 @@ class Engine:
         cpi = (parent.cpi[src] if parent.cpi is not None else np.zeros(n)) + (d.cpi_q if d.cpi_q is not None else 0.0)
         path = None
         if parent.path is not None:
-            q_ret = np.stack([np.expm1(d.y[a]) for a in self.assets], axis=1).astype(np.float32)
+            q_ret = MA.to_float32(np.stack([np.expm1(d.y[a]) for a in self.assets], axis=1))
             path = np.concatenate([parent.path[src], q_ret[:, None, :]], axis=1)
-        return Cloud(state, acc, dict(d.x), {a: d.y[a] for a in d.y}, cum, cpi, path, dict(d.inc))
+        out = Cloud(state, acc, dict(d.x), {a: d.y[a] for a in d.y}, cum, cpi, path, dict(d.inc))
+        if tail_state is not None:
+            out._tail_state = tail_state
+        return out
 
     def _applied(self, col: Mapping, codes: np.ndarray, cell: Mapping, ci: int) -> tuple[int | None, int, float]:
         """(class applied to the child or None, realised option index, its share in the child) for one column:
@@ -2147,7 +2831,7 @@ class Engine:
                 else:
                     facts.pop(f, None)
         cred = {k: dict(v) for k, v in (nd.cred or {}).items()}
-        med = {k: float(np.median(v)) for k, v in ch.cloud.x.items()}
+        med = {k: float(np.median(v)) for k, v in ch.cloud.x.items() if not str(k).startswith("_") and np.ndim(v) == 1}
         med_y = {k: float(np.median(v)) for k, v in ch.cloud.y.items()}
         for s in nd.signals:
             due = A.quarter_add(s.get("quarter", q), int(s.get("horizon_q", 1)) - 1) if s.get("quarter") else q
@@ -2196,7 +2880,8 @@ class Engine:
     def summarize(self, nd: Node, parent: Node | None, *, a0=None, bk=None, branch=None) -> dict:
         cl = nd.cloud
         rep = {k: rnd(v, 4) for k, v in MA.medians(cl.state, [k for k, _ in KEY_STATE] + ["s_y10", "s_gz",
-                                                                                            "s_infexp1"]).items()}
+                                                                                            "s_infexp1",
+                                                                                            FF_TARGET_KEY]).items()}
         rep["cum_us_equity"] = rnd(float(np.median(cl.cum.get("us_equity", np.zeros(1)))), 4)
         bf = [f for f in BAND_FIELDS if f in cl.x]
         bands = {}
@@ -2238,7 +2923,7 @@ class Engine:
 
     def inputs(self, cl: Cloud, bk: dict, branch: dict) -> dict:
         written = set(bk["written"])
-        pinned = set(bk["given"].ids)
+        pinned = set(bk["given"].ids) | set(getattr(bk.get("structural"), "ids", ()) or ())
         fs = [f for f in self.model.x_fields if f in cl.x]
         Q = np.percentile(np.stack([cl.x[f] for f in fs], axis=1), [10, 50, 90], axis=0)
         out = {}
@@ -2290,6 +2975,9 @@ class Engine:
                         "members": [{"options": m["options"], "p": rnd(m["p"], 6)} for m in cl["members"]],
                         "written": bk["written"], "protocols": bk["protocols"], "flags": bk["flags"],
                         "n_particles": int(len(bk["rows"])), "nature": bk.get("nature"),
+                        "tail": {k: (rnd(v, 4) if isinstance(v, float) else v) for k, v in (bk.get("tail") or {}).items()},
+                        "crn": bool(bk.get("crn")), "notes": bk.get("notes") or [], "bin_drift": bk.get("bin_drift") or {},
+                        "response": bk.get("response") or [], "qe_particles": int(bk.get("qe_particles") or 0),
                         "split": [{"actor": bk["split"]["cols"][i]["actor"], "domain": bk["split"]["cols"][i]["domain"],
                                    "kept": [bk["split"]["cols"][i]["options"][bk["split"]["cols"][i]["rep"][c]]
                                             for c in bk["split"]["cols"][i]["kept"]]}
@@ -2309,8 +2997,12 @@ class Engine:
                 "packets": {k: {kk: v[kk] for kk in ("text", "chars", "tokens_est", "hash")}
                             for k, v in dec["packets"].items()},
                 "accounts": acc_detail, "calls": calls, "validation_report": report[:200], "flags": nd.flags,
-                "a0": {f: [rnd(np.percentile(a0.x[f], 10), 4), rnd(np.median(a0.x[f]), 4),
-                           rnd(np.percentile(a0.x[f], 90), 4)] for f in BAND_FIELDS if f in a0.x}}
+                "a0": a0_bands(a0),
+                "model": {"kind": MA.adapter_kind(self.model), "structural": self.structural,
+                          "ff_floor": self.ff_floor, "given_modes": dict(self.given_modes), "inert": list(self.inert),
+                          "ff_units": {k: (rnd(v, 4) if isinstance(v, float) else v) for k, v in
+                                       self.fed_units(nd.cloud.state, q, self.fed_pin(q)).items() if k != "carry"},
+                          "ff_carry": rnd(float(np.median(self.fed_units(nd.cloud.state, q)["carry"])), 4)}}
 
     # ---------------------------------------------------------------- prompt context (llm_io.NodeContext)
     def board_rows(self, nd: Node, viewer: str | None = None) -> list:
@@ -2359,9 +3051,17 @@ class Engine:
             val = AC.sig3(float(np.median(v))) if (root or np.ptp(v) < 1e-9) else \
                 f"{AC.sig3(float(np.median(v)))}（{AC.sig3(float(np.percentile(v, 10)))}–{AC.sig3(float(np.percentile(v, 90)))}）"
             rows.append(f"| {fid} | {zh} | {val} | {unit} |")
+        rows.append(self.target_text(nd) + "（s_ff 是季末月的月均；本季的动作是两次会议合计的目标变动）")
         cov = self.covariates(nd)
         rows.append(AC.regime_line(cov, nd.facts, A.quarter_add(nd.quarter, 1), cl.acc))
         return "\n".join(rows)
+
+    def target_text(self, nd: Node) -> str:
+        """The policy-rate target at the node's quarter end, as the packets and the state table show it: the target
+        range (25bp steps) and the effective rate (the branch median)."""
+        tgt = float(np.median(self.ff_target(nd.cloud.state)))
+        lo = max(0.0, math.floor((tgt - 0.07) / FF_TARGET_STEP) * FF_TARGET_STEP)
+        return f"政策利率目标（季末）：区间约 {lo:.2f}–{lo + FF_TARGET_STEP:.2f}%，有效利率 {AC.sig3(tgt)}%"
 
     def prompt_ctx(self, nd: Node, q: str, dec: dict):
         from .llm_io import NodeContext as PCtx
@@ -2394,6 +3094,22 @@ class Engine:
                     state=self.state_table(nd), news=[t[1] for t in nd.digest][:6], board=self.board_rows(nd),
                     memory=nd.memory, facts=facts[:8], institutions=inst[:14], calendar=cal, commitments=commits,
                     as_of="2026-11-01", data_end="2026-09", order_seed=nd.key)
+
+
+def a0_bands(a0) -> dict:
+    """10/50/90% of A0's band fields over its healthy particles (a0.ok; all when none is healthy)."""
+    ok = getattr(a0, "ok", None)
+    if ok is None or not np.any(ok):
+        ok = np.ones(a0.n, bool)
+    out = {}
+    for f in BAND_FIELDS:
+        if f not in a0.x:
+            continue
+        v = np.asarray(a0.x[f], float)[ok]
+        v = v[np.isfinite(v)]
+        if len(v):
+            out[f] = [rnd(np.percentile(v, 10), 4), rnd(np.median(v), 4), rnd(np.percentile(v, 90), 4)]
+    return out
 
 
 def ch_p(cl: dict, b: dict) -> float:
@@ -2479,10 +3195,10 @@ def _average_answers(samples: list):
 # Level reduction (§8.3)
 # =====================================================================================================================
 
-def node_vector(nd: Node) -> np.ndarray:
+def node_vector(nd: Node, scales: Iterable | None = None) -> np.ndarray:
     st = nd.cloud.state if nd.cloud is not None else {}
     v = []
-    for k, sd in KEY_STATE:
+    for k, sd in (scales or KEY_STATE):
         val = st.get(k)
         v.append(float(np.median(val)) / sd if val is not None else (nd.summary.get("rep", {}).get(k) or 0.0) / sd)
     cum = nd.cloud.cum.get("us_equity") if nd.cloud is not None else None
@@ -2499,6 +3215,60 @@ def fact_key(nd: Node) -> str:
     return canonical(sorted(set(keys)))
 
 
+def tail_stats(cands: list[Node]) -> dict:
+    """Per level: the mass-weighted share of tail particles the level's draws dropped and resampled (Engine.sanitize;
+    the cluster's share, inherited by each child), the largest share of any candidate, and the cumulated share
+    1 − Π(1 − s) along the candidates' paths (mass-weighted mean and maximum)."""
+    tot = sum(c.p_path for c in cands) or 1.0
+    tails = [((c.summary or {}).get("tail") or {}) for c in cands]
+    shares = [float(t.get("share") or 0.0) for t in tails]
+    cums = [float(t.get("cum") or 0.0) for t in tails]
+    mean = sum(c.p_path * s_ for c, s_ in zip(cands, shares)) / tot
+    cum = sum(c.p_path * s_ for c, s_ in zip(cands, cums)) / tot
+    return {"tail_share": rnd(mean, 6), "tail_max": rnd(max(shares, default=0.0), 4), "tail_cum": rnd(cum, 6),
+            "tail_cum_max": rnd(max(cums, default=0.0), 4)}
+
+
+def ident_stats(cands: list[Node]) -> dict:
+    """Per level: the books' accounting identities (I1–I10) the candidates failed: their mass-weighted share, their
+    count and the largest residual (accounts.Accounts.check)."""
+    tot = sum(c.p_path for c in cands) or 1.0
+    ids = [((c.summary or {}).get("identities") or {}) for c in cands]
+    bad = [(c, i) for c, i in zip(cands, ids) if i and i.get("ok") is False]
+    return {"ident_fail": rnd(sum(c.p_path for c, _ in bad) / tot, 6), "ident_fail_n": len(bad),
+            "ident_max": rnd(max((float(i.get("max") or 0.0) for i in ids if i), default=0.0), 3)}
+
+
+def note_kind(nt: Mapping) -> str:
+    """floor | bound | saturation | tail | qe_paths | floor_short | other: what an adapter or engine note says."""
+    code, text = str(nt.get("code") or ""), str(nt.get("text") or "")
+    if code == "floor_engine":
+        return "floor_short"
+    if code in ("tail", "qe_paths"):
+        return code
+    if "下限" in text:
+        return "floor"
+    if "下界" in text:
+        return "bound"
+    if "±4" in text or "截断" in text:
+        return "saturation"
+    return "other"
+
+
+def notes_stats(cands: list[Node]) -> dict:
+    """Per level: particles each kind of note covered (note_kind), summed over the level's distinct clusters."""
+    seen, acc = set(), {}
+    for c in cands:
+        k = (c.parent, (c.cluster or {}).get("id"))
+        if k in seen:
+            continue
+        seen.add(k)
+        for nt in (c.summary or {}).get("notes") or []:
+            kind = nt.get("kind") or note_kind(nt)
+            acc[kind] = acc.get(kind, 0) + int(nt.get("particles") or 0)
+    return {"model_notes": dict(sorted(acc.items()))} if acc else {}
+
+
 def discrete_stats(cands: list[Node]) -> dict:
     """Per level: candidates created by the discrete split, and the mass-weighted share of particles whose own
     discrete state (in the worst column) differs from their node's (the approximation that remains, §8.1)."""
@@ -2509,16 +3279,16 @@ def discrete_stats(cands: list[Node]) -> dict:
 
 
 def reduce_level(cands: list[Node], B: int, *, eps: float, fact_penalty: float, n: int, seed: int,
-                 keep_all: bool = False) -> tuple[list[Node], list[Node], dict]:
+                 keep_all: bool = False, scales: Iterable | None = None) -> tuple[list[Node], list[Node], dict]:
     """Recombination, then forward selection to B nodes minimising the Kantorovich distance; every dropped node's
     mass and particles move to its nearest survivor (pooled by mass and resampled to n). Returns (kept, pruned,
-    stats); pruned nodes keep their own mass and the reason."""
+    stats); pruned nodes keep their own mass and the reason. `scales`: the node-distance sds (key_scales)."""
     cands = sorted(cands, key=lambda c: c.key)
     if not cands:
         return [], [], {"candidates": 0, "kept": 0, "own_mass": 0.0, "reassigned": 0.0, "transport_error": 0.0,
                         "mass": 0.0}
     p = np.array([c.p_path for c in cands])
-    X = np.array([node_vector(c) for c in cands])
+    X = np.array([node_vector(c, scales) for c in cands])
     facts_sets = [json.loads(fact_key(c)) for c in cands]
     vocab = {k: i for i, k in enumerate(sorted({k for fs in facts_sets for k in fs}))}
     Mf = np.zeros((len(cands), max(len(vocab), 1)), np.float64)
@@ -2605,10 +3375,148 @@ def make_llm(settings: TreeSettings, *, cancel: threading.Event | None, journal:
 
 
 def versions(adapter=None) -> dict:
-    adapter = adapter or MA.stub()
+    """The versions that key every LLM cache entry and a folder's identity. model_adapter is the adapter's content
+    identity (MA.identity: the quarterly stack's file-time digest replaced by a hash of the data's bytes);
+    model_adapter_build is the version string the adapter reports (information only)."""
+    adapter = adapter if adapter is not None else MA.load_adapter()
     from ..llm import agent_prompts
     return {"engine": ENGINE_VERSION, "catalogue": A.CATALOGUE_VERSION, "accounts": AC.ACCOUNTS_VERSION,
-            "priors": P.PRIORS_VERSION, "model_adapter": adapter.version, "prompts": agent_prompts.PROMPT_VERSION}
+            "priors": P.PRIORS_VERSION, "model_adapter": MA.identity(adapter), "prompts": agent_prompts.PROMPT_VERSION}
+
+
+def lever_fields(resolver) -> dict[str, dict]:
+    """{field: {"protocol", "kind", "actors", "options"}} of every catalogue write that is an action on the model
+    (main and attribute options, commitments included; the hyperscaler fallback on d_itinv), resolved on `resolver`.
+    Signature writes (the oil composite, GPR) are observations and are not listed."""
+    out: dict = {}
+    for aid, a in A.ACTORS.items():
+        for d in a.domains:
+            for o in d.options:
+                if o.protocol in (None, "signature"):
+                    continue
+                for w in o.writes:
+                    fid = resolver.field(w.role)
+                    kind = w.kind
+                    if fid is None and w.role == "hyperscaler_capex_g":
+                        fid, kind = resolver.field("it_invest_g"), "shift"
+                    if fid is None:
+                        continue
+                    row = out.setdefault(fid, {"protocol": o.protocol, "kind": kind, "actors": [], "options": []})
+                    if aid not in row["actors"]:
+                        row["actors"].append(aid)
+                    row["options"].append(o.id)
+    return out
+
+
+def transmission(adapter, eng: Engine) -> dict:
+    """What the model's interventions reach (structural models): for every lever field (lever_fields), the largest
+    change, in each response field's sd, that a +1 sd intervention routed as the engine routes it (Engine.route)
+    makes against a placebo pinned at the same particles' own draws in the same mode, with common random numbers, in
+    TRANSMISSION_FIELDS and the main asset returns over the quarter and the next TRANSMISSION_QUARTERS − 1. "inert"
+    below TRANSMISSION_TOL. Also the policy rate's own response (ff_irf: +50bp "do" against the placebo, 12
+    quarters): core CPI y/y over quarters 4–8 and unemployment at quarter 12; a positive core response is the price
+    puzzle the honesty card discloses. Cached per adapter identity; a failing probe is recorded, never raised."""
+    key = (MA.identity(adapter), tuple(sorted(eng.given_modes.items())))
+    with _TRANSMISSION_LOCK:
+        hit = _TRANSMISSION.get(key)
+    if hit is not None:
+        return hit
+    levers = lever_fields(eng.resolver)
+    n = TRANSMISSION_PARTICLES
+    out: dict = {"levers": {}, "fields": list(TRANSMISSION_FIELDS), "quarters": TRANSMISSION_QUARTERS, "particles": n,
+                 "basis": "同一组随机数下，把杠杆在各粒子自己的季前抽样值上 +1 sd，与固定在原值的对照比较：动作当季与之后 "
+                          f"{TRANSMISSION_QUARTERS - 1} 季，{len(TRANSMISSION_FIELDS)} 个宏观与金融字段和主要资产回报的最大变化"}
+    try:
+        s0 = adapter.root_state(n)
+    except Exception as err:  # noqa: BLE001 - recorded
+        out["error"] = f"{type(err).__name__}: {err}"
+        return out
+    empty = MA.Given.empty(n)
+
+    def draw(state, given, structural, h):
+        rng = np.random.default_rng(91_000 + h)
+        kw = {"structural": structural} if structural else {}
+        return MA.as_draws(adapter.complete(state, given, rng, **kw))
+
+    def vec(d):
+        cols = [np.asarray(d.x[f], float) / max(eng.sd.get(f, 1.0), 1e-9) for f in TRANSMISSION_FIELDS if f in d.x]
+        cols += [np.asarray(d.y[a], float) / CUM_SCALE for a in TRANSMISSION_ASSETS if a in d.y]
+        return np.stack(cols, axis=1) if cols else np.zeros((n, 0))
+
+    def path(f, v, route, H):
+        g = MA.Given.from_dict({f: v}, n) if route == "given" else empty
+        sg = {f: v} if route == "structural" else None
+        d = draw(s0, g, sg, 0)
+        s, vs, states = s0, [vec(d)], []
+        for h in range(1, H):
+            s = adapter.update_state(s, d)
+            states.append(s)
+            d = draw(s, empty, None, h)
+            vs.append(vec(d))
+        states.append(adapter.update_state(s, d))
+        return vs, states
+    try:
+        base = draw(s0, empty, None, 0)
+    except Exception as err:  # noqa: BLE001 - recorded
+        out["error"] = f"{type(err).__name__}: {err}"
+        return out
+    for fid, row in sorted(levers.items()):
+        if fid not in adapter.x_fields or fid not in base.x:
+            continue
+        route = eng.route(fid, row["kind"], row["protocol"])
+        v0 = np.asarray(base.x[fid], float)
+        try:
+            p0, _ = path(fid, v0, route, TRANSMISSION_QUARTERS)
+            p1, _ = path(fid, v0 + eng.sd.get(fid, 1.0), route, TRANSMISSION_QUARTERS)
+        except Exception as err:  # noqa: BLE001 - recorded
+            out["levers"][fid] = {"route": route, "error": f"{type(err).__name__}: {str(err)[:120]}", "inert": False,
+                                  **{k: row[k] for k in ("protocol", "actors")}}
+            continue
+        z = max((float(np.max(np.abs(a - b))) if a.size else 0.0) for a, b in zip(p1, p0))
+        out["levers"][fid] = {"route": route, "max_z": rnd(z, 4), "inert": bool(z < TRANSMISSION_TOL),
+                              "protocol": row["protocol"], "actors": row["actors"],
+                              "mode": eng.given_modes.get(fid, "reduced") if route == "given" else "structural"}
+    f_ff = eng.resolver.field("policy_rate_chg")
+    if f_ff in base.x:
+        try:
+            v0 = np.asarray(base.x[f_ff], float)
+            _, s_p = path(f_ff, v0, "given", 12)
+            _, s_h = path(f_ff, v0 + 0.5, "given", 12)
+            dif = lambda k, h: float(np.mean(np.asarray(s_h[h][k], float) - np.asarray(s_p[h][k], float)))  # noqa: E731
+            core = float(np.mean([dif("s_core_yoy", h) for h in range(3, 8)])) if "s_core_yoy" in s_p[0] else None
+            un = dif("s_unrate", 11) if "s_unrate" in s_p[0] else None
+            out["ff_irf"] = {"hike": 0.5, "core_yoy_q4_8": rnd(core, 4), "unrate_q12": rnd(un, 4),
+                             "puzzle": bool(core is not None and core > 0.02)}
+        except Exception as err:  # noqa: BLE001 - recorded
+            out["ff_irf"] = {"error": f"{type(err).__name__}: {str(err)[:120]}"}
+    out["inert"] = sorted(f for f, r in out["levers"].items() if r.get("inert"))
+    with _TRANSMISSION_LOCK:
+        _TRANSMISSION[key] = out
+    return out
+
+
+def transmission_zh(tr: Mapping | None, meta: Mapping | None = None) -> list[str]:
+    """Plain Chinese lines for the honesty card and the CLI: which levers the pricing model does not transmit and
+    what stands in for them, and the policy rate's price puzzle when the probe found one."""
+    tr = dict(tr or {})
+    if not tr.get("levers"):
+        return []
+    zh = lambda f: ((meta or {}).get(f) or {}).get("zh") or f  # noqa: E731
+    lines = []
+    inert = [f for f in tr.get("inert") or [] if f != "d_ff"]
+    if inert:
+        lines.append("这个季度模型里，" + "、".join(zh(f) for f in inert) + "是卫星变量：模型按它们的政策冲击或在季末写入，"
+                     "但它们不反馈到宏观核心与资产价格（当季和之后都一样）。所以它们的效果改由后果合成器的机制写（前几季、"
+                     "通道记为缺失），转移支付按响应表写入商品消费（每个百分点 +2.1%，模型围绕它补全当季），"
+                     "量化宽松按 2008–14 年的足迹写入期限溢价、2 年期收益率与 GZ 利差的干预路径。")
+    ff = tr.get("ff_irf") or {}
+    if ff.get("puzzle"):
+        un = ff.get("unrate_q12")
+        lines.append(f"价格之谜：在这个模型里，加息 50 个基点（干预）后第 4–8 季核心 CPI 同比平均反而高 "
+                     f"{float(ff.get('core_yoy_q4_8') or 0.0):.2f} 个百分点"
+                     + (f"（第 12 季失业率 {float(un):+.2f} 个百分点）" if un is not None else "")
+                     + "：利率决定对通胀的方向与文献相反，读美联储分支的通胀结果时要注意。")
+    return lines
 
 
 class TreeRun:
@@ -2620,7 +3528,7 @@ class TreeRun:
                  cache_dir: Path | None = None, keep_all_last: bool = False, kill: threading.Event | None = None):
         self.st = TreeSettings.coerce(settings)
         self.store = store
-        self.adapter = adapter or MA.stub()
+        self.adapter = adapter if adapter is not None else MA.load_adapter()
         self.cancel = cancel or threading.Event()        # graceful: no new call starts
         self.kill = kill or threading.Event()            # force: calls in flight are killed
         self.journal = journal or Journal(store.root / "journal.jsonl")
@@ -2685,14 +3593,15 @@ class TreeRun:
                 if x is not None and hasattr(x, "restore_consumed"):
                     x.restore_consumed(level0)
             self.journal.emit("run_resumed", level=level0, frontier=len(frontier), calls_new=self.calls_new(),
-                              calls_paid=self.calls_paid())
+                              calls_paid=self.calls_paid(), model=MA.model_info(self.adapter))
         else:
             root = self.engine.root()
             frontier, level0 = [root], 0
             self.index[root.key] = [0, "pending", None]
             self.store.save_frontier(root)
             self.journal.emit("run_started", settings=self.st.hash(), depth=self.st.depth, B=self.st.B,
-                              tree_kind=self.st.tree_kind, stub=bool(getattr(self.adapter, "stub", True)))
+                              tree_kind=self.st.tree_kind, stub=bool(getattr(self.adapter, "stub", True)),
+                              model=MA.model_info(self.adapter))
         pruned_buf = self._read_pruned(level0)
         for d in range(level0, int(self.st.depth)):
             if self.cancel.is_set():
@@ -2708,13 +3617,24 @@ class TreeRun:
             for nd, (children, detail) in zip(frontier, results):
                 cands += children
                 details[nd.key] = detail
-                self.journal.emit("node_done", level=d, node=nd.key, children=len(children), flags=nd.flags)
+                notes: dict = {}                  # the adapter's and the engine's notes, by kind (floors, saturation …)
+                for c in (detail or {}).get("clusters") or []:
+                    for nt in c.get("notes") or []:
+                        k = note_kind(nt)
+                        notes[k] = notes.get(k, 0) + int(nt.get("particles") or 0)
+                self.journal.emit("node_done", level=d, node=nd.key, children=len(children), flags=nd.flags,
+                                  **({"notes": notes} if notes else {}))
             last = d == int(self.st.depth) - 1
             disc = discrete_stats(cands)
+            tails = tail_stats(cands)
+            tails.update(ident_stats(cands))
+            tails.update(notes_stats(cands))
             kept, pruned, stats = reduce_level(cands, int(self.st.B), eps=float(self.st.eps_merge),
                                                fact_penalty=float(self.st.fact_penalty), n=int(self.st.n_particles),
-                                               seed=int(self.st.seed), keep_all=last and self.keep_all_last)
+                                               seed=int(self.st.seed), keep_all=last and self.keep_all_last,
+                                               scales=self.engine.key_scales)
             stats.update(disc)
+            stats.update(tails)
             by_key = {c.key: c for c in kept + pruned}
             for nd in frontier:
                 nd.children = []
@@ -2820,7 +3740,24 @@ class TreeRun:
 # =====================================================================================================================
 
 EXPORT_ENABLED = False
-EXPORT_DISABLED_WHY = "组合评估与提取服务尚不支持季度情景集（step_months = 3）：交给组合评估暂时禁用"
+EXPORT_DISABLED_WHY = "组合评估与提取服务还不能读取季度情景集：交给组合评估暂时禁用"
+
+
+def export_status(model: Mapping | None = None, keep_paths: str | None = None) -> dict:
+    """Whether a run or snapshot can be handed to portfolio and withdrawal (AGENT_DESIGN §14 D14, §16). Never for a
+    stub run (§16). For a run the real quarterly model priced: only once the portfolio and withdrawal services take
+    quarterly scenario sets (step_months = 3, phase P11, not built), so it stays disabled; when that lands, such an
+    export must carry the stack's 试运行 label (T-S has not passed) and needs keep_paths "full" (a snapshot keeps no
+    quarterly path history). {enabled, reasons, why}."""
+    m = dict(model or {})
+    reasons = [EXPORT_DISABLED_WHY]
+    if m.get("stub", True):
+        reasons.append("桩模型的推演不能导出（资产价格只用于检查流程）")
+    elif m.get("trial"):
+        reasons.append("季度模型仍在试运行（切换门未通过）：服务支持后，导出也要带这个标注")
+    if keep_paths == "none":
+        reasons.append("没有保存逐季路径：导出需要重新运行一次并保存逐季路径")
+    return {"enabled": bool(EXPORT_ENABLED and not m.get("stub", True)), "reasons": reasons, "why": "；".join(reasons)}
 
 
 def export_arrays(leaves: list, assets: Iterable[str], first_label: str = "2026-09") -> dict:
@@ -2853,9 +3790,15 @@ def export_arrays(leaves: list, assets: Iterable[str], first_label: str = "2026-
 # The estimate (§11.3; design/d02_cost.py generalised)
 # =====================================================================================================================
 
-MEMORY_OVERHEAD = 1.9               # measured peak RSS / cloud bytes (B 30 × 6 quarters, N 500, mock + stub)
 CAND_PARTICLES_PER_CLUSTER = 1.3    # candidates' particles per action cluster, in units of N (natural counts)
-MEMORY_BASE_BYTES = 170 * 2**20     # the process with numpy, pandas, scipy and the engine imported
+# peak RSS = the process with the pricing model loaded + a fixed part (records, journal, buffers) + MEMORY_OVERHEAD ×
+# the clouds' bytes. Measured 2026-11-02 (mock, N 500): the process 96 MB with the stub, 180–186 MB with the quarterly
+# stack and its panels; peaks 323 MB (B 2 × 80) and 388 MB (B 6 × 10) with the stack, 273 MB (B 2 × 80) with the stub
+MEMORY_BASE_BYTES = {"stub": 96 * 2**20, "quarterly": 180 * 2**20, "custom": 180 * 2**20}
+MEMORY_FIXED_BYTES = 120 * 2**20
+MEMORY_OVERHEAD = 1.6
+# engine and model time per expanded node (no LLM; N 500, this machine, 2026-11-02): the stub 0.25 s, the stack 0.36 s
+COMPUTE_S_PER_NODE = {"stub": 0.25, "quarterly": 0.36, "custom": 0.36}
 TOK = {"actor_system": 9000, "actor_node": 3500, "actor_out_merged": 3500, "actor_out_sep": 900,
        "packet_merged": 1750, "packet_sep": 500, "synth_system": 6000, "synth_node": 2500, "synth_per_cluster_in": 900,
        "synth_sector_block": 300, "synth_per_branch_out": 250, "synth_out_fixed": 500}
@@ -2985,25 +3928,91 @@ def ledger_size(root: Path) -> int:
     return n
 
 
-def memory_estimate(settings, *, adapter=None, root_accounts=None, n_probe: int = 64) -> dict:
-    """Bytes per particle of a cloud (measured on a probe cloud) and the peak resident memory of a beam run:
-    the frontier (B) plus the level's candidates (B · K · M_max), each with N particles."""
+PROBE_QUARTERS = 2                  # the probe cloud is advanced this many quarters by the pricing model's own draws
+PROBE_MAX_PARTICLES = 1000
+DEPTH_BYTES_FACTOR = 1.10           # compressed bytes per particle deep in a tree / after PROBE_QUARTERS (measured
+                                    # 2026-11-02 on B 2 × 80 mock builds: quarterly stack 1,440 / 1,335, stub 965 / 858)
+# by level (P14 review, frontier clouds of B 2/3/4/8/15/30 mock builds on the stack): the root's identical particles
+# 0.09 of the probe, level 1 0.71, level 2 1.0 (the probe's own depth), then rising to DEPTH_BYTES_FACTOR by level 6;
+# a wide level keeps about parents · K / kept of N distinct particles per node, and its compressed bytes scale with
+# that fraction to the power 0.6 (B 8 / 15 / 30 level 1: 0.56 / 0.37 / 0.61 measured, 0.55 / 0.38 / 0.60 modelled)
+DEPTH_LEVEL_FACTOR = (0.09, 0.71, 1.0)
+DEPTH_RAMP_LEVELS = 4
+WIDTH_BYTES_EXPONENT = 0.6
+
+
+def level_bytes_factor(d: int, parents: int, K: int, kept: int) -> float:
+    """Compressed cloud bytes per particle at level d relative to the probe cloud (memory_estimate's probe)."""
+    d = int(d)
+    if d < len(DEPTH_LEVEL_FACTOR):
+        g = DEPTH_LEVEL_FACTOR[d]
+    else:
+        g = 1.0 + (DEPTH_BYTES_FACTOR - 1.0) * min(1.0, (d - len(DEPTH_LEVEL_FACTOR) + 1) / DEPTH_RAMP_LEVELS)
+    h = 1.0 if d == 0 else min(1.0, max(int(parents), 1) * int(K) / max(int(kept), 1)) ** WIDTH_BYTES_EXPONENT
+    return float(g * h)
+
+
+def probe_cloud(settings, *, adapter=None, root_accounts=None, n_probe: int | None = None) -> tuple:
+    """(engine, node) whose cloud the pricing model advanced PROBE_QUARTERS quarters from the root with its own
+    draws (A0, no actors) and the books stepped with them: a cloud as dispersed as an early tree node."""
     st = TreeSettings.coerce(settings)
-    adapter = adapter or MA.stub()
-    eng = Engine(dataclasses.replace(st, n_particles=n_probe), adapter=adapter, llm=None,
+    adapter = adapter if adapter is not None else MA.load_adapter()
+    n = int(n_probe or min(int(st.n_particles), PROBE_MAX_PARTICLES))
+    eng = Engine(dataclasses.replace(st, n_particles=n, keep_paths="none"), adapter=adapter, llm=None,
                  root_accounts=root_accounts if root_accounts is not None else AC.load_root())
-    root = eng.root()
-    per_particle = root.cloud.nbytes() / n_probe
+    nd = eng.root()
+    empty = {"order": [], "actors": {}}
+    for _ in range(PROBE_QUARTERS):
+        d = eng.a0(nd)
+        cl = eng.advance(nd, d, np.arange(n), {}, {}, empty)
+        nd = Node(key=hashlib.sha256(f"probe|{nd.key}".encode()).hexdigest()[:16], parent=nd.key, level=nd.level + 1,
+                  quarter=A.quarter_add(nd.quarter, 1), cloud=cl)
+    return eng, nd
+
+
+def _npz_bytes(arrays: Mapping) -> int:
+    import io
+    buf = io.BytesIO()
+    np.savez_compressed(buf, **{k: MA.to_float32(v) for k, v in arrays.items()})
+    return int(buf.tell())
+
+
+def memory_estimate(settings, *, adapter=None, root_accounts=None, n_probe: int | None = None) -> dict:
+    """Bytes per particle measured on a probe cloud (probe_cloud) and the peak resident memory of a beam run: the
+    frontier (B) plus the level's candidates (about 1.3 N per action cluster), each particle at its deepest size,
+    times MEMORY_OVERHEAD, plus the process with the pricing model loaded. Also what the store writes per particle
+    (float32, compressed: the frontier and leaf clouds), for size_estimate."""
+    st = TreeSettings.coerce(settings)
+    adapter = adapter if adapter is not None else MA.load_adapter()
+    eng, nd = probe_cloud(st, adapter=adapter, root_accounts=root_accounts, n_probe=n_probe)
+    n = nd.cloud.n
+    cl = nd.cloud
+    per_particle = (cl.nbytes() - sum(np.asarray(v).nbytes for d in (cl.x, cl.inc) for v in d.values())) / n
     x_y = (len(adapter.x_fields) + 2 * len(adapter.assets) + 2) * 8
     path_per_q = len(adapter.assets) * 4 if st.paths else 0
     per_particle_last = per_particle + x_y + path_per_q * int(st.depth)
+    frontier_arrays, frontier_meta = cloud_arrays(Cloud(cl.state, cl.acc, {}, cl.y, cl.cum, cl.cpi, None, {}), "full|")
+    probe_bpp = _npz_bytes(frontier_arrays) / n
+    frontier_bpp = DEPTH_BYTES_FACTOR * probe_bpp
+    leaf_bpp = frontier_bpp + (path_per_q * int(st.depth) if st.paths else 0)
+    frontier_json = len(json.dumps({"acc_meta": frontier_meta}, ensure_ascii=False, default=_jsonable))
     cands = int(st.B) * int(st.K) * int(st.M_max) * int(eng.split_max())
     # children keep their natural particle count (a cluster's N particles split among its branches and cells;
     # mechanism branches re-complete all of them): about 1.3 N per cluster, plus the frontier's N per node
     particles = (int(st.B) * int(st.K) * CAND_PARTICLES_PER_CLUSTER + int(st.B)) * int(st.n_particles)
     clouds = particles * per_particle_last
-    peak = MEMORY_BASE_BYTES + MEMORY_OVERHEAD * clouds
+    kind = MA.adapter_kind(adapter)
+    base = MEMORY_BASE_BYTES.get(kind, MEMORY_BASE_BYTES["custom"]) + MEMORY_FIXED_BYTES
+    peak = base + MEMORY_OVERHEAD * clouds
     return {"bytes_per_particle": int(per_particle_last), "candidates_max": cands, "cloud_bytes": int(clouds),
-            "peak_bytes": int(peak), "peak_mb": round(peak / 2**20, 1), "paths": st.paths,
-            "basis": "候选云的粒子（每个动作簇约 1.3 N）× 每粒子字节 × 1.9（中间结果与 Python 开销）+ 170 MB（进程与依赖）；"
-                     "系数按 B 30 × 6 季、500 粒子的实测峰值校准"}
+            "peak_bytes": int(peak), "peak_mb": round(peak / 2**20, 1), "paths": st.paths, "model_kind": kind,
+            "frontier_bytes_per_particle": int(round(frontier_bpp)), "leaf_bytes_per_particle": int(round(leaf_bpp)),
+            "probe_bytes_per_particle": int(round(probe_bpp)),
+            "frontier_json_bytes": int(frontier_json), "probe": {"particles": n, "quarters": PROBE_QUARTERS},
+            "transmission": {"levers": (eng.transmission or {}).get("levers") or {}, "inert": list(eng.inert),
+                             "ff_irf": (eng.transmission or {}).get("ff_irf"),
+                             "zh": transmission_zh(eng.transmission, eng.meta)},
+            "compute_s_per_node": COMPUTE_S_PER_NODE.get(kind, COMPUTE_S_PER_NODE["custom"]) * int(st.n_particles) / 500.0,
+            "basis": f"候选云的粒子（每个动作簇约 1.3 N）× 每粒子字节 × {MEMORY_OVERHEAD:g}（中间结果与 Python 开销）"
+                     f"+ {base / 2**20:.0f} MB（进程、定价模型与固定开销）；每粒子字节在定价模型推进 {PROBE_QUARTERS} 季的探针云上实测，"
+                     "系数按 B 2 × 80 与 B 6 × 10、500 粒子的实测峰值校准"}

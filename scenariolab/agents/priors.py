@@ -337,7 +337,9 @@ def fed_covariates(state: Mapping[str, float]) -> dict[str, float | None]:
     """The schema-variant covariates from a node's state (s fields and last quarter's x values as <id>_l1).
 
     core ← s_core_yoy; du2 ← d_unrate_l1 + d_unrate_l2 (or `du2`); lag ← d_ff_l1; rgap ← s_ff − s_core_yoy −
-    s_rstar; eq ← us_equity_l1 (last quarter's log price return); dspr ← d_spread_l1. Explicit keys win."""
+    s_rstar; eq ← us_equity_l1 (last quarter's US-equity log total return, the adapters' convention; the probit was
+    fitted on the panel's quarterly return, the difference is the dividend yield of about 0.4pp a quarter);
+    dspr ← d_spread_l1. Explicit keys win."""
     g = lambda k: (None if state.get(k) is None else float(state[k]))   # noqa: E731
     du2 = g("du2")
     if du2 is None and g("d_unrate_l1") is not None:

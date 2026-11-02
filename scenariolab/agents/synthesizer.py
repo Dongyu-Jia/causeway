@@ -225,7 +225,7 @@ def field_table(meta: Mapping[str, dict], axes: list[tuple[str, str]]) -> list[d
         h = m.get("hist") or {}
         if fid not in meta and fid != "mult":
             continue
-        rows.append({"id": fid, "zh": m.get("zh") or ("估值变化（美股 Δlog P/Ê）" if fid == "mult" else fid),
+        rows.append({"id": fid, "zh": m.get("zh") or ("估值倍数变化（美股 Δlog CAPE 倍数）" if fid == "mult" else fid),
                      "unit": m.get("unit") or "", "partition": fid in axis_fields, "mechanism": fid in SHIFT_FIELDS,
                      "p01": h.get("p01"), "p50": h.get("p50"), "p99": h.get("p99")})
     return rows

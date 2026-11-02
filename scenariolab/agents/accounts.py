@@ -51,7 +51,7 @@ from .. import config, jsonio
 
 log = logging.getLogger(__name__)
 
-ACCOUNTS_VERSION = "agents-accounts-2 (2026-11-02; per-particle actions)"
+ACCOUNTS_VERSION = "agents-accounts-3 (2026-11-02; per-particle actions; the deficit's pull to its baseline, debt >= 0)"
 ROOT_PATH = config.RESULTS_DIR / "agents_accounts_root.json"
 RAW_AGENTS = config.RAW_DIR / "agents"
 TOL = 1e-6
@@ -1474,6 +1474,11 @@ class Params:
     private_nl_p01_p99: tuple = (-4.23, 15.95)
     saving_rate_p1: float = 2.30
     refunds_remaining_bn: float = 0.0      # pinned (未确认 default 0): paid in the quarter of a refund ruling
+    # the federal deficit's quarterly pull toward its baseline (the root's level plus actions' discretionary changes):
+    # the cumulated d_deficit regressed on its own lag, 1973–2019, gives −0.047 a quarter (half-life 3.7 years). The
+    # quarterly models draw d_deficit without its level (the stack's satellite has no own lag), so without the pull the
+    # books' deficit is a random walk (P14 review: −21% … +42% of GDP by 2046 and public debt below zero)
+    deficit_pull_q: float = 0.047
 
     @classmethod
     def from_root(cls, root: Mapping | None, institutions: Mapping | None = None) -> "Params":
@@ -1505,6 +1510,12 @@ class Params:
         if inst.get("refunds_remaining_bn") is not None:
             p.refunds_remaining_bn = float(inst["refunds_remaining_bn"])
         return p
+
+
+def foreign_share(S: Mapping) -> np.ndarray:
+    """Foreign holdings / debt held by the public, %: 0 where surpluses have repaid the debt (no 0/0)."""
+    dhp = np.asarray(S["dhp"], float)
+    return np.divide(np.asarray(S["fh"], float) * 100.0, dhp, out=np.zeros_like(dhp), where=dhp > 1e-9)
 
 
 def _full(v, n) -> np.ndarray:
@@ -1633,6 +1644,7 @@ class Accounts:
         S["em_used"], S["em_overrun"], S["arrears"] = np.zeros(N), np.zeros(N), np.zeros(N)
         S["susp_q"] = np.zeros(N)
         S["def_gdp"] = _full(g("fiscal", "deficit_nipa_gdp", 5.2), N)
+        S["def_base"] = S["def_gdp"].copy()          # the baseline the deficit returns to (moved by actions only)
         S["r_avg"] = _full(g("fiscal", "avg_rate_marketable"), N)
         nipa_int = g("fiscal", "nipa_interest_saar")
         dhp_q = g("fiscal", "debt_held_public_nipa_q", g("fiscal", "debt_held_public"))
@@ -1802,7 +1814,11 @@ class Accounts:
         Y = {k: self._y(y, k) for k in ACCOUNT_ASSETS}
         F: dict = {}
         # ---- macro aggregates (A13: GDP deflator ~ CPI + wedge)
-        cpi_q = 0.37 * X["cpi_goods"] + 0.63 * X["cpi_serv"]
+        # headline CPI inflation (%年化): the model's own d_cpi when its draw carries one (the quarterly stack's
+        # training weights, so the books' CPI y/y follows the model's), else the goods/services split at 0.37/0.63
+        cpi_x = x.get("d_cpi") if hasattr(x, "get") else None
+        cpi_q = (np.broadcast_to(np.asarray(cpi_x, float), (N,)).astype(float) if cpi_x is not None
+                 else 0.37 * X["cpi_goods"] + 0.63 * X["cpi_serv"])
         ngdp_g = (X["rgdp"] + cpi_q + p.deflator_wedge) / 400.0
         S["gdp"] = S["gdp"] * np.exp(ngdp_g)
         dy10 = X["y10"]
@@ -1835,8 +1851,15 @@ class Accounts:
         S["cur"] = S["cur"] * (1 + p.currency_growth_q)
         F.update(fed_ni=ni, fed_remit=remit, fed_income=income, fed_expense=expense, fed_repay=repay, fed_da_prev=da_prev,
                  fed_rmp=rmp.copy())
-        # ---- federal government (A1-A4, A14, A16): the model's d_deficit is the NIPA total (one writer)
-        S["def_gdp"] = S["def_gdp"] + X["deficit"]
+        # ---- federal government (A1-A4, A14, A16): the model's d_deficit is the NIPA total (one writer); the level
+        # returns to its baseline at deficit_pull_q a quarter, and the baseline moves with actions' discretionary
+        # changes (x["_agent_deficit_action"], written by the engine), so an enacted consolidation or stimulus stays
+        act = x.get("_agent_deficit_action") if hasattr(x, "get") else None
+        act = np.zeros(N) if act is None else np.broadcast_to(np.asarray(act, float), (N,)).astype(float)
+        base = S.get("def_base")
+        base = S["def_gdp"].copy() if base is None else base
+        S["def_gdp"] = S["def_gdp"] + X["deficit"] - p.deficit_pull_q * (S["def_gdp"] - base)
+        S["def_base"] = base + act
         nipa_q = S["def_gdp"] / 100.0 * S["gdp"] / 4.0
         refunds = _act_float(a, "customs_refunds_q", N)
         ordered = _act_set(a, "customs_refunds_bn", N)
@@ -1871,6 +1894,7 @@ class Accounts:
         S["em_overrun"] = S["em_overrun"] + excess
         room = S["limit"] - (S["dhp"] + S["intra"] - p.not_subject_to_limit)
         borrow = np.minimum(need, np.maximum(room, 0.0))
+        borrow = np.maximum(borrow, -S["dhp"])            # a surplus repays debt down to zero; the rest stays in the TGA
         short = np.maximum(need - borrow, 0.0)
         S["dhp"] = S["dhp"] + borrow
         tga_new = S["tga"] + borrow - mts_q - p.omf_q
@@ -1889,6 +1913,16 @@ class Accounts:
         S["receipts_q"] = S["receipts_q"] * np.exp(p.receipts_elasticity * ngdp_g) + remit
         outlays_q = S["receipts_q"] + mts_q
         S["fh"] = S["fh"] + p.foreign_share_issuance * borrow
+        # holders cannot hold more than the debt outstanding (I5): when surpluses shrink the debt, foreign holdings
+        # give way first and the Fed's bill purchases stop at what is left (a quarterly model's deficit level
+        # wanders, so a path can run surpluses for years)
+        over = S["fh"] + S["tsy"] - S["dhp"]
+        if np.any(over > 0):
+            cut_fh = np.minimum(np.maximum(over, 0.0), S["fh"])
+            S["fh"] = S["fh"] - cut_fh
+            cut_tsy = np.maximum(S["fh"] + S["tsy"] - S["dhp"], 0.0)
+            S["tsy"] = S["tsy"] - cut_tsy
+            S["bills"] = np.maximum(S["bills"] - cut_tsy, 0.0)
         S["susp_q"] = np.maximum(S["susp_q"] - 1.0, 0.0)
         ended = suspended & (S["susp_q"] == 0)
         if ended.any():              # the suspension ends: the limit is reset at the debt then outstanding
@@ -2037,7 +2071,7 @@ class Accounts:
             R["I8_sectoral"] = float(np.max(np.abs(F["sect_private_nl"] + F["sect_gov_nl"] - F["sect_nation_nl"]) / S["gdp"]))
         v = self.views()
         R["I9_views"] = float(max(np.max(np.abs(v["s_debt"] - S["dhp"] / S["gdp"] * 100)),
-                                  np.max(np.abs(v["s_foreign_hold"] - S["fh"] / S["dhp"] * 100))))
+                                  np.max(np.abs(v["s_foreign_hold"] - foreign_share(S)))))
         bk_a = S["bk_loans"] + S["bk_sec_cost"] + S["bk_unreal"] + S["bk_other_a"]
         bk_l = S["bk_dep"] + S["bk_other_l"] + S["bk_equity_book"] + S["bk_unreal"]
         R["I10_banks"] = float(np.max(np.abs(bk_a - bk_l) / np.abs(bk_a)))
@@ -2061,7 +2095,7 @@ class Accounts:
             self.carried.get("households.liabilities") or 1.0)
         return {"s_debt": debt_gdp, "s_int_burden": S["_y10_win"].mean(axis=1) * debt_gdp / 100.0,
                 "s_hh_debt": hh_debt / dpi * 100, "s_nfc_debt": S["nfc_debt"] / S["gdp"] * 100,
-                "s_foreign_hold": S["fh"] / S["dhp"] * 100}
+                "s_foreign_hold": foreign_share(S)}
 
     def fact_shares(self) -> dict[str, float]:
         """Shares of particles in the discrete account states (debt limit binding, X-date, arrears, FCF < 0)."""
@@ -2134,7 +2168,7 @@ class Accounts:
             "banks.nii": S["bk_nii_q"], "banks.chargeoffs": S["bk_chargeoff"],
             "investors.margin_debt": S["margin"],
             "investors.household_equity_share": S["hh_eq"] / (S["hh_eq"] + S["hh_ofa"]) * 100,
-            "row.foreign_holdings": S["fh"], "row.foreign_share": S["fh"] / S["dhp"] * 100, "row.niip": S["row_niip"],
+            "row.foreign_holdings": S["fh"], "row.foreign_share": foreign_share(S), "row.niip": S["row_niip"],
             "row.current_account_q": S["row_ca_q"],
             "sectoral.government_nl": F.get("sect_gov_nl", z), "sectoral.nation_nl": F.get("sect_nation_nl", z),
             "sectoral.private_nl": F.get("sect_private_nl", z), "sectoral.private_nl_gdp": F.get("sect_private_nl_gdp", z),

@@ -1030,6 +1030,7 @@ class NodeContext:
     stress_mode: bool = False
     resolver: object = None
     leader_choices: dict = field(default_factory=dict)
+    pinned_meeting: bool = True              # False: the model tree's menus (no trimming for a pinned meeting)
 
     @classmethod
     def of(cls, ctx) -> "NodeContext":
@@ -1294,7 +1295,7 @@ def menu(actor_id: str, ctx=None) -> dict:
         if d.role != "attribute" or not LIVE.get(d.live, LIVE["always"])(c)[0]:
             continue
         out["attributes"].append(_domain_block(a, d, c, r, out["disabled"]))
-    if actor_id == "fed" and out["main"] is not None and c.quarter in FOMC_PINNED:
+    if actor_id == "fed" and out["main"] is not None and c.quarter in FOMC_PINNED and c.pinned_meeting:
         _apply_pinned_meeting(out, c)
     # account gates: required options (G-L1 for Congress); commitments due: the 如期执行 option
     req = (c.gates.get(actor_id) or {}).get("require_options") or []
@@ -1324,6 +1325,8 @@ def _apply_pinned_meeting(out: dict, c: NodeContext) -> None:
     first = PINNED_MEETING_MOVE.get(str(c.institutions.get(pin["id"]) or "hold"))
     if first is None:
         return
+    out["main"]["pinned_first"] = {"meeting": pin["id"], "move": first,
+                                   "option": str(c.institutions.get(pin["id"]) or "hold")}
     ok = {round(first + s, 2) for s in (-0.25, 0.0, 0.25)}
     keep = []
     for o in out["main"]["options"]:
@@ -1337,11 +1340,55 @@ def _apply_pinned_meeting(out: dict, c: NodeContext) -> None:
     out["notes"].append(f"{pin['zh']}是锁定事实：本季选项在相容的选项上重新归一")
 
 
+def fed_cut_room(o: Option, c: NodeContext) -> tuple[bool, str]:
+    """A rate cut is on the menu only if the model can deliver it: the policy rate s_ff (branch median) minus the
+    cut stays above the model's floor (ctx.state["ff_floor"]: the quarterly stack's 0.1, the stub's 0) by more than
+    half a 25bp step. Below that the cut would be delivered as a smaller one (or a hold) and duplicate it."""
+    ff = c.s("ff_target", c.s("s_ff"))           # the end-of-quarter target (the engine's state), else s_ff
+    if ff is None:
+        return True, ""
+    floor = float(c.s("ff_floor", 0.0) or 0.0)
+    if o.param is not None:
+        size = abs(float(o.param.hi))                  # the smallest cut the option allows (cut_75plus: 0.75)
+    else:
+        size = abs(float(FED_OPTION_VALUE.get(o.id, 0.0)))
+    if size <= 0:
+        return True, ""
+    room = ff - floor
+    if room < size - FED_STEP / 2:
+        return False, f"政策利率 {ff:.2f}% 离模型的下限 {floor:g}% 只有 {max(room, 0):.2f} 个百分点：降息 {size:g} 无法交付"
+    return True, ""
+
+
+def option_value_range(actor_id: str, option_id: str, domain_id: str | None = None) -> tuple[float, float] | None:
+    """The values an instrument option realizes on its field: a point write (a, a), a magnitude point write the
+    param's [lo, hi], a bin write its [lo, hi]; None for options without an instrument write. A0 bins of adjacent
+    menu options split at the midpoint of the nearest ends of these ranges (the catalogue bins when all are kept)."""
+    a = ACTORS[actor_id]
+    d = a.domain(domain_id) if domain_id else a.main
+    o = d.option(option_id)
+    for w in o.writes:
+        if ROLES.get(w.role, {}).get("kind") != "instrument" or w.dq:
+            continue
+        if w.kind == "bin":
+            return float(w.lo), float(w.hi)
+        if w.kind == "point":
+            if w.magnitude and o.param is not None:
+                return float(min(o.param.lo, o.param.hi)), float(max(o.param.lo, o.param.hi))
+            return float(w.a), float(w.a)
+    return None
+
+
 def _domain_block(a: Actor, d: Domain, c: NodeContext, r: FieldResolver, disabled: list) -> dict:
     opts = []
     for o in d.options:
         if o.gate:
             ok, why = GATES[o.gate](c)
+            if not ok:
+                disabled.append({"domain": d.id, "id": o.id, "zh": o.zh, "why": why})
+                continue
+        if a.id == "fed" and d.id == "rate" and o.id.startswith("cut"):
+            ok, why = fed_cut_room(o, c)
             if not ok:
                 disabled.append({"domain": d.id, "id": o.id, "zh": o.zh, "why": why})
                 continue
@@ -1641,12 +1688,16 @@ def account_actions(payloads: Iterable[Mapping]) -> dict:
 
 
 def commitments_of(payload: Mapping, quarter: str) -> list[dict]:
-    """The writes due in later quarters (dq > 0) as commitments {actor, option, due_quarter, write, cancellable}."""
+    """The writes due in later quarters (dq > 0) as commitments {actor, option, due_quarter, write, cancellable}.
+    Each write keeps the conditioning protocol of the option that made it (write["protocol"]), so the quarter it
+    falls due reads it as the first quarter did (an intervention stays an intervention, §6.3)."""
     out = []
     for w in payload.get("writes", []):
         if int(w.get("dq", 0)) > 0:
             out.append({"actor": payload["actor"], "option": payload["option"], "zh": payload.get("zh"),
-                        "due_quarter": quarter_add(quarter, int(w["dq"])), "write": {**w, "dq": 0}, "cancellable": True})
+                        "due_quarter": quarter_add(quarter, int(w["dq"])),
+                        "write": {**w, "dq": 0, "protocol": w.get("protocol") or payload.get("protocol")},
+                        "cancellable": True})
     return out
 
 

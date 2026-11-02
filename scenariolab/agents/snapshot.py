@@ -56,17 +56,19 @@ from . import tree as T
 
 SNAPSHOT_VERSION = "agent-snapshot-1 (2026-11-02)"
 ID_RE = re.compile(r"^[a-z0-9_\-]{1,60}$")
-# measured on reduced builds (agent_impl/engine/calib.py: B 4 × 8 and B 6 × 6 with the mock and the stub);
-# gzip-compressed JSON bytes per record, float32 npz bytes per leaf particle
-BYTES_KEPT_RECORD = 2_600             # re-measured 2026-11-02 after the discrete split (longer child lists)
+# gzip-compressed JSON bytes per record (measured on reduced builds, agent_impl/engine/calib.py, and re-measured
+# 2026-11-02 on B 2 × 80 mock builds with both models: about 1,450 bytes per record in the level files)
+BYTES_KEPT_RECORD = 2_600
 BYTES_PRUNED_RECORD = 1_400
-SPLIT_CELLS_TYPICAL = 11              # cells per consequence branch at N 500 with a budget ≥ 22 (measured, mock)
+SPLIT_CELLS_TYPICAL = 9.5             # cells per consequence branch at N 500 with a budget ≥ 19 (B 2 × 80 mock builds:
+                                      # 9.6 with the quarterly stack, 8.5 with the stub; 11 on the earlier stub builds)
 BYTES_DETAIL = 10_800
-LEAF_BYTES_PER_PARTICLE = 1_050
-LEAF_JSON_BYTES = 24_000
-# a kept node's frontier cloud (the leaf's lean form): 852 B per particle 12 quarters deep with the books (B 2, mock),
-# rounded up for deeper, more dispersed clouds; the JSON is the books' metadata
-FRONTIER_BYTES_PER_PARTICLE = 1_000
+# per particle, what the store writes (float32, compressed): measured on the pricing model's own probe cloud
+# (tree.memory_estimate) when the estimate has one; else these constants, the stub's values deep in a B 2 × 80 tree
+# (the quarterly stack's clouds are about 1,440 bytes per particle: more state, less compressible)
+LEAF_BYTES_PER_PARTICLE = 970
+LEAF_JSON_BYTES = 48_000              # a leaf's record and books metadata 80 quarters deep (B 2 × 80: 47–50 kB)
+FRONTIER_BYTES_PER_PARTICLE = 965
 FRONTIER_JSON_BYTES = 11_000
 EXPAND_BEAM = 4                       # beam of an on-demand extension deeper than one quarter
 EXPAND_MAX_QUARTERS = 8
@@ -75,6 +77,11 @@ EXPAND_MAX_CALLS = 12                 # per extended quarter (one merged call + 
 
 def snapshots_dir() -> Path:
     return T.SNAPSHOTS_DIR
+
+
+def _backend_name() -> str:
+    from ..llm import backend
+    return backend.backend_name()
 
 
 def snapshot_root(sid: str, base: Path | None = None) -> Path:
@@ -100,7 +107,7 @@ def default_settings(beam: int = DEFAULT_BEAM, quarters: int = DEFAULT_QUARTERS,
 # Estimates: calls, time, tokens (the cost model), memory and size
 # =====================================================================================================================
 
-def size_estimate(settings) -> dict:
+def size_estimate(settings, probe: dict | None = None) -> dict:
     """Snapshot bytes from the measured per-record sizes: expanded nodes (record + detail), pruned candidates (a
     compact record) and the leaves' particle clouds. Candidates per node: K × M_max while the synthesizer runs (its
     partitions branch), about K × 1.3 later (the default partition splits only in stress states)."""
@@ -112,48 +119,81 @@ def size_estimate(settings) -> dict:
     # fewer particles (a cell needs ≥ 5 particles); measured on B 2/4/8 builds with the mock (2026-11-02)
     cells = min(T.split_max_of(st) / 2.0, SPLIT_CELLS_TYPICAL) * min(1.0, (int(st.n_particles) / 500.0) ** 0.6)
     cells = max(1.0, cells)
+    probe = probe or {}
+    f_bpp = float(probe.get("frontier_bytes_per_particle") or FRONTIER_BYTES_PER_PARTICLE)
+    p_bpp = float(probe.get("probe_bytes_per_particle") or f_bpp / T.DEPTH_BYTES_FACTOR)
+    l_bpp = float(probe.get("leaf_bytes_per_particle") or LEAF_BYTES_PER_PARTICLE)
+    f_json = float(probe.get("frontier_json_bytes") or FRONTIER_JSON_BYTES)
     cands = [n * int(st.K) * (int(st.M_max) if d < synth_depth else 1.3) * cells for d, n in enumerate(levels)]
     kept_next = levels[1:] + [min(int(st.B), int(cands[-1]))]
     pruned = int(sum(max(c - k, 0) for c, k in zip(cands, kept_next)))
     kept = int(sum(levels))
     leaves = kept_next[-1]
-    frontier = kept * (int(st.n_particles) * FRONTIER_BYTES_PER_PARTICLE + FRONTIER_JSON_BYTES)
+    # the kept nodes' clouds level by level (P14 review: one deep factor for every level overstated wide, shallow
+    # trees by up to 46%): the root's identical particles compress to almost nothing, a level-1 cloud carries one
+    # quarter of dispersion, and a wide level keeps fewer distinct particles per node (T.level_bytes_factor)
+    frontier = sum(n * (int(st.n_particles) * p_bpp * T.level_bytes_factor(d, levels[d - 1] if d else 1, int(st.K), n)
+                        + f_json) for d, n in enumerate(levels))
     b = kept * (BYTES_KEPT_RECORD + BYTES_DETAIL) + pruned * BYTES_PRUNED_RECORD + \
-        leaves * (int(st.n_particles) * LEAF_BYTES_PER_PARTICLE + LEAF_JSON_BYTES) + frontier
+        leaves * (int(st.n_particles) * l_bpp + LEAF_JSON_BYTES) + frontier
     return {"expanded_nodes": kept, "pruned_nodes": pruned, "leaves": leaves, "bytes": int(b), "cells": round(cells, 1),
             "mb": round(b / 2**20, 1), "frontier_mb": round(frontier / 2**20, 1),
+            "frontier_bytes_per_particle": int(round(f_bpp)), "probe_bytes_per_particle": int(round(p_bpp)),
+            "measured": bool(probe.get("frontier_bytes_per_particle")),
             "basis": "按缩小规模构建实测的每条记录字节数外推（gzip 后；叶节点粒子 float32；离散状态拆分让每个后果分支"
                      "再分成几个子节点）；另含每个保留节点的粒子云（float32），点开被剪分支时从父节点精确重放一个季度"}
 
 
-def full_estimate(settings, *, latency=None, cached_levels: int = 0) -> dict:
+def full_estimate(settings, *, latency=None, cached_levels: int = 0, adapter=None) -> dict:
+    """Calls, time and tokens (tree.estimate), memory (tree.memory_estimate on a probe cloud the pricing model
+    advanced tree.PROBE_QUARTERS quarters) and size (size_estimate with that probe's bytes per particle);
+    `pricing_model` says which model priced it (the default adapter unless one is given)."""
     st = T.TreeSettings.coerce(settings)
+    adapter = adapter if adapter is not None else MA.load_adapter()
     out = T.estimate(st, latency=latency, cached_levels=cached_levels)
+    out["pricing_model"] = MA.model_info(adapter)
     try:
-        out["memory"] = T.memory_estimate(st)
+        out["memory"] = T.memory_estimate(st, adapter=adapter)
     except (KeyError, OSError, ValueError) as err:
         out["memory"] = {"error": str(err)}
-    out["size"] = size_estimate(st)
+    out["size"] = size_estimate(st, probe=out["memory"] if "error" not in out["memory"] else None)
+    out["transmission"] = (out["memory"] or {}).pop("transmission", None)
     return out
+
+
+def engine_transmission(eng: T.Engine) -> dict:
+    """What the pricing model's interventions reach, for the manifest, run.json and the UI's honesty card: the
+    probe (T.transmission), the inert levers and the lines the card shows."""
+    tr = dict(eng.transmission or {})
+    return {"levers": tr.get("levers") or {}, "inert": list(eng.inert), "ff_irf": tr.get("ff_irf"),
+            "basis": tr.get("basis"), "zh": T.transmission_zh(tr, eng.meta)}
 
 
 def format_estimate(est: dict, st: T.TreeSettings) -> str:
     mem = est.get("memory") or {}
     size = est.get("size") or {}
+    pm = est.get("pricing_model") or {}
+    priced = (f"{pm.get('label')}（{pm.get('fit') or ''}；{MA.short_version(pm.get('identity') or pm.get('version'))}）"
+              if not pm.get("stub", True)
+              else f"{pm.get('label') or MA.STUB_LABEL}" + (f"（{pm.get('why_stub')}）" if pm.get("why_stub") else ""))
     lines = [f"快照估计：B {st.B} × {st.depth} 季，每节点 {st.n_particles} 个粒子，并发 {est['concurrency']}",
+             f"  定价模型：{priced}",
              f"  扩展节点 {est['expanded_nodes']}；大模型调用 {est['calls_new']}（行为者 {est['actor_calls']}，后果合成器 {est['synth_calls']}；"
              f"上限 {st.max_calls if st.max_calls is not None else '无'}）",
              f"  轮次 {est['rounds']}；耗时约 {est['hours'][0]}–{est['hours'][2]} 小时（每次调用 {est['latency_s'][0]:.0f}–"
              f"{est['latency_s'][2]:.0f} 秒的假设）",
              f"  token：输入约 {est['tokens']['input'] / 1e6:.1f}M，输出约 {est['tokens']['output'] / 1e6:.2f}M（假设的大小，未测量）",
              f"  内存峰值约 {mem.get('peak_mb', '?')} MB（候选 {mem.get('candidates_max', '?')} 个云 × 每粒子 "
-             f"{mem.get('bytes_per_particle', '?')} 字节）",
+             f"{mem.get('bytes_per_particle', '?')} 字节）；本机计算约 "
+             f"{round(est['expanded_nodes'] * float(mem.get('compute_s_per_node') or 0.3) / 60.0, 1)} 分钟（不含大模型）",
              f"  快照大小约 {size.get('mb', '?')} MB（扩展 {size.get('expanded_nodes')}、剪枝 {size.get('pruned_nodes')}、叶 "
              f"{size.get('leaves')}；保留节点的粒子云约 {size.get('frontier_mb', '?')} MB）"]
     if est.get("deep_model"):
         lines.append(f"  第 {int(st.deep_from) + 1} 季起使用 {est['deep_model']}（{est['deep_calls']} 次调用；你明确指定的）")
     lines.append(f"  模型 {est.get('model') or 'claude-opus-5-5'}，力度 medium；硬上限 {est.get('hard_cap')} 次新调用"
                  "（预计的 1.2 倍：达到后暂停，确认后继续）")
+    for ln in ((est.get("transmission") or {}).get("zh") or []):
+        lines.append("  传导：" + ln)
     lines.append("  " + est["usage_note"])
     return "\n".join(lines)
 
@@ -177,14 +217,45 @@ def read_manifest(root: Path) -> dict | None:
     return T.read_json(p) if p.exists() else None
 
 
+def real_backend() -> bool:
+    from ..llm import backend
+    return backend.backend_name() == "claude_code"
+
+
+def refuse_fallback_stub(adapter, what: str = "快照") -> None:
+    """Real Claude Code calls priced by a stub the default fell back to (no quarterly data, or the model failed to
+    load) are refused: SIM_DESIGN R-A3 wants the real adapter, and the LLM's decisions depend on model-priced
+    packets. The stub is allowed only when MSL_AGENT_MODEL=stub says so."""
+    if real_backend() and getattr(adapter, "stub", True) and not MA.explicit_stub():
+        why = MA.model_info(adapter).get("why_stub") or ""
+        raise ValueError(f"定价模型回退到了桩模型{('（' + why + '）') if why else ''}：用本机 Claude Code 的{what}必须由季度模型定价。"
+                         "请先准备季度数据（python -m scenariolab.build），并设置 "
+                         f"MSL_AGENT_MODEL={MA.QUARTERLY_SPEC}；只想检查流程时明确设置 MSL_AGENT_MODEL=stub")
+
+
+def folder_adapter(man: dict | None, *, adapter=None, allow_model_change: bool = False, what: str = "快照"):
+    """The adapter that continues a folder (its manifest or run.json): the one it was priced with
+    (MA.resume_adapter), whatever MSL_AGENT_MODEL or the server's default says; a given adapter must be that very
+    fit. A different fit is refused (ValueError in Chinese) unless allow_model_change."""
+    built = ((man or {}).get("versions") or {}).get("model_adapter")
+    if adapter is None:
+        return MA.resume_adapter(built, is_stub=(man or {}).get("stub"), what=what, allow_change=allow_model_change)
+    if built and not MA.same_version(built, adapter) and not allow_model_change:
+        raise ValueError(f"这个{what}由 {MA.short_version(built)} 定价，传入的模型是 {MA.short_version(MA.identity(adapter))}："
+                         "继续会在同一棵树里混用两次拟合，已拒绝")
+    return adapter
+
+
 def build(sid: str, settings, *, resume: bool = False, base: Path | None = None, adapter=None,
           cache_dir: Path | None = None, listener=None, cancel: threading.Event | None = None,
           root_accounts=None, institutions=None, kill: threading.Event | None = None,
-          budget_confirmed: bool = False) -> dict:
+          budget_confirmed: bool = False, allow_model_change: bool = False) -> dict:
     """Build (or continue) the snapshot `sid`. Raises BuildPaused on a pause (usage limit, login, budget, cancel, …):
     the checkpoint keeps every finished level and the cache keeps every finished call, so build(resume=True)
-    continues exactly. A resume after a "budget" pause raises the hard cap only with budget_confirmed (the user saw
-    and confirmed the remaining estimate). Any other error is recorded in the manifest (status "failed")."""
+    continues exactly. A resumed build is priced by the adapter the folder was priced with (folder_adapter: never
+    the environment's default; another fit only with allow_model_change, recorded in pricing_history and the
+    journal). A resume after a "budget" pause raises the hard cap only with budget_confirmed (the user saw and
+    confirmed the remaining estimate). Any other error is recorded in the manifest (status "failed")."""
     root = snapshot_root(sid, base)
     st = T.TreeSettings.coerce(settings)
     probs = st.problems()
@@ -206,19 +277,47 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
                "settings": st.to_dict(), "settings_hash": st.hash(), "status": "building", "levels_done": 0,
                "spent_calls": 0, "pause": None, "provisional": True}
         write_manifest(root, man)
-    adapter = adapter or MA.load_adapter()
+    resuming = not man.get("provisional")
+    try:
+        if resuming:
+            adapter = folder_adapter(man, adapter=adapter, allow_model_change=allow_model_change)
+        else:
+            adapter = adapter or MA.load_adapter()
+        refuse_fallback_stub(adapter)
+    except ValueError as err:
+        if man.get("provisional"):                    # nothing was built: the provisional manifest goes away
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            m = read_manifest(root) or man
+            m.update(status="paused" if m.get("status") in ("building", "paused") else m.get("status"),
+                     error=str(err), updated=now)
+            write_manifest(root, m)
+        raise
     done = int(man.get("levels_done") or 0)
     if st.hard_cap is None:
         st = dataclasses.replace(st, hard_cap=T.hard_cap_for(st))
-    if (man.get("pause") or {}).get("reason") == "budget" and budget_confirmed:
+    prev_pause = man.get("pause") or man.get("resume_pause") or {}
+    if prev_pause.get("reason") == "budget" and budget_confirmed:
         st = dataclasses.replace(st, hard_cap=T.hard_cap_for(st, spent=T.ledger_size(root), cached_levels=done))
+    info = MA.model_info(adapter)
     if man.get("provisional"):
-        man.update(estimate=full_estimate(st), versions=T.versions(adapter), stub=bool(getattr(adapter, "stub", True)),
-                   data_end="2026-09", provisional=False)
-    man.update(status="building", updated=now, pause=None, error=None, settings=st.to_dict(), hard_cap=st.hard_cap,
-               model=st.model or "claude-opus-5-5", effort="medium")
+        man.update(estimate=full_estimate(st, adapter=adapter), versions=T.versions(adapter),
+                   stub=bool(getattr(adapter, "stub", True)), pricing_model=info,
+                   export=T.export_status(info, st.keep_paths), data_end="2026-09", provisional=False,
+                   backend=_backend_name(),
+                   pricing_history=[{"from_level": 0, "identity": info["identity"], "label": info["label"]}])
+    else:
+        hist = list(man.get("pricing_history") or [{"from_level": 0, "identity": (man.get("versions") or {}).get(
+            "model_adapter"), "label": (man.get("pricing_model") or {}).get("label")}])
+        if hist[-1].get("identity") != info["identity"] and not MA.same_version(hist[-1].get("identity"), adapter):
+            hist.append({"from_level": done, "identity": info["identity"], "label": info["label"]})
+        man["pricing_history"] = hist
+    man.update(status="building", updated=now, pause=None, resume_pause=None, error=None, settings=st.to_dict(),
+               hard_cap=st.hard_cap, model=st.model or "claude-opus-5-5", effort="medium")
     write_manifest(root, man)
     journal = T.Journal(root / "journal.jsonl", listener=listener)
+    if len(man.get("pricing_history") or []) > 1 and man["pricing_history"][-1].get("from_level") == done:
+        journal.emit("model_changed", level=done, model=info, history=man["pricing_history"])
     store = T.Store(root)
     if institutions is None and man.get("institutions") is not None:
         institutions = man["institutions"]                 # a resumed build keeps the pinned facts it started with
@@ -227,7 +326,8 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
     if man.get("institutions") is None:
         man["institutions"] = run.engine.items
         man["accounts_root_hash"] = (run.engine.root_acc or {}).get("hash")
-        write_manifest(root, man)
+    man["transmission"] = engine_transmission(run.engine)
+    write_manifest(root, man)
     t0 = time.monotonic()
 
     def on_level(level, stats):
@@ -409,7 +509,9 @@ class Explorer:
         if ov is not None and ov.get("detail") is not None:
             rec["overlay_children"] = ov["record"].get("children") or []
             rec["overlay"] = {"expanded_at": ov.get("expanded_at"), "replayed": ov.get("replayed"),
-                              "replay_exact": ov.get("replay_exact"), "quarters": ov.get("quarters")}
+                              "replay_exact": ov.get("replay_exact"), "quarters": ov.get("quarters"),
+                              "model_changed": bool(ov.get("model_changed")),
+                              "model_fit": ov.get("model_fit") or MA.short_version(ov.get("model_version"))}
         for ch in rec.get("children") or []:
             if ch.get("status") == "pruned" and self.overlay_entry(ch["key"]) is not None:
                 ch["overlay"] = "expanded"
@@ -492,11 +594,32 @@ class Explorer:
         """The pinned facts the build started with (so a later edit of institutions.json cannot change the root)."""
         return self.manifest().get("institutions")
 
+    def model(self):
+        """The adapter this folder was priced with (MA.adapter_for_version): the stub for a stub build, the quarterly
+        stack for a quarterly build whatever MSL_AGENT_MODEL says (a refit of the stack keeps the state layout, so
+        the saved clouds replay; the overlay entry records model_changed), else the default adapter of the same
+        family. A different family cannot extend the folder: ValueError in Chinese."""
+        if self.adapter is not None:
+            return self.adapter
+        m = self.manifest()
+        self.adapter = MA.adapter_for_version((m.get("versions") or {}).get("model_adapter"), is_stub=m.get("stub"),
+                                              what="快照" if self.kind == "snapshot" else "推演")
+        return self.adapter
+
+    def model_changed(self) -> bool:
+        """The adapter that prices on-demand branches is another fit than the one the frozen core was priced with
+        (same family: a refit after the data changed). Equal content identities are the same fit."""
+        built = (self.manifest().get("versions") or {}).get("model_adapter")
+        try:
+            return bool(built) and not MA.same_version(built, self.model())
+        except ValueError:
+            return True
+
     def _engine(self, llm=None, deep_llm=None, tree_kind=None):
         st = self.settings()
         if tree_kind:
             st = dataclasses.replace(st, tree_kind=tree_kind)
-        return T.Engine(st, adapter=self.adapter or MA.load_adapter(), llm=llm, deep_llm=deep_llm,
+        return T.Engine(st, adapter=self.model(), llm=llm, deep_llm=deep_llm,
                         root_accounts=AC.load_root(), institutions=self.institutions())
 
     def _saved_cloud(self, key: str) -> T.Cloud | None:
@@ -579,13 +702,13 @@ class Explorer:
         branch = next(b for b in cons["branches"] if b["id"] == br_id)
         branch = dict(branch)
         q = A.quarter_add(parent.quarter, 1)
-        a0 = eng.model.complete(parent.cloud.state, MA.Given.empty(parent.cloud.n),
-                                T.seed_for(eng.st.seed, parent.key, "a0"))
+        a0 = eng.a0(parent)
         alloc = eng.allocate_cluster(parent, cluster, dec, a0, T.seed_for(eng.st.seed, parent.key,
                                                                           f"alloc|{cluster['head_key']}"))
         bk = eng.build_bk(parent, cluster, dec, a0, alloc, T.seed_for(eng.st.seed, parent.key,
                                                                       f"bk|{cluster['head_key']}"))
         bk["alloc"] = alloc
+        bk = eng.sanitize(parent, q, cluster, bk)
         bk = eng.apply_nature(parent, cluster, bk, dec, {})
         if cl.get("nature") and bk.get("nature") is None:
             bk["nature"] = dict(cl["nature"])
@@ -660,16 +783,18 @@ class Explorer:
         journal = T.Journal(self.overlay / "journal.jsonl", listener=journal_listener)
         cancel = cancel or threading.Event()
         llm = deep = None
-        versions = T.versions(self.adapter or MA.load_adapter())
+        model = self.model()
+        versions = T.versions(model)
         if st.tree_kind == "agent":
             llm = (llm_factory or T.make_llm)(st, cancel=cancel, journal=journal, cache_dir=self.cache_dir,
                                               versions=versions)
             if st.deep_model:
                 deep = (llm_factory or T.make_llm)(st, cancel=cancel, journal=journal, cache_dir=self.cache_dir,
                                                    model=st.deep_model, versions=versions)
-        eng = T.Engine(st, adapter=self.adapter or MA.load_adapter(), llm=llm, deep_llm=deep,
+        eng = T.Engine(st, adapter=model, llm=llm, deep_llm=deep,
                        root_accounts=AC.load_root(), journal=journal, institutions=self.institutions())
         nd, replayed = self.node_with_cloud(key, eng)
+        model_changed = self.model_changed()
         nd.status = "pending"
         journal.emit("expand_started", node=key, quarters=quarters, replayed=replayed)
         try:
@@ -684,7 +809,8 @@ class Explorer:
                 last = qi == quarters - 1
                 kept, pruned, stats = T.reduce_level(cands, EXPAND_BEAM, eps=float(st.eps_merge),
                                                      fact_penalty=float(st.fact_penalty), n=int(st.n_particles),
-                                                     seed=int(st.seed), keep_all=quarters == 1)
+                                                     seed=int(st.seed), keep_all=quarters == 1,
+                                                     scales=eng.key_scales)
                 keep_keys = {c.key for c in kept}
                 for f, children, det in results:
                     f.children = [{"key": c.key, "status": ("leaf" if last else "expanded") if c.key in keep_keys
@@ -718,6 +844,8 @@ class Explorer:
             rec = node.record()
             rec["p_path_own"] = rec["p_path"]
             T.write_json(ent_path, {"record": rec, "detail": det, "expanded_at": now if det is not None else None,
+                                    "model_version": MA.identity(model), "model_changed": model_changed,
+                                    "model_fit": MA.fit_text(model),
                                     "replayed": replayed if node.key == key else None,
                                     "replay_exact": getattr(node, "replay_exact", None) if node.key == key else None,
                                     "quarters": quarters if node.key == key else None, "anchor": key})
@@ -726,7 +854,7 @@ class Explorer:
         for c in saved:                        # every kept node: what the next step expanded, or a final leaf
             if c.cloud is not None:
                 arr, meta = T.cloud_arrays(c.cloud, "c|")
-                arr = {k: (v.astype(np.float32) if v.dtype == np.float64 else v) for k, v in arr.items()}
+                arr = {k: MA.to_float32(v) for k, v in arr.items()}
                 d = self.overlay / "clouds"
                 d.mkdir(parents=True, exist_ok=True)
                 tmp = d / f".{c.key}.{os.getpid()}.tmp.npz"
@@ -808,7 +936,7 @@ def dec_from_detail(det: dict) -> dict:
             oo = {"id": o["id"], "label": o["label"], "p_used": float(o["p_used"] or 0.0), "p_prior": o.get("p_prior"),
                   "magnitude": o.get("magnitude"), "signal": o.get("signal"), "status_quo": bool(o.get("status_quo")),
                   "bin": tuple(o["bin"]) if o.get("bin") else None, "custom": o.get("custom"),
-                  "param": o.get("param")}
+                  "param": o.get("param"), "source": o.get("source")}
             opts.append(oo)
         actors[a["actor"]] = {"id": a["actor"], "zh": a["zh"], "domain": a.get("domain"), "options": opts,
                               "cond_prior": a.get("cond_prior"), "marginal_of_rows": a.get("marginal_of_rows"),
@@ -816,7 +944,8 @@ def dec_from_detail(det: dict) -> dict:
                                               "options": [{"id": o["id"], "label": o["label"], "p": float(o["p"] or 0)}
                                                           for o in d["options"]]} for d in a.get("attributes") or []],
                               "branching": bool(a.get("branching")), "follower_of": a.get("follower_of"),
-                              "cond": a.get("cond"), "flags": a.get("flags") or [], "c": a.get("c", 0.0)}
+                              "cond": a.get("cond"), "flags": a.get("flags") or [], "c": a.get("c", 0.0),
+                              "c_used": a.get("c_used", a.get("c", 0.0)), "prior": dict(a.get("prior") or {})}
         order.append(a["actor"])
     hz = {h: {"m": float(v.get("m") or 0.0), "p": float(v.get("p") or 0.0), "zh": v.get("zh", h)}
           for h, v in (det.get("hazards") or {}).items()}
@@ -833,7 +962,14 @@ def list_snapshots(base: Path | None = None) -> list[dict]:
         if m:
             out.append({k: m.get(k) for k in ("id", "status", "created", "finished", "settings_hash", "stub",
                                               "size_mb", "levels_done", "tree_hash", "pause")} |
-                       {"B": (m.get("settings") or {}).get("B"), "depth": (m.get("settings") or {}).get("depth")})
+                       {"B": (m.get("settings") or {}).get("B"), "depth": (m.get("settings") or {}).get("depth"),
+                        "keep_paths": (m.get("settings") or {}).get("keep_paths"),
+                        "model_kind": (m.get("pricing_model") or {}).get("kind") or ("stub" if m.get("stub") else None),
+                        "model_label": (m.get("pricing_model") or {}).get("label"),
+                        "model_fit": (m.get("pricing_model") or {}).get("fit"),
+                        "pricing_model": {k: (m.get("pricing_model") or {}).get(k) for k in ("kind", "stub", "label",
+                                                                                              "fit", "trial")}
+                        if m.get("pricing_model") else None})
     return out
 
 
@@ -874,6 +1010,8 @@ def main(argv=None) -> int:
     ap.add_argument("--deep-from", type=int, default=8, help="从第几层开始用 --deep-model（默认 8 = 前 8 季用主模型）")
     ap.add_argument("--synth-depth", type=int, default=4)
     ap.add_argument("--no-wait", action="store_true", help="达到用量上限时不等待，直接退出（之后用 --resume 继续）")
+    ap.add_argument("--allow-model-change", action="store_true",
+                    help="继续构建时允许换用新的季度模型拟合（默认拒绝：一棵树只用一次拟合；切换会记在 manifest 与日志里）")
     args = ap.parse_args(argv)
     st = default_settings(args.beam, args.quarters, n_particles=args.particles, K=args.K, seed=args.seed,
                           max_calls=args.max_calls, concurrency=args.concurrency, model=args.model,
@@ -884,20 +1022,31 @@ def main(argv=None) -> int:
     if probs:
         print("设置有错误：" + "；".join(probs), file=sys.stderr)
         return 2
-    if args.resume:
-        try:
-            man0 = read_manifest(snapshot_root(sid))
-        except ValueError as err:
-            print(str(err), file=sys.stderr)
-            return 2
-        if man0 is not None:                  # a resumed build keeps the settings it started with
+    adapter = None
+    done0 = 0
+    try:
+        man0 = read_manifest(snapshot_root(sid)) if args.resume else None
+        if man0 is not None and not man0.get("provisional"):
+            # a resumed build keeps the settings it started with and is priced by the model it was priced with
             st = T.TreeSettings.coerce(man0.get("settings") or st.to_dict())
-    est = full_estimate(st)
+            adapter = folder_adapter(man0, allow_model_change=args.allow_model_change)
+            done0 = int(man0.get("levels_done") or 0)
+        else:
+            adapter = MA.load_adapter()
+        est = full_estimate(st, adapter=adapter, cached_levels=done0)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 2
     print(format_estimate(est, st))
     if args.dry_run:
         return 0
     from ..llm import backend
     real = backend.backend_name() == "claude_code"
+    try:
+        refuse_fallback_stub(adapter)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
+        return 2
     if real and not args.yes:
         if not sys.stdin.isatty():
             print("使用本机 Claude Code 构建快照需要确认：加上 --yes。", file=sys.stderr)
@@ -922,8 +1071,10 @@ def main(argv=None) -> int:
     resume = bool(args.resume)
     while True:
         try:
-            man = build(sid, st, resume=resume, listener=listener, budget_confirmed=True)
-            print(f"快照完成：{snapshot_root(sid)}（{man.get('size_mb')} MB，树哈希 {man.get('tree_hash')}）")
+            man = build(sid, st, resume=resume, listener=listener, budget_confirmed=True, adapter=adapter,
+                        allow_model_change=args.allow_model_change)
+            print(f"快照完成：{snapshot_root(sid)}（{man.get('size_mb')} MB，树哈希 {man.get('tree_hash')}；"
+                  f"定价：{(man.get('pricing_model') or {}).get('label') or '—'}）")
             return 0
         except BuildPaused as err:
             if err.reason == "usage_limit" and not args.no_wait and err.reset_at:

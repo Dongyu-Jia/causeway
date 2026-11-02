@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 
 from ..llm import backend
+from . import model_adapter as MA
 from . import snapshot as S
 from . import tree as T
 
@@ -122,17 +123,21 @@ class JobManager:
             raise NeedsConfirm(T.estimate(st))
         st = dataclasses.replace(st, confirmed=bool(confirm) or not real_backend(),
                                  hard_cap=st.hard_cap if st.hard_cap is not None else T.hard_cap_for(st))
+        adapter = MA.load_adapter()                    # ValueError (400): an explicit model that cannot load
+        if st.tree_kind == "agent":
+            S.refuse_fallback_stub(adapter, "推演")     # real calls are never priced by a fallback stub
         with self.lock:
             if self.active is not None:
                 raise Conflict(self.active["id"])
             rid = new_run_id()
             d = self.run_dir(rid)
             d.mkdir(parents=True, exist_ok=True)
-            from . import model_adapter as MA
-            adapter = MA.load_adapter()
+            info = MA.model_info(adapter)
             meta = {"id": rid, "name": name or st.name or "", "kind": "run", "status": "queued",
                     "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "settings": st.to_dict(),
                     "settings_hash": st.hash(), "versions": T.versions(adapter), "stub": bool(adapter.stub),
+                    "pricing_model": info, "export": T.export_status(info, "full" if st.paths else "none"),
+                    "backend": backend.backend_name(),
                     "estimate": T.estimate(st), "parent_run": parent_run, "pause": None, "error": None}
             T.write_json(d / "run.json", meta)
             self._launch(rid, st, resume=False)
@@ -151,6 +156,9 @@ class JobManager:
                 raise ValueError(f"加深后的深度必须大于 {st.depth} 且不超过 80 季")
             st = dataclasses.replace(st, depth=int(depth))
         est = T.estimate(st, cached_levels=done)
+        adapter = self._adapter_for(r)                 # ValueError (400): the run's fit cannot be loaded or changed
+        if st.tree_kind == "agent":
+            S.refuse_fallback_stub(adapter, "推演")
         if st.tree_kind == "agent" and real_backend() and not confirm:
             raise NeedsConfirm(est)
         spent = T.ledger_size(self.run_dir(rid))
@@ -185,12 +193,15 @@ class JobManager:
         self.write(rid, status="running")
         journal = T.Journal(d / "journal.jsonl")
         try:
-            items = self.read(rid).get("institutions")
+            r0 = self.read(rid)
+            items = r0.get("institutions")
+            adapter = self._adapter_for(r0)
             run = T.TreeRun(st, T.Store(d), journal=journal, cancel=cancel, kill=kill, cache_dir=self.cache_dir,
-                            institutions=items)
+                            institutions=items, adapter=adapter)
             if items is None:
                 self.write(rid, institutions=run.engine.items,
                            accounts_root_hash=(run.engine.root_acc or {}).get("hash"))
+            self.write(rid, transmission=S.engine_transmission(run.engine))
 
             def on_level(level, stats):
                 self.write(rid, levels=run.level_stats, levels_done=level, calls_paid=run.calls_paid(),
@@ -207,7 +218,8 @@ class JobManager:
                     sub = d / "prior_trees" / kind
                     st2 = dataclasses.replace(st, tree_kind=kind, prior_trees=False)
                     r2 = T.TreeRun(st2, T.Store(sub), journal=T.Journal(sub / "journal.jsonl"), cancel=cancel,
-                                   cache_dir=self.cache_dir, institutions=run.engine.items).run(resume=True)
+                                   cache_dir=self.cache_dir, institutions=run.engine.items,
+                                   adapter=adapter).run(resume=True)
                     trees[kind] = {"tree_hash": r2["tree_hash"], "leaves": r2["leaves"]}
                 journal.emit("prior_trees_done", trees=list(trees))
                 self.write(rid, prior_trees=trees)
@@ -228,6 +240,12 @@ class JobManager:
             with self.lock:
                 if self.active is not None and self.active.get("id") == rid:
                     self.active = None
+
+    @staticmethod
+    def _adapter_for(r: dict):
+        """The adapter a run was started with (run.json versions.model_adapter), whatever MSL_AGENT_MODEL or the
+        server's default says now; the exact fit, else ValueError in Chinese (a refit would mix two fits)."""
+        return S.folder_adapter(r, what="推演")
 
     def _schedule_resume(self, rid: str, reset_at: float | None) -> None:
         """Resume once after the reset the CLI announced (the user confirmed the run); never without a reset time."""
@@ -310,7 +328,10 @@ class JobManager:
                         "calls_new": r.get("calls_paid") if r.get("calls_paid") is not None else (r.get("stats") or {}).get("calls_new"),
                         "calls_cached": (r.get("stats") or {}).get("cached"), "levels_done": r.get("levels_done"),
                         "stub": r.get("stub"), "parent_run": r.get("parent_run"), "settings_hash": r.get("settings_hash"),
-                        "pause": r.get("pause")})
+                        "pause": r.get("pause"), "keep_paths": s.get("keep_paths"),
+                        "pricing_model": {k: (r.get("pricing_model") or {}).get(k) for k in ("kind", "stub", "label",
+                                                                                              "fit", "trial")}
+                        if r.get("pricing_model") else None})
         return out
 
     def get(self, rid: str) -> dict:
@@ -325,12 +346,17 @@ class JobManager:
         j = T.Journal(self.run_dir(rid) / "journal.jsonl")
         return {"status": r.get("status"), "events": j.since(int(since)), "pause": r.get("pause"), "seq": j.seq}
 
-    def cached_levels(self, settings) -> int:
+    def cached_levels(self, settings, adapter=None) -> int:
         """Levels of `settings`' tree already in the cache: a saved run or snapshot with the same settings at any depth
         is a prefix of this tree (selection at a level depends only on earlier levels), so its finished levels are
-        exact cache hits (§11.4)."""
+        exact cache hits (§11.4) — but only when it was priced by the same model (every cache key carries the
+        versions: engine, catalogue, accounts, priors, prompts and the model's identity) and called through the
+        same LLM backend. A folder that recorded no backend does not count (the estimate errs on the safe side)."""
         st = T.TreeSettings.coerce(settings)
         want = dataclasses.replace(st, depth=1).hash()
+        adapter = adapter if adapter is not None else MA.load_adapter()
+        vers = T.versions(adapter)
+        be = backend.backend_name()
         best = 0
         folders = []
         if self.runs_dir.exists():
@@ -348,8 +374,11 @@ class JobManager:
                 other = T.TreeSettings.coerce(r["settings"])
             except (TypeError, ValueError):
                 continue
-            if dataclasses.replace(other, depth=1).hash() == want:
-                best = max(best, min(int(r.get("levels_done") or 0), int(st.depth)))
+            if dataclasses.replace(other, depth=1).hash() != want:
+                continue
+            if r.get("versions") != vers or r.get("backend") != be:
+                continue
+            best = max(best, min(int(r.get("levels_done") or 0), int(st.depth)))
         return best
 
     def explorer(self, kind: str, xid: str) -> S.Explorer:
@@ -405,6 +434,10 @@ class JobManager:
         root = S.snapshot_root(sid, self.snaps_dir)
         man = S.read_manifest(root)
         done = int((man or {}).get("levels_done") or 0)
+        # the pricing model before anything runs (400 in Chinese): a resumed build is priced by its own fit, and
+        # real calls are never priced by a fallback stub
+        adapter = S.folder_adapter(man) if (resume and man and not man.get("provisional")) else MA.load_adapter()
+        S.refuse_fallback_stub(adapter)
         if real_backend() and not confirm:
             raise NeedsConfirm(S.full_estimate(dataclasses.replace(st)) if not resume else
                                T.estimate(st, cached_levels=done))
@@ -420,13 +453,17 @@ class JobManager:
                                     "created": time.strftime("%Y-%m-%dT%H:%M:%S"), "spent_calls": 0, "pause": None,
                                     "provisional": True})
         else:
-            S.write_manifest(root, {**(man or {}), "status": "building", "pause": None, "error": None,
-                                    "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
+            # the previous pause stays readable for build() (resume_pause): a "budget" pause the user confirmed
+            # raises the hard cap there (it was cleared here before, so a budget pause could never be resumed)
+            S.write_manifest(root, {**(man or {}), "status": "building", "pause": None,
+                                    "resume_pause": (man or {}).get("pause") or (man or {}).get("resume_pause"),
+                                    "error": None, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
 
         def work():
             try:
                 S.build(sid, dataclasses.replace(st, confirmed=True), resume=resume, base=self.snaps_dir,
-                        cache_dir=self.cache_dir, cancel=cancel, kill=kill, budget_confirmed=True)
+                        cache_dir=self.cache_dir, cancel=cancel, kill=kill, budget_confirmed=True,
+                        adapter=adapter)
             except S.BuildPaused as err:
                 if err.reason == "usage_limit" and self.auto_resume and err.reset_at:
                     delay = max(60.0, err.reset_at - time.time() + 60.0)
