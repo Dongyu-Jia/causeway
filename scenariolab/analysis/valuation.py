@@ -157,10 +157,11 @@ def evaluate(panel: pd.DataFrame, win: ab.Window, variant: dict, n_paths: int, s
     backtest.window_summary and ablation.evaluate, risk assets) plus the P/D the paths end at."""
     plan, vw = ab.window_weights(panel, win, bt.PHASE_MONTHS, "full", MIN_ENS)
     cma, vm = window_engine(win, variant, cache)
+    rev = win.reversion or None                        # the train-end anchors, as the backtest (engine/anchors.py)
     sims = {"cond": simulate(win.db, win.anchor, vw["cond"], plan, n_paths=n_paths, seed=seed, block=BLOCK, cma=cma,
-                             overrides=vw["overrides"], valuation=vm, **config.RESIDUALS),
+                             overrides=vw["overrides"], reversion=rev, valuation=vm, **config.RESIDUALS),
             "uncond": simulate(win.db, win.anchor, vw["prior"], plan, n_paths=n_paths, seed=seed, block=BLOCK, cma=cma,
-                               overrides=vw["overrides_prior"], valuation=vm, **config.RESIDUALS)}
+                               overrides=vw["overrides_prior"], reversion=rev, valuation=vm, **config.RESIDUALS)}
     W = {k: summary.wealth_paths(s.total) for k, s in sims.items()}
     years, A, O = win.years, win.actual, win.oracle
     per, parts = {}, {k: [] for k in ("scenario", "engine", "transmission")}
@@ -1064,9 +1065,8 @@ def notes(ctx: EngineContext, vm: ValuationModel, reg: dict, roic: dict | None =
     out.append("自由现金流代理 = 税后利润 − 非住宅固定投资（占 GDP），没有加回折旧"
                + (f"，{_ym(fcf.index.min())} 以来 {float((fcf < 0).mean()):.0%} 的月份为负" if len(fcf) else "")
                + "，所以看它的变化：资本开支上升会把它压低。")
-    if shiller_end:
-        out.append(f"席勒 CAPE 在他的数据结束（{shiller_end}）之后，盈利按 NIPA 税后利润（按发布月）增长、价格按 CRSP 全市场价格指数"
-                   "外推，只作展示与对照。")
+    if shiller_end:                                   # data/panel.shiller_cape: his own column, no extension
+        out.append(f"席勒 CAPE 直接取自 Shiller 的工作簿（到 {shiller_end}）；之后的月份为空，不再外推。")
     bw = reg.get("by_window") or []
     clipped = [w["train_end"] for w in bw if w.get("kappa_ecm") is not None and w["kappa_ecm"] >= KAPPA_BOUNDS[1]]
     line = (f"公允值回归是水平对水平的回归，变量都很持久：t 值用 Newey-West（{reg.get('hac_lags', VALUATION_HAC_LAGS)} 个月）修正，"

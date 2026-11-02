@@ -24,6 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, jsonio
 from .env import load_dotenv
+from .qmodel import api as qmodel_api
 
 load_dotenv()
 
@@ -1032,6 +1033,10 @@ def agents_cache():
     files = list(root.glob("*/*.json")) if root.exists() else []
     return _json({"entries": len(files), "bytes": sum(p.stat().st_size for p in files)})
 
+
+# 季度模型（试运行）: /api/q/card, /api/q/run, /api/q/run/{id} (SIM_DESIGN §3.9; scenariolab/qmodel/api.py).
+# Included before the static mount, which would otherwise answer every path.
+app.include_router(qmodel_api.router)
 
 app.mount("/", StaticFiles(directory=config.WEB_DIR, html=True), name="web")
 

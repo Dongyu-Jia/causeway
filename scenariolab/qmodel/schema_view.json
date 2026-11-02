@@ -1,0 +1,1825 @@
+{
+ "view": "schema_view/1 (blind)",
+ "card": "card/1 (schema-revise-2 3.0 + SIM_DESIGN)",
+ "note": "盲测视图：只有定义、单位、时点、内生性、翻译器权限与模板的方向；没有日期、幅度、历史足迹",
+ "fields": [
+  {
+   "id": "d_bdlev",
+   "zh": "券商（非银）杠杆变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "Z.1 券商总资产 /（资产 − 负债）的季度对数变动",
+   "keywords": [
+    "券商杠杆",
+    "交易商杠杆",
+    "非银杠杆",
+    "去杠杆",
+    "杠杆"
+   ]
+  },
+  {
+   "id": "d_bs",
+   "zh": "央行资产负债表变动（QE/QT）",
+   "group": "x",
+   "unit": "pp GDP/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 政策（系统+冲击）",
+   "translator": "写原始值（因经济而动）或写冲击 u（干预）",
+   "financial_conditions": null,
+   "definition": "基础货币 / 名义 GDP 的季度变动；备选 Z.1 央行总资产、WALCL"
+  },
+  {
+   "id": "d_bund",
+   "zh": "全球利率（德国 10 年期变动）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "德国 10 年期国债收益率的季度变动；OECD 月度数据是月均，所以是季末月月均对上季末月月均（不是月末值，与 d_y10 的口径不同）；日本作备选",
+   "keywords": [
+    "德国国债",
+    "德债",
+    "欧洲利率",
+    "全球利率",
+    "海外收益率",
+    "外国国债"
+   ]
+  },
+  {
+   "id": "d_corptax",
+   "zh": "企业有效税率变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "100 ×（1 − 税后利润 / 税前账面利润）的季度变动（NIPA）"
+  },
+  {
+   "id": "d_cpbill",
+   "zh": "融资市场压力（商业票据 − 国库券利差变动）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "3 个月商业票据减 3 个月国库券，季均的变动；用变动不用水平（水平随利率放大）",
+   "keywords": [
+    "商业票据",
+    "融资市场",
+    "短期融资",
+    "货币市场",
+    "流动性"
+   ]
+  },
+  {
+   "id": "d_defense",
+   "zh": "国防支出变动",
+   "group": "x",
+   "unit": "pp GDP/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "联邦国防消费与投资 / GDP 的季度变动"
+  },
+  {
+   "id": "d_deficit",
+   "zh": "财政脉冲（联邦赤字/GDP 变动）",
+   "group": "x",
+   "unit": "pp GDP/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 政策（系统+冲击）",
+   "translator": "写原始值（因经济而动）或写冲击 u（干预）",
+   "financial_conditions": null,
+   "definition": "联邦政府净借款（−FGDEF）/ GDP 的季度变动；拆分：系统部分 = 自动稳定器（同季与上季 Δ失业率、同季 Δ工业产出、过去 4 季股票回报（资本利得税收））；冲击 u_def = 相机财政"
+  },
+  {
+   "id": "d_epu",
+   "zh": "经济政策不确定性变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "Baker–Bloom–Davis 新闻 EPU 季均的对数变动",
+   "keywords": [
+    "政策不确定性",
+    "不确定性"
+   ]
+  },
+  {
+   "id": "d_epu_health",
+   "zh": "医疗政策不确定性变动（医疗行业）",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "分类 EPU“医疗”子指数季均的对数变动",
+   "keywords": [
+    "医疗政策",
+    "医保",
+    "药价",
+    "医疗改革"
+   ]
+  },
+  {
+   "id": "d_ff",
+   "zh": "政策利率变动（联邦基金利率）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 政策（系统+冲击）",
+   "translator": "写原始值（因经济而动）或写冲击 u（干预）",
+   "financial_conditions": null,
+   "definition": "季末月的联邦基金利率月均减上季末月；水平不低于 0；零下限期间的宽松不放在这里，而经由 d_y2、d_tp10、d_bs（不再拼接 Wu–Xia 影子利率）；拆分：d_ff = 反应函数（同季服务与商品通胀、失业率与工业产出的变动，期初核心通胀、失业率、利率水平，上季 d_ff 与 d_gz；只在非零下限季度拟合，系统部分删失在 −s_ff）+ u_ff；零下限季度 u_ff = 0（宽松经由 u_bs 与预告路径）"
+  },
+  {
+   "id": "d_gpr",
+   "zh": "地缘政治风险变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "Caldara–Iacoviello 历史 GPR 指数季均的对数变动",
+   "keywords": [
+    "地缘政治",
+    "地缘",
+    "战争",
+    "冲突",
+    "恐袭"
+   ]
+  },
+  {
+   "id": "d_hpi",
+   "zh": "房价增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "Freddie Mac 全国房价指数（季调）的年化增长",
+   "keywords": [
+    "房价",
+    "住房价格",
+    "楼市"
+   ]
+  },
+  {
+   "id": "d_igrea",
+   "zh": "全球实际活动（外需）",
+   "group": "x",
+   "unit": "指数/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1c 商品价格",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "Kilian 全球实际经济活动指数季均的变动",
+   "keywords": [
+    "全球需求",
+    "全球经济",
+    "外需",
+    "全球活动",
+    "航运"
+   ]
+  },
+  {
+   "id": "d_infexp1",
+   "zh": "短期通胀预期变动（密歇根 1 年）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "密歇根 1 年通胀预期季均的变动",
+   "keywords": [
+    "通胀预期",
+    "预期通胀"
+   ]
+  },
+  {
+   "id": "d_infexp_lr",
+   "zh": "长期通胀预期变动（去锚/再锚的新闻）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "密歇根 5–10 年通胀预期中位数季均的变动",
+   "keywords": [
+    "长期通胀预期",
+    "通胀预期",
+    "去锚",
+    "脱锚",
+    "预期锚"
+   ]
+  },
+  {
+   "id": "d_itinv",
+   "zh": "IT 设备与软件实际投资增长（通用技术资本开支）",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际信息处理设备与软件投资（数量指数）的年化增长"
+  },
+  {
+   "id": "d_lf",
+   "zh": "劳动力增长（含人口与移民）",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "民用劳动力季均的年化增长；每年 1 月人口控制数造成断点，用 4 季平均或剔除 1 月跳变；参与率变动不另设字段（劳动力 = 人口 × 参与率）"
+  },
+  {
+   "id": "d_lprod",
+   "zh": "劳动生产率增长（非农）",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "非农企业部门每小时产出的年化增长"
+  },
+  {
+   "id": "d_lshare",
+   "zh": "劳动收入占比变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "非农企业部门劳动收入占比（指数）的季度对数变动；与单位劳动成本是恒等式，二者只留一个"
+  },
+  {
+   "id": "d_metals_oil",
+   "zh": "基础金属/油价（区分油价的供给与需求）",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1c 商品价格",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "世界银行基础金属指数 / 原油均价 的季度对数变动",
+   "keywords": [
+    "金属",
+    "铜",
+    "工业金属"
+   ]
+  },
+  {
+   "id": "d_natgas",
+   "zh": "天然气价格",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1c 商品价格",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "天然气 PPI 季均的对数变动；亨利港现货作备选",
+   "keywords": [
+    "天然气",
+    "气价"
+   ]
+  },
+  {
+   "id": "d_perstax",
+   "zh": "个人所得税负担变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 政策（系统+冲击）",
+   "translator": "写原始值（因经济而动）或写冲击 u（干预）",
+   "financial_conditions": null,
+   "definition": "个人经常性税收 / 个人收入 的季度变动；拆分：系统部分 = 过去 4 季股票回报（已实现资本利得的税收）、同季 Δ失业率与 Δ工业产出、上季 d_perstax；冲击 u_ptax = 税法变化"
+  },
+  {
+   "id": "d_sent",
+   "zh": "消费者信心变动（密歇根）",
+   "group": "x",
+   "unit": "指数点/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "密歇根消费者信心季末值的变动",
+   "keywords": [
+    "消费者信心",
+    "信心",
+    "消费者情绪",
+    "情绪"
+   ]
+  },
+  {
+   "id": "d_tariff",
+   "zh": "有效关税率变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "海关关税收入 / 商品进口额 的季度变动"
+  },
+  {
+   "id": "d_transfers",
+   "zh": "转移支付变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 政策（系统+冲击）",
+   "translator": "写原始值（因经济而动）或写冲击 u（干预）",
+   "financial_conditions": null,
+   "definition": "个人经常性转移收入 / 个人收入 的季度变动；拆分：系统部分 = 自动稳定器（同季与上季 Δ失业率、Δ工业产出）；冲击 u_tr = 相机转移（支票、UBI）"
+  },
+  {
+   "id": "d_usd_em",
+   "zh": "美元对新兴市场货币（EM 压力）",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "美元对其他重要贸易伙伴指数接美元对新兴经济体指数的季度对数变动",
+   "keywords": [
+    "新兴市场货币",
+    "新兴市场汇率",
+    "新兴市场",
+    "本币贬值"
+   ]
+  },
+  {
+   "id": "x_lending_std",
+   "zh": "银行放贷标准（信贷供给）",
+   "group": "x",
+   "unit": "%",
+   "timing": "滞后一季",
+   "endogeneity": "E2 调查/新闻",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "SLOOS：对大中型企业收紧工商业贷款标准的银行净占比",
+   "keywords": [
+    "放贷标准",
+    "信贷标准",
+    "惜贷",
+    "信贷收紧",
+    "银行放贷"
+   ]
+  },
+  {
+   "id": "x_oil_cause",
+   "zh": "油价变动的原因（需求 / 供给）",
+   "group": "x",
+   "unit": "枚举 supply / demand / mixed",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "本季油价变动的原因：supply（供给推动）/ demand（需求推动）/ mixed（两者都有）。QTable 只写这三个词，不再写 0/1（翻译器与 qdata 的 0/1 约定相反）。模型里的数值：demand = 0、mixed = 0.5、supply = 1（qdata 的约定；智能体的 Given 用这个浮点数）。训练标签按无参数规则从数据取：油价与 Kilian 全球活动同向 = demand，反向 = supply；情景里由叙事写明（如“产油国卷入战争”= supply、“需求崩溃”= demand）。资产方程里 d_oil 拆成 d_oil × 1{需求} 与 d_oil × 1{供给} 两个载荷",
+   "enum": [
+    "supply",
+    "demand",
+    "mixed"
+   ]
+  },
+  {
+   "id": "x_supply_chain",
+   "zh": "供应链压力",
+   "group": "x",
+   "unit": "扩散指数",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "费城联储制造业调查交货时间扩散指数季均；GSCPI作刻度对照"
+  },
+  {
+   "id": "d_capex",
+   "zh": "实际企业投资增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际非住宅固定投资（数量指数）的年化增长"
+  },
+  {
+   "id": "d_chargeoff",
+   "zh": "银行贷款核销率变动（信用损失）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "全部商业银行全部贷款核销率（年化）的季度变动"
+  },
+  {
+   "id": "d_cons_goods",
+   "zh": "实际商品消费增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际商品消费（数量指数）季均的年化增长"
+  },
+  {
+   "id": "d_cons_serv",
+   "zh": "实际服务消费增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际服务消费（数量指数）季均的年化增长"
+  },
+  {
+   "id": "d_core",
+   "zh": "核心通胀",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "核心 CPI 季度对数变动（年化）；用来滚动更新 s_core_yoy 与体制标志"
+  },
+  {
+   "id": "d_cpi_goods",
+   "zh": "商品通胀",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "CPI 商品季度对数变动（年化）"
+  },
+  {
+   "id": "d_cpi_serv",
+   "zh": "服务通胀",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "CPI 服务季度对数变动（年化）"
+  },
+  {
+   "id": "d_cre",
+   "zh": "商业地产价格变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "Z.1 商业地产价格指数的季度对数变动（评估平滑）",
+   "keywords": [
+    "商业地产",
+    "写字楼",
+    "商业不动产"
+   ]
+  },
+  {
+   "id": "d_exports",
+   "zh": "实际出口增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际出口（链式美元）的年化增长"
+  },
+  {
+   "id": "d_gz",
+   "zh": "GZ 信用利差变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（必填其一）",
+   "definition": "GZ 利差（含违约风险）的季度变动",
+   "keywords": [
+    "信用利差",
+    "公司债利差",
+    "GZ",
+    "高收益",
+    "信用"
+   ]
+  },
+  {
+   "id": "d_ip",
+   "zh": "工业产出增长",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "工业产出季末对数变动"
+  },
+  {
+   "id": "d_oil",
+   "zh": "油价变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E1c 商品价格",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "WTI 季末对数变动",
+   "keywords": [
+    "油价",
+    "原油",
+    "石油"
+   ]
+  },
+  {
+   "id": "d_profits",
+   "zh": "企业税后账面利润增长（NIPA CP）",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "NIPA 税后企业利润（FRED CP：不含 IVA 与 CCAdj 的账面利润，含存货持有收益；比含调整的 CPATAX 更接近指数的会计盈利）的季度对数变动"
+  },
+  {
+   "id": "d_resinv",
+   "zh": "实际住宅投资增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际住宅投资（数量指数）的年化增长"
+  },
+  {
+   "id": "d_rgdp",
+   "zh": "实际 GDP 增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "实际 GDP 的年化增长"
+  },
+  {
+   "id": "d_spread",
+   "zh": "Baa − 10 年利差变动（计时修正后）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（必填其一）",
+   "definition": "Baa 与 10 年期同一时点取值的利差变动（FWT D1 修正）",
+   "keywords": [
+    "信用利差",
+    "公司债利差",
+    "Baa",
+    "评级利差",
+    "信用"
+   ]
+  },
+  {
+   "id": "d_tips10",
+   "zh": "10 年 TIPS 实际收益率变动（黄金）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "10 年 TIPS 收益率季末变动；名义 = 实际 + 盈亏平衡通胀",
+   "keywords": [
+    "实际利率",
+    "实际收益率",
+    "TIPS",
+    "通胀保值"
+   ]
+  },
+  {
+   "id": "d_tp10",
+   "zh": "10 年期限溢价变动（ACM）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "ACM 10 年期限溢价季末变动；核心通胀 > 4% 时的交互项已在 F 中",
+   "keywords": [
+    "期限溢价",
+    "长端溢价",
+    "债券义警",
+    "长债"
+   ]
+  },
+  {
+   "id": "d_unrate",
+   "zh": "失业率变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "失业率季末变动"
+  },
+  {
+   "id": "d_usd",
+   "zh": "美元变动",
+   "group": "x",
+   "unit": "log%/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "贸易加权美元季末对数变动",
+   "keywords": [
+    "美元",
+    "汇率"
+   ]
+  },
+  {
+   "id": "d_wage",
+   "zh": "工资增长",
+   "group": "x",
+   "unit": "%年化",
+   "timing": "同季·实现",
+   "endogeneity": "E0 外生宏观",
+   "translator": "可写",
+   "financial_conditions": null,
+   "definition": "生产与非管理人员平均时薪季末年化增长"
+  },
+  {
+   "id": "d_y10",
+   "zh": "10 年期收益率变动",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "10 年期国债季末收益率变动",
+   "keywords": [
+    "10 年期",
+    "十年期",
+    "长期利率",
+    "长端",
+    "国债收益率",
+    "长债收益率"
+   ]
+  },
+  {
+   "id": "d_y2",
+   "zh": "2 年期收益率变动（预期政策路径）",
+   "group": "x",
+   "unit": "pp/季",
+   "timing": "同季·市场/调查预期",
+   "endogeneity": "E1 金融市场",
+   "translator": "只在文字明说时（数字或定性幅度）",
+   "financial_conditions": "金融条件（可选）",
+   "definition": "2 年期国债季末收益率变动；预期政策路径的变化 = d_y2 − d_ff（两条腿都留，不另设字段）",
+   "keywords": [
+    "2 年期",
+    "两年期",
+    "短端",
+    "加息预期",
+    "降息预期",
+    "利率预期"
+   ]
+  },
+  {
+   "id": "u_ff",
+   "zh": "政策利率冲击",
+   "group": "u",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 冲击",
+   "translator": "只在文字写明“干预”时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "d_ff 减去系统部分（反应函数或自动稳定器，拟合到训练期末）：只在文字写明干预时给"
+  },
+  {
+   "id": "u_bs",
+   "zh": "资产负债表冲击",
+   "group": "u",
+   "unit": "pp GDP/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 冲击",
+   "translator": "只在文字写明“干预”时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "d_bs 减去系统部分（反应函数或自动稳定器，拟合到训练期末）：只在文字写明干预时给"
+  },
+  {
+   "id": "u_def",
+   "zh": "赤字冲击",
+   "group": "u",
+   "unit": "pp GDP/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 冲击",
+   "translator": "只在文字写明“干预”时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "d_deficit 减去系统部分（反应函数或自动稳定器，拟合到训练期末）：只在文字写明干预时给"
+  },
+  {
+   "id": "u_tr",
+   "zh": "转移支付冲击",
+   "group": "u",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 冲击",
+   "translator": "只在文字写明“干预”时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "d_transfers 减去系统部分（反应函数或自动稳定器，拟合到训练期末）：只在文字写明干预时给"
+  },
+  {
+   "id": "u_ptax",
+   "zh": "个人税冲击",
+   "group": "u",
+   "unit": "pp/季",
+   "timing": "同季·实现",
+   "endogeneity": "E0p 冲击",
+   "translator": "只在文字写明“干预”时（数字或定性幅度）",
+   "financial_conditions": null,
+   "definition": "d_perstax 减去系统部分（反应函数或自动稳定器，拟合到训练期末）：只在文字写明干预时给"
+  },
+  {
+   "id": "s_cape",
+   "zh": "起点估值：log 席勒 CAPE",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_fcfy",
+   "zh": "自由现金流收益率（非金融公司）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_infexp_lr",
+   "zh": "长期通胀预期（锚定程度）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_nfc_debt",
+   "zh": "非金融企业债务/GDP",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_oil_real",
+   "zh": "实际油价水平（log WTI/CPI）",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_payout",
+   "zh": "总净派现收益率（股息 + 回购 − 新发行）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_pd",
+   "zh": "log 市价/股息（CRSP；各行业自身 P/D）",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_pe",
+   "zh": "起点倍数：log P/Ê（CRSP 季末价格 / 4 季平均的滚动 12 个月 EPS）",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_policy_gap",
+   "zh": "政策立场缺口（实际政策利率 − r*）",
+   "group": "s",
+   "unit": "pp",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_pshare",
+   "zh": "税后企业账面利润/GDP 水平",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_real_y10",
+   "zh": "10 年实际收益率",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_rstar",
+   "zh": "中性实际利率 r*（HLW 单边估计）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_trend_g",
+   "zh": "趋势增长（HLW g）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_usd_real",
+   "zh": "实际美元水平（广义实际汇率）",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_w",
+   "zh": "行业市值权重（指数构成）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_core_yoy",
+   "zh": "核心 CPI 同比（派生：高通胀体制 s_infl_regime = 核心 > 4%）",
+   "group": "s",
+   "unit": "% / 0-1",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_ecyc",
+   "zh": "盈利周期位置 log(Ê/E10)",
+   "group": "s",
+   "unit": "log",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_ff",
+   "zh": "政策利率水平（联邦基金利率）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_infexp1",
+   "zh": "短期通胀预期水平（密歇根 1 年）",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_spread",
+   "zh": "信用利差水平（Baa − 10 年）",
+   "group": "s",
+   "unit": "pp",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_term",
+   "zh": "期限利差（10 年 − 政策利率）",
+   "group": "s",
+   "unit": "pp",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "s_unrate",
+   "zh": "失业率",
+   "group": "s",
+   "unit": "%",
+   "timing": "期初（前定）",
+   "endogeneity": "状态",
+   "translator": "不可写（数据）；反事实起点只在实验室",
+   "financial_conditions": null
+  },
+  {
+   "id": "a_oil",
+   "zh": "实际油价锚移位",
+   "group": "c",
+   "unit": "log",
+   "timing": "情景路径（假设）",
+   "endogeneity": "情景参数",
+   "translator": "可写（有默认值）",
+   "financial_conditions": null,
+   "definition": "实际油价长期目标（训练期中位数）的 log 移位"
+  },
+  {
+   "id": "a_spread",
+   "zh": "信用利差锚",
+   "group": "c",
+   "unit": "pp",
+   "timing": "情景路径（假设）",
+   "endogeneity": "情景参数",
+   "translator": "可写（有默认值）",
+   "financial_conditions": null,
+   "definition": "Baa − 10 年的长期水平"
+  },
+  {
+   "id": "a_tp",
+   "zh": "期限溢价锚",
+   "group": "c",
+   "unit": "pp",
+   "timing": "情景路径（假设）",
+   "endogeneity": "情景参数",
+   "translator": "可写（有默认值）",
+   "financial_conditions": null,
+   "definition": "10 年期的长期水平 = r* + π_lr + a_tp 中的 a_tp"
+  },
+  {
+   "id": "a_usd",
+   "zh": "实际美元锚移位",
+   "group": "c",
+   "unit": "log",
+   "timing": "情景路径（假设）",
+   "endogeneity": "情景参数",
+   "translator": "可写（有默认值）",
+   "financial_conditions": null,
+   "definition": "实际美元长期目标（训练期均值）的 log 移位"
+  },
+  {
+   "id": "a_ustar",
+   "zh": "失业率锚",
+   "group": "c",
+   "unit": "%",
+   "timing": "情景路径（假设）",
+   "endogeneity": "情景参数",
+   "translator": "可写（有默认值）",
+   "financial_conditions": null,
+   "definition": "失业率的长期水平"
+  }
+ ],
+ "templates": [
+  {
+   "id": "G01",
+   "name": "疫情封锁与重启",
+   "phases": [
+    {
+     "phase": "封锁（1–2 季）",
+     "signs": {
+      "d_cons_serv": "-",
+      "d_lf": "-",
+      "d_unrate": "+",
+      "d_transfers": "+",
+      "d_deficit": "+",
+      "d_bs": "+",
+      "d_ff": "-",
+      "x_supply_chain": "0",
+      "d_oil": "-",
+      "d_epu": "+",
+      "d_gz": "+",
+      "d_sent": "-",
+      "d_rgdp": "-"
+     }
+    },
+    {
+     "phase": "重启（2–4 季）",
+     "signs": {
+      "d_cons_serv": "+",
+      "d_cons_goods": "+",
+      "d_transfers": "-",
+      "x_supply_chain": "+",
+      "d_cpi_goods": "+",
+      "d_hpi": "+"
+     }
+    },
+    {
+     "phase": "通胀与加息（4–8 季）",
+     "signs": {
+      "d_cpi_serv": "+",
+      "d_ff": "+",
+      "d_bs": "-",
+      "d_infexp1": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G02",
+   "name": "能源生产国卷入的战争",
+   "phases": [
+    {
+     "phase": "爆发（1–2 季）",
+     "signs": {
+      "d_gpr": "+",
+      "d_oil": "+",
+      "d_metals_oil": "-",
+      "d_epu": "+",
+      "d_sent": "-",
+      "d_gz": "+",
+      "d_cpi_goods": "+",
+      "d_defense": "+"
+     }
+    },
+    {
+     "phase": "回落（随后 2 季）",
+     "signs": {
+      "d_oil": "-",
+      "s_oil_real": "?",
+      "x_oil_cause": "supply"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G03",
+   "name": "石油供给冲击/禁运",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_oil": "+",
+      "d_metals_oil": "-",
+      "x_supply_chain": "+",
+      "d_cpi_goods": "+",
+      "d_cons_goods": "-",
+      "d_sent": "-",
+      "d_gpr": "+",
+      "d_igrea": "0",
+      "x_oil_cause": "supply"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G04",
+   "name": "银行业恐慌/系统性信用事件",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_gz": "+",
+      "d_cpbill": "+",
+      "d_bdlev": "-",
+      "d_chargeoff": "+",
+      "x_lending_std": "+",
+      "d_ff": "-",
+      "d_bs": "+",
+      "d_unrate": "+",
+      "d_oil": "-",
+      "d_usd": "+",
+      "d_sent": "-",
+      "d_epu": "+",
+      "d_hpi": "-",
+      "x_oil_cause": "demand"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G05",
+   "name": "关税战（对进口征税）",
+   "phases": [
+    {
+     "phase": "加征（1–4 季）",
+     "signs": {
+      "d_tariff": "+",
+      "d_epu": "+",
+      "d_cpi_goods": "+",
+      "d_exports": "-",
+      "d_igrea": "-",
+      "x_supply_chain": "+",
+      "d_usd": "narrative"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G06",
+   "name": "通用技术资本开支繁荣与破裂",
+   "phases": [
+    {
+     "phase": "繁荣（多季）",
+     "signs": {
+      "d_itinv": "+",
+      "d_capex": "+",
+      "d_sent": "+",
+      "d_lprod": "+",
+      "d_lshare": "-",
+      "d_unrate": "-"
+     }
+    },
+    {
+     "phase": "破裂（4–8 季）",
+     "signs": {
+      "d_itinv": "-",
+      "d_capex": "-",
+      "d_profits": "-",
+      "d_gz": "+",
+      "d_epu": "+",
+      "d_sent": "-",
+      "d_lprod": "0",
+      "y_eps": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G07",
+   "name": "财政扩张",
+   "phases": [
+    {
+     "phase": "相机财政写进冲击",
+     "signs": {
+      "u_def": "+",
+      "u_tr": "+",
+      "d_defense": "+",
+      "u_ptax": "-",
+      "d_cons_goods": "+",
+      "d_rgdp": "+",
+      "d_y10": "+",
+      "d_tp10": "+",
+      "d_usd": "+",
+      "d_cpi_goods": "+",
+      "d_unrate": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G08",
+   "name": "量化宽松与缩表",
+   "phases": [
+    {
+     "phase": "QE",
+     "signs": {
+      "u_bs": "+",
+      "d_ff": "0",
+      "d_y2": "-",
+      "d_tp10": "-",
+      "d_gz": "-",
+      "d_usd": "-"
+     }
+    },
+    {
+     "phase": "YCC",
+     "signs": {
+      "u_bs": "+",
+      "d_tp10": "?"
+     }
+    },
+    {
+     "phase": "QT",
+     "signs": {
+      "u_bs": "-",
+      "d_tp10": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G09",
+   "name": "去通胀政策冲击",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_ff": "+",
+      "d_y2": "+",
+      "d_y10": "+",
+      "d_tips10": "+",
+      "d_usd": "+",
+      "d_unrate": "+",
+      "d_infexp1": "-",
+      "d_gz": "+",
+      "d_hpi": "-",
+      "d_resinv": "-",
+      "u_ff": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G10",
+   "name": "房地产泡沫破裂",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_hpi": "-",
+      "d_resinv": "-",
+      "d_gz": "+",
+      "d_unrate": "+",
+      "d_cons_goods": "-",
+      "d_ff": "-"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G11",
+   "name": "强美元时期（原因须写明）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_usd": "+",
+      "d_exports": "-",
+      "d_cpi_goods": "-",
+      "d_oil": "-",
+      "d_metals_oil": "-",
+      "d_ff": "+",
+      "d_gz": "+",
+      "s_usd_real": "?",
+      "a_usd": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G12",
+   "name": "企业减税",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_corptax": "?",
+      "d_deficit": "+",
+      "s_pshare": "+",
+      "d_capex": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G13",
+   "name": "普遍增税（财政整顿）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "u_ptax": "+",
+      "d_corptax": "+",
+      "d_cons_goods": "-",
+      "d_y10": "-",
+      "d_tp10": "-"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G14",
+   "name": "收入从劳动转向资本（自动化替代）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_lshare": "-",
+      "s_pshare": "+",
+      "wc_gap": "-",
+      "d_cons_serv": "-",
+      "d_infexp1": "-",
+      "d_itinv": "+",
+      "d_lprod": "+",
+      "s_rstar": "?",
+      "y_eps": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G15",
+   "name": "新兴市场危机与传染",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_usd_em": "+",
+      "d_gz": "+",
+      "d_igrea": "-",
+      "d_y10": "-",
+      "d_cpbill": "+",
+      "d_metals_oil": "-"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G16",
+   "name": "非银去杠杆/融资市场流动性螺旋",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_bdlev": "-",
+      "d_cpbill": "+",
+      "d_gz": "+",
+      "d_tp10": "±",
+      "d_bund": "±"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G17",
+   "name": "原油供给过剩/价格战",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_oil": "-",
+      "d_metals_oil": "+",
+      "d_gz": "+",
+      "d_chargeoff": "+",
+      "d_usd": "±",
+      "x_oil_cause": "supply",
+      "d_igrea": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G18",
+   "name": "期限溢价冲击/债券义警",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_tp10": "+",
+      "d_y10": "+",
+      "d_bund": "+",
+      "d_usd": "±",
+      "d_y2": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G19",
+   "name": "需求推动的大宗商品繁荣",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_igrea": "+",
+      "d_oil": "+",
+      "d_exports": "+",
+      "d_usd": "-",
+      "d_cpi_goods": "+",
+      "d_metals_oil": "+-",
+      "x_oil_cause": "demand"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G20",
+   "name": "财政整顿/和平红利",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_deficit": "-",
+      "d_defense": "-",
+      "d_perstax": "+",
+      "d_tp10": "-",
+      "d_y10": "-",
+      "u_def": "-",
+      "u_ptax": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G21",
+   "name": "政策/政治不确定性冲击",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_epu": "+",
+      "d_gz": "+",
+      "d_sent": "-",
+      "d_tp10": "±",
+      "d_gpr": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G22",
+   "name": "通胀预期去锚",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_infexp1": "+",
+      "d_infexp_lr": "+",
+      "d_cpi_serv": "+",
+      "d_wage": "+",
+      "d_tp10": "+",
+      "d_usd": "-",
+      "s_infexp_lr": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G23",
+   "name": "信贷紧缩/银行资本约束",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "x_lending_std": "+",
+      "d_chargeoff": "+",
+      "d_gz": "+",
+      "d_cpbill": "+",
+      "d_hpi": "-",
+      "d_cre": "-",
+      "d_capex": "-"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G24",
+   "name": "医疗政策冲击",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_epu_health": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G25",
+   "name": "生产率浪潮（增强型技术）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_lprod": "+",
+      "d_itinv": "+",
+      "d_lshare": "0",
+      "d_wage": "+",
+      "s_trend_g": "?",
+      "s_rstar": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G26",
+   "name": "劳动供给冲击（移民/人口）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_lf": "±",
+      "d_wage": "+",
+      "d_cpi_serv": "+",
+      "d_hpi": "±",
+      "s_trend_g": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G27",
+   "name": "自然灾害与基础设施中断",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_natgas": "+",
+      "d_oil": "+",
+      "x_supply_chain": "+",
+      "d_cpi_goods": "+",
+      "d_deficit": "+",
+      "d_cpbill": "+",
+      "d_gz": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G28",
+   "name": "行业监管与行政定价",
+   "phases": [
+    {
+     "phase": "可测部分",
+     "signs": {
+      "d_epu_health": "?",
+      "x_lending_std": "?",
+      "d_corptax": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G29",
+   "name": "主权与制度风险（债务上限、央行独立性、财政主导）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_epu": "+",
+      "d_tp10": "+",
+      "d_usd": "-",
+      "d_gz": "+",
+      "d_infexp_lr": "+",
+      "s_infexp_lr": "+",
+      "s_policy_gap": "-",
+      "a_tp": "+",
+      "a_usd": "-",
+      "s_debt": "?",
+      "s_int_burden": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G30",
+   "name": "估值重估（泡沫的倍数部分）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "y_mult": "?",
+      "d_tips10": "?",
+      "d_y10": "?",
+      "d_infexp_lr": "?",
+      "d_gz": "?",
+      "y_eps": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G31",
+   "name": "全球利率冲击（欧债、JGB、政策分化）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_bund": "±",
+      "d_usd": "±",
+      "d_tp10": "±",
+      "d_gz": "+",
+      "d_cpbill": "+"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G32",
+   "name": "长期停滞（零利率与低通胀）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_ff": "-",
+      "d_bs": "+",
+      "d_cpi_goods": "-",
+      "d_cpi_serv": "-",
+      "d_unrate": "+",
+      "d_hpi": "-",
+      "d_cre": "-",
+      "d_capex": "-",
+      "s_rstar": "-",
+      "s_trend_g": "-",
+      "s_infexp_lr": "-"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G33",
+   "name": "银行久期错配与存款挤兑",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "s_bank_dur": "?",
+      "x_lending_std": "+",
+      "d_bs": "+",
+      "d_cre": "-",
+      "d_ff": "?",
+      "d_y2": "-",
+      "d_gz": "?",
+      "d_cpbill": "?"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G34",
+   "name": "加息而不衰退（传导偏弱）",
+   "phases": [
+    {
+     "phase": "",
+     "signs": {
+      "d_ff": "+",
+      "d_y2": "+",
+      "d_y10": "+",
+      "d_tips10": "+",
+      "d_unrate": "0",
+      "d_cons_goods": "?",
+      "d_cons_serv": "0",
+      "u_ff": "0"
+     }
+    }
+   ]
+  },
+  {
+   "id": "G35",
+   "name": "政策干预（被迫降息、刺激、YCC）",
+   "phases": [
+    {
+     "phase": "只写干预",
+     "signs": {
+      "u_ff": "-",
+      "u_def": "?",
+      "u_tr": "+",
+      "u_bs": "+",
+      "d_tp10": "?",
+      "s_infexp_lr": "?",
+      "s_policy_gap": "?"
+     }
+    }
+   ]
+  }
+ ],
+ "never_inputs": [
+  "s_bank_dur",
+  "s_debt",
+  "s_foreign_hold",
+  "s_gold_real",
+  "s_hh_debt",
+  "s_house_pr",
+  "s_int_burden",
+  "s_it_share",
+  "s_lshare",
+  "s_old65",
+  "s_tdsp",
+  "wc_gap",
+  "y_assets",
+  "y_eps",
+  "y_fund",
+  "y_mult",
+  "y_pd"
+ ],
+ "vocabulary": {
+  "size_bins_sd": {
+   "小": 0.25,
+   "温和": 0.5,
+   "明显": 1.0,
+   "大幅": 2.0,
+   "极端": 3.0
+  },
+  "fc_stances": [
+   "明显收紧",
+   "收紧",
+   "中性",
+   "宽松",
+   "明显宽松",
+   "未说明"
+  ],
+  "sources_of_values": [
+   "stated",
+   "stated_qual",
+   "derived"
+  ],
+  "valuation_modes": [
+   "inferred",
+   "hold",
+   "rerate"
+  ],
+  "valuation_sizes": [
+   "温和",
+   "明显",
+   "极端"
+  ],
+  "regime_labels": [
+   "expansion",
+   "inflation",
+   "deflation",
+   "recession",
+   "depression",
+   "stagflation",
+   "contraction",
+   "high_infl"
+  ],
+  "anchors": [
+   "r_star",
+   "pi_lr",
+   "a_tp",
+   "a_spread",
+   "a_ustar",
+   "a_oil",
+   "a_usd"
+  ],
+  "quote_max_chars": 120
+ }
+}

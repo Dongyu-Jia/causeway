@@ -21,7 +21,9 @@ variant sees the same seeds, so the factor draws are common random numbers
 and only what the variant changes differs). The baseline is the engine before
 the adoption (coupled residuals); the variant that matches config.RESIDUALS
 (partial_50 since its adoption) reproduces backtest.json exactly at `seed`
-alone (settings.engine_reproduces_backtest).
+alone (settings.engine_reproduces_backtest). Like the backtest, every window
+simulates with the long-run anchors knowable at its train end
+(engine/anchors.py), not DEFAULT_REVERSION.
 
 Selection (selection.rule): only engine variants (H1, H4, H6) can be adopted;
 H2 and H3 change how the backtest encodes the realized macro, which the
@@ -55,6 +57,7 @@ import pandas as pd
 from .. import config, jsonio
 from ..context import EngineContext
 from ..engine import residuals, summary
+from ..engine.anchors import window_reversion
 from ..engine.factor_model import AssetFactorModel, ModelSpec
 from ..engine.pooling import BLOCK, MIN_ENS, MIN_EPISODES, pool_phase
 from ..engine.simulate import capital_market_assumptions, simulate
@@ -175,10 +178,12 @@ class Window:
     sys_actual: dict                    # annual mean factor-explained price return on the actual path
     cmas: dict
     weights: dict = field(default_factory=dict)   # (phase_months, views, min_ens) -> (plan, cond, ep)
+    reversion: dict = field(default_factory=dict)  # simulate()'s reversion: the anchors knowable at the train end
 
 
 def setup_window(panel: pd.DataFrame, spec: ModelSpec, w: dict) -> Window:
-    """Fit on training months only (backtest.fit_window) and fix the actual and oracle paths."""
+    """Fit on training months only (backtest.fit_window), fix the actual and oracle paths and the long-run
+    anchors knowable at the train end (engine/anchors.py, as backtest.window_setup)."""
     train_end = pd.Timestamp(w["train_end"])
     months = panel.loc[w["test"][0]:w["test"][1] or panel.index.max()].index
     model, db, anchor = bt.fit_window(panel, spec, train_end)
@@ -187,7 +192,8 @@ def setup_window(panel: pd.DataFrame, spec: ModelSpec, w: dict) -> Window:
     pred = bt.predict(model, panel).loc[months]
     sys_actual = {a: float(pred[a].mean() * 12.0) for a in RISK}
     cmas = {m: capital_market_assumptions(db, anchor, method=m) for m in ("historical", "valuation_adjusted")}
-    return Window(w, months, len(months) / 12.0, model, db, anchor, actual, oracle, sys_actual, cmas)
+    return Window(w, months, len(months) / 12.0, model, db, anchor, actual, oracle, sys_actual, cmas,
+                  reversion=window_reversion(panel, train_end))
 
 
 def window_weights(panel: pd.DataFrame, win: Window, phase_months: int, views: str, min_ens: float):
@@ -214,10 +220,11 @@ def evaluate(panel: pd.DataFrame, win: Window, params: dict, n_paths: int, seed:
     plan, vw = window_weights(panel, win, p["phase_months"], p["views"], p["min_ens"])
     cond_w, ep = vw["cond"], vw["ep"]
     db, cma, kw = win.db, win.cmas[p["cma"]], sim_kwargs(p)
+    rev = win.reversion or None
     sims = {"cond": simulate(db, win.anchor, cond_w, plan, n_paths=n_paths, seed=seed, block=BLOCK, cma=cma,
-                             overrides=vw["overrides"], **kw),
+                             overrides=vw["overrides"], reversion=rev, **kw),
             "uncond": simulate(db, win.anchor, vw["prior"], plan, n_paths=n_paths, seed=seed,
-                               block=BLOCK, cma=cma, overrides=vw["overrides_prior"], **kw)}
+                               block=BLOCK, cma=cma, overrides=vw["overrides_prior"], reversion=rev, **kw)}
     W = {k: summary.wealth_paths(s.total) for k, s in sims.items()}
     drawn = residuals.draw(db, sims["cond"].idx, cond_w, plan, BLOCK, seed, mode=p["resid_mode"],
                            window=p["resid_window"], coupling=p["resid_coupling"])

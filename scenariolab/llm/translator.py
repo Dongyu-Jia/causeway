@@ -73,6 +73,20 @@ VIEW_KEYS = ("mean", "mean_annual", "shift_sd", "min", "max", "vol_mult")
 TARGETS = ("mean", "mean_annual", "shift_sd")       # ep.apply_views uses the first one present
 REFERENCE_FACTORS = ("f_oil", "f_ip", "f_cpi", "f_ff", "f_y10", "f_spread", "f_unrate")
 VALUATION_VARS = ("f_valuation", "s_div_yield", "f_cape", "s_cape")   # views here come close to dictating equity prices
+# Partly endogenous view variables (SIM_DESIGN §2 E19 and §7.3, P0.4): market prices and survey or news indices
+# whose quarterly change same-quarter asset returns explain to a large part (adjusted R² on the ten asset returns,
+# 1973-2026: the critique's c20 where it has the variable, the layers round's l01 otherwise). A view on one comes
+# close to stating the asset outcome, so the translator should set it only where the narrative states it, with
+# the narrative's magnitude (the research round's translations chose "取历史下沿附近" magnitudes for sentiment).
+ENDOGENOUS_VIEWS = {
+    "f_spread": ("市场价格", 0.32), "s_spread": ("市场价格", 0.32),
+    "f_gz": ("市场价格", 0.40), "s_gz": ("市场价格", 0.40), "s_ebp": ("市场价格", 0.31),
+    "f_sentiment": ("调查指数", 0.24), "s_sentiment": ("调查指数", 0.24),
+    "s_claims": ("每周公布的劳动市场数据", 0.21), "s_epu": ("新闻指数", 0.19),
+}
+# production: the lab and the API; test: the narrative test's translations, where a view on a VALUATION_VARS
+# variable is refused (a valuation statement is a stated price path, SIM_DESIGN §6.3 and §7.3)
+MODES = ("production", "test")
 DEFAULT_OVERRIDE_WHY = "历史样本中没有先例的结构性效应（理由见 narrative）"
 DRIFT_UNITS = {"Δlog": "Δlog/年", "Δpp": "pp/年", "Δ": "点/年"}
 BACKENDS = ("claude_code", "api", "mock")
@@ -545,6 +559,38 @@ def valuation_rule() -> str:
             "不进资产模型，只用来挑选历史月份。")
 
 
+def _var_name(var: str) -> str:
+    """The Chinese name of a view variable (config.STATES / config.FACTORS), or the id itself."""
+    if var.startswith("s_"):
+        return STATE_NAMES.get(var[2:], var)
+    if var.startswith("f_"):
+        return FACTOR_INFO.get(var[2:], {}).get("name", var)
+    return var
+
+
+def endogenous_view_text(k: int, var: str) -> str:
+    """The warning on a view of a partly endogenous variable (ENDOGENOUS_VIEWS)."""
+    kind, r2 = ENDOGENOUS_VIEWS[var]
+    return (f"阶段 {k}：{var}（{_var_name(var)}）是{kind}，同季资产回报能解释它约 {r2:.0%} 的季度变化（部分内生）："
+            "对它设视图接近直接假设资产结果，只有叙事明确写了它才该设定，幅度也要来自叙事")
+
+
+def valuation_refusal_text(k: int, var: str) -> str:
+    """Test mode: why a view on a valuation variable was removed."""
+    return f"阶段 {k}：{var} 是估值变量，估值假设相当于直接假设股价；检验模式下不接受这类视图，已删除"
+
+
+def endogenous_rule() -> str:
+    """The prompt sentence on the partly endogenous view variables (ENDOGENOUS_VIEWS), grouped by kind."""
+    kinds: dict[str, list[str]] = {}
+    for var, (kind, _) in ENDOGENOUS_VIEWS.items():
+        kinds.setdefault(kind, []).append(var)
+    groups = "，".join(f"{'、'.join(vs)} 是{kind}" for kind, vs in kinds.items())
+    r2 = [r for _, r in ENDOGENOUS_VIEWS.values()]
+    return (f"{groups}：同季资产回报能解释它们约 {min(r2):.0%}–{max(r2):.0%} 的季度变化，对它们设视图接近直接假设资产结果。"
+            "只在叙事明确写了信用条件、信心、申领或政策不确定性时才设，幅度要来自叙事，不要自己挑选（例如“取历史下沿附近”）。")
+
+
 def _interaction_text(rule: dict) -> str:
     """「上月核心 CPI 同比 > 4%」 from a config.FACTORS interaction rule."""
     lag = int(rule["lag"])
@@ -687,11 +733,20 @@ def regime_rule(ctx: "EngineContext") -> str:
     return regime_views.translator_rule(ctx.db, regime_studies(ctx))
 
 
+def valuation_view_rule(mode: str = "production") -> str:
+    """Hard rule 2's sentence on the valuation variables: allowed with care in production, refused in test mode."""
+    names = "、".join(VALUATION_VARS)
+    if mode == "test":
+        return (f"检验模式下不接受 {names} 的视图（估值假设相当于直接假设股价），写了也会被删除。")
+    return f"也不要用 {names} 等估值变量间接规定股市涨跌，除非叙事本身就是估值重估（泡沫形成或破裂），且幅度温和。"
+
+
 def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
-                        examples: list[dict] | None = None) -> str:
+                        examples: list[dict] | None = None, mode: str = "production") -> str:
     """Role, hard rules, engine semantics, variable support, today's state, eras, bounds and examples.
 
-    Deterministic for a given build (no timestamps, fixed ordering) so prompt caching hits.
+    Deterministic for a given build (no timestamps, fixed ordering) so prompt caching hits. `mode` "test" (the
+    narrative test) states that valuation views are refused (MODES).
     """
     frame = ctx.db.frame
     rows = variable_table(ctx)
@@ -746,8 +801,8 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
         "## 硬性规则",
         "",
         "1. 只输出符合给定 JSON schema 的情景规格，不要输出其他文字。",
-        "2. views 只能使用下方变量表中的变量。不得对资产收益或价格设视图（没有 r_、p_ 变量）；也不要用 f_valuation、"
-        "s_div_yield、f_cape、s_cape 等估值变量间接规定股市涨跌，除非叙事本身就是估值重估（泡沫形成或破裂），且幅度温和。",
+        "2. views 只能使用下方变量表中的变量。不得对资产收益或价格设视图（没有 r_、p_ 变量）；" + valuation_view_rule(mode)
+        + endogenous_rule(),
         f"3. 优先刻画根因：{root}。通胀、增长、就业和资产表现应当经由引擎从根因传导出来，而不是逐个规定结果。",
         "4. 留在历史支撑之内：目标值（f_ 变量按月度单位比较，即 mean_annual ÷ 12；与表中「6 个月均值」各列比较）尽量落在"
         "「中位数 ± 1.5 个标准差」以内，不要超出 p2–p98；同一阶段的几个视图在历史上要能同时出现（例如高通胀、极低失业、"
@@ -851,10 +906,10 @@ def schema_section() -> str:
 
 
 def system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
-                  examples: list[dict] | None = None, backend: str | None = None) -> str:
+                  examples: list[dict] | None = None, backend: str | None = None, mode: str = "production") -> str:
     """The system prompt as `backend` (default: the configured one) sends it: build_system_prompt, plus the
     schema section for the text-path backends (claude_code, mock)."""
-    base = build_system_prompt(ctx, horizon_months, examples)
+    base = build_system_prompt(ctx, horizon_months, examples, mode=mode)
     return f"{base}\n\n{schema_section()}" if (backend or backend_name()) in TEXT_BACKENDS else base
 
 
@@ -1131,8 +1186,21 @@ def request_info(backend: str, model: str) -> dict:
 
 # ---------------------------------------------------------------- repair + validation
 
-def repair(raw: dict) -> tuple[dict, list[str]]:
-    """Fix unambiguous shape / unit slips before validate_spec; every fix is reported."""
+def check_mode(mode: str) -> str:
+    """`mode` if it is one of MODES, else TranslatorError (Chinese)."""
+    if mode not in MODES:
+        raise TranslatorError(f"mode 只能是 {' 或 '.join(MODES)}，收到「{mode}」。")
+    return mode
+
+
+def repair(raw: dict, mode: str = "production", refused: list | None = None) -> tuple[dict, list[str]]:
+    """Fix unambiguous shape / unit slips before validate_spec; every fix is reported.
+
+    Views on partly endogenous variables (ENDOGENOUS_VIEWS) and on VALUATION_VARS are kept with a note. In
+    mode "test" (the narrative test) a view on a VALUATION_VARS variable is refused instead: it is removed, the
+    note says why, and `refused` (when given) gets {"phase", "var", "reason"} for it.
+    """
+    check_mode(mode)
     spec = copy.deepcopy(raw)
     notes: list[str] = []
     sid = slugify(spec.get("id") or spec.get("name") or "")
@@ -1189,8 +1257,16 @@ def repair(raw: dict) -> tuple[dict, list[str]]:
             for t in given[1:]:
                 v.pop(t)
                 notes.append(f"阶段 {k}：{var} 同时给出 {given[0]} 和 {t}，引擎只使用 {given[0]}，已删除 {t}")
+            if var in VALUATION_VARS and mode == "test":
+                text = valuation_refusal_text(k, var)
+                notes.append(text)
+                if refused is not None:
+                    refused.append({"phase": k, "var": var, "reason": text})
+                continue
             if var in VALUATION_VARS:
                 notes.append(f"阶段 {k}：{var} 几乎直接决定股市估值和股价，请确认叙事确实是估值重估")
+            elif var in ENDOGENOUS_VIEWS:
+                notes.append(endogenous_view_text(k, var))
             views.append(v)
         ph["views"] = views
         ov = ph.get("overrides") if isinstance(ph.get("overrides"), dict) else {}
@@ -1247,14 +1323,16 @@ def preview(ctx: "EngineContext", spec: dict, warnings: list[str], clipped=()) -
 
 
 def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
-              client=None, model: str | None = None, refresh: bool = False) -> dict:
+              client=None, model: str | None = None, refresh: bool = False, mode: str = "production") -> dict:
     """Narrative -> {"spec", "validation", "model", "usage", "raw", "elapsed_s", "backend", "cached", "meta", ...}.
 
     `spec` is the validated, clipped spec (ready for runner.run_spec); `raw` is what the model returned;
     `meta` records the call (model, duration, turns, usage; `cached` when it came from data/llm_cache/).
     The backend is MSL_LLM_BACKEND (claude_code by default); an injected SDK `client` (tests) means the
-    api backend. refresh=True asks the model again instead of reusing a cached answer.
+    api backend. refresh=True asks the model again instead of reusing a cached answer. `mode` "test" (the
+    narrative test) refuses views on VALUATION_VARS: they are removed and listed in validation["refused"].
     """
+    check_mode(mode)
     # a lone surrogate (valid JSON: "\ud800", from a half-pasted emoji) fails every UTF-8 encoder downstream
     text = str(narrative or "").strip().encode("utf-8", "replace").decode("utf-8")
     if not text:
@@ -1274,17 +1352,19 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
         if not st["available"]:
             raise TranslatorError(st["reason"])
 
-    system = system_prompt(ctx, horizon, backend=backend)
+    system = system_prompt(ctx, horizon, backend=backend, mode=mode)
     t0 = time.perf_counter()
     raw, meta = complete(system, _user_message(text, horizon), model, backend, client=client, refresh=refresh)
     elapsed = time.perf_counter() - t0
 
-    spec, notes = repair(raw)
+    refused: list[dict] = []
+    spec, notes = repair(raw, mode, refused)
     # the engine always runs the full horizon
     clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     if horizon < config.HORIZON_MONTHS:
         report["warnings"].append(f"引擎总是模拟 {config.HORIZON_MONTHS} 个月：叙事覆盖的 {horizon} 个月之后补了一个无视图的回归常态阶段")
     report["warnings"] = notes + report["warnings"]
+    report["mode"], report["refused"] = mode, refused
     if not any(p["views"] or p["overrides"] for p in clean["phases"]):
         report["warnings"].append("规格中没有任何有效的视图或覆盖项，结果等同于无条件历史基准情景。")
     try:
@@ -1295,7 +1375,7 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
     return {"spec": clean, "validation": report, "model": meta.get("model") or model,
             "requested_model": model, "usage": meta.get("usage") or {}, "raw": raw,
             "elapsed_s": round(elapsed, 2), "preview": phases_preview,
-            "backend": backend, "cached": bool(meta.get("cached")), "meta": meta}
+            "backend": backend, "cached": bool(meta.get("cached")), "meta": meta, "mode": mode}
 
 
 # ---------------------------------------------------------------- module run + CLI

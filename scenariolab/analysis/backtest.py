@@ -10,22 +10,33 @@ transmission
     sample, the expanding training mean out of sample); r2_in_sample_oos_months
     is the in-sample model on the out-of-sample months, for a like-for-like gap.
 windows
-    Holdout periods. The model, the MonthDB and the anchor see only months up
-    to `train_end`. Over the test months each asset gets
+    Holdout periods. The model, the MonthDB, the anchor and the long-run
+    reversion levels see only months up to `train_end`: the simulator's r*,
+    term premium, spread and unemployment anchors follow the pre-registered
+    train-end rule of engine/anchors.py (SIM_DESIGN §5.5), not
+    DEFAULT_REVERSION, today's judgement values, which forward scenarios keep.
+    Over the test months each asset gets
       actual       realized total-return index
       oracle       the engine's transmission fed the actual test path: training
                    factor model x actual factors + actual income; treasury,
                    crude oil and cash through the simulator's structural rules
       fan_cond     engine simulation whose 24-month phase views equal the
-                   realized test-period means of eight macro variables ("had
-                   we known the macro path, would the engine have gotten the
-                   assets right?"), weighted exactly as the scenario runner does
+                   realized test-period means of eight variables (VIEW_VARS),
+                   weighted exactly as the scenario runner does: five macro
+                   ones and three market prices (the 10-year yield, the Baa
+                   spread, the dollar), so it answers "had we known the macro
+                   path and the financial conditions" (宏观 + 金融条件)
+      fan_cond_macro  the same with the five macro views only (MACRO_VIEW_VARS:
+                   CPI y/y, IP y/y, the policy rate, oil, unemployment; 只有宏观);
+                   what fan_cond gains over it is what the financial
+                   conditions, market prices themselves, carry
       fan_uncond   engine simulation with prior weights (no views)
-    Both fans use CMA "historical" (training drift only); the pair is re-run
-    with the "valuation_adjusted" CMA. Phase weights come from the runner's own
-    rule (pooling.pool_phase): views are solved on 6-month block means, and a
-    view set the training months cannot meet is shrunk toward the prior until
-    at least MIN_ENS effective months support it (lambda is reported).
+    The fans use CMA "historical" (training drift only); fan_cond and
+    fan_uncond are re-run with the "valuation_adjusted" CMA. Phase weights come
+    from the runner's own rule (pooling.pool_phase): views are solved on 6-month
+    block means, and a view set the training months cannot meet is shrunk
+    toward the prior until at least MIN_ENS effective months support it
+    (lambda is reported).
 
 Model-implied paths (fitted, fitted_oos, oracle) are conditional-median paths:
 compounded systematic return + actual income, less the volatility drag of the
@@ -58,23 +69,31 @@ import pandas as pd
 
 from .. import config, jsonio
 from ..context import EngineContext
+from ..engine import anchors as long_run
 from ..engine import summary
 from ..engine.ep import weighted_corr
 from ..engine.factor_model import STRUCTURAL_ASSETS, AssetFactorModel, ModelSpec
 from ..engine.pooling import BLOCK, MIN_ENS, MIN_EPISODES, PhasePool, pool_phase
-from ..engine.simulate import (Anchor, MonthDB, capital_market_assumptions, make_anchor, simulate, valuation_settings,
-                               valuation_setup, with_oil_lock)
+from ..engine.simulate import (DEFAULT_REVERSION, Anchor, MonthDB, capital_market_assumptions, make_anchor, simulate,
+                               valuation_settings, valuation_setup, with_oil_lock)
 
 ASSETS = list(config.ASSET_IDS)
 NAMES = {a["id"]: a["name"] for a in config.ASSETS}
 RISK_ASSETS = [a for a in ASSETS if a not in STRUCTURAL_ASSETS]      # equities, REITs, gold
 CORR_ASSETS = [a for a in ASSETS if a != "cash"]                       # cash "returns" are a slow rate
+# fan_cond's views: five macro variables and three market prices (the 10-year yield, the Baa spread, the dollar)
 VIEW_VARS = ("s_cpi_yoy", "s_ip_yoy", "f_ff", "f_y10", "f_spread", "f_oil", "f_unrate", "f_usd")
+# fan_cond_macro's views: the macro ones only (SIM_DESIGN §10.5, P0.2). fan_cond is partly a market-price oracle
+# (critic): what it gains over this arm is what the financial conditions carry.
+MACRO_VIEW_VARS = ("s_cpi_yoy", "s_ip_yoy", "f_ff", "f_oil", "f_unrate")
+ARM_NAMES = {"cond": "宏观 + 金融条件（含市场价格）", "cond_macro": "只有宏观"}
 MACRO = {"cpi_yoy": "s_cpi_yoy", "ff": "lvl_ff", "y10": "lvl_y10", "unrate": "lvl_unrate"}
 VARIANTS = {                      # key -> (weights, CMA method)
-    "cond": ("cond", "historical"), "uncond": ("prior", "historical"),
+    "cond": ("cond", "historical"), "uncond": ("prior", "historical"), "cond_macro": ("cond_macro", "historical"),
     "cond_va": ("cond", "valuation_adjusted"), "uncond_va": ("prior", "valuation_adjusted"),
 }
+# the reversion keys the train-end anchors set (engine/anchors.REVERSION_KEYS), for the reports
+ANCHOR_KEYS = tuple(long_run.REVERSION_KEYS.values())
 PHASE_MONTHS = 24
 N_PATHS = 400
 SEED = 11
@@ -93,7 +112,8 @@ WINDOWS = [
 ]
 # custom windows (POST /api/backtest/run): bounds of the request
 CUSTOM_ID, CUSTOM_NAME = "custom", "自选窗口"
-CUSTOM_PATHS = 200                 # default paths per fan: a 15-year window then runs in about 10 s
+CUSTOM_PATHS = 200                 # default paths per fan: a 15-year window then runs in about 20 s (the entropy
+#                                    pooling of the two conditional arms is nearly all of it)
 CUSTOM_PATHS_RANGE = (100, 400)
 CUSTOM_MONTHS_RANGE = (12, 180)
 MIN_TRAIN_MONTHS_CUSTOM = 180      # at least 15 years of training months from config.MODEL_START
@@ -111,20 +131,34 @@ UNITS = {
     "shrink": f"视图在训练期无法同时满足、或支撑太薄（有效月份不到 {MIN_ENS:.0f} 个，或不同的 12 个月历史片段不到 "
               f"{MIN_EPISODES:.0f} 段）时，所有视图按 λ 向先验收缩："
               "使用的视图 = 先验均值 + λ ×（实际均值 − 先验均值），λ = 1 表示原样使用",
-    "view_gap_sd": "宏观视图的偏离，以训练期该变量 6 个月均值的标准差为单位：模拟偏离 = 模拟路径（经利率缩放、均值回归后）"
+    "view_gap_sd": "视图的偏离，以训练期该变量 6 个月均值的标准差为单位：模拟偏离 = 模拟路径（经利率缩放、均值回归后）"
                    "该阶段的平均变化 − 真实均值；熵池化偏离 = 熵池化后抽中月份的期望均值 − 真实均值"
                    "（只来自截断和收缩）；抽中偏离 = 实际抽中月份的均值 − 真实均值（另含蒙特卡洛误差）",
+    "anchors": "长期锚：中性实际利率、期限利差（10 年期 − 联邦基金利率）、信用利差、失业率，百分数（利差为百分点）",
 }
+
+
+def _view_list(view_vars) -> str:
+    return "、".join(VIEW_NAMES.get(v, v) for v in view_vars)
+
+
 NOTES = [
     "模型路径（样本内拟合、样本外拟合、只看传导的 oracle）是给定实际因子路径时的中位数路径：系统性收益 + 实际收入，"
     "再扣掉模型解释不了的残差波动造成的复利拖累（每月 σ²/2，σ 取训练期残差）。",
-    "窗口回测中，模型、历史月份库和起点都只用训练期数据；条件扇形图的视图是测试期每 24 个月的实际宏观均值，"
-    "回答的是“如果事先知道宏观情景，引擎能不能算对资产”，不是预测宏观本身。",
-    "两种扇形图的长期回报假设（CMA）都用训练期的历史漂移；估值调整版另算，结果见“估值调整 CMA 有没有帮助”。",
+    "窗口回测中，模型、历史月份库和起点都只用训练期数据；条件扇形图的视图是测试期每 24 个月的实际均值，分两档："
+    f"「{ARM_NAMES['cond']}」用 {len(VIEW_VARS)} 个变量（其中{_view_list(v for v in VIEW_VARS if v not in MACRO_VIEW_VARS)}"
+    f"是市场价格），「{ARM_NAMES['cond_macro']}」只用{_view_list(MACRO_VIEW_VARS)}。"
+    "回答的是“如果事先知道这些路径，引擎能不能算对资产”，不是预测它们本身；两档之差是金融条件（市场价格本身）承载的部分。",
+    "利率、信用利差和失业率的长期锚按训练期末可知的规则估计（预先登记，不调参）：中性实际利率 = 过去 40 个季度"
+    "（联邦基金利率 − 核心 CPI 同比）的均值，期限利差 = 过去 40 个季度（10 年期收益率 − 联邦基金利率）的均值，信用利差 = "
+    "过去 40 个季度 Baa − 10 年期利差的均值，失业率 = 过去 80 个季度的均值；前瞻情景仍用今天的判断值（中性实际利率 "
+    f"{DEFAULT_REVERSION['r_star']:g}、期限利差 {DEFAULT_REVERSION['term_premium']:g}、信用利差 "
+    f"{DEFAULT_REVERSION['spread_level']:g}、失业率 {DEFAULT_REVERSION['unrate_level']:g}）。每个窗口用的数值见窗口的长期锚。",
+    "三种扇形图的长期回报假设（CMA）都用训练期的历史漂移；估值调整版另算，结果见“估值调整 CMA 有没有帮助”。",
     "国债、原油、现金在模拟里由收益率、油价、政策利率路径结构化生成，oracle 用同样的规则；"
     "“传导”图里这三类的拟合线是线性因子回归，仅作参考（原油价格收益对油价对数变化是凸的，线性回归的累计线会偏低）。",
     "条件扇形图的阶段权重与情景运行完全相同：视图按 6 个月区块的均值求解熵池化，抽样直接按区块起点的后验概率抽，"
-    f"所以抽中月份的宏观均值在期望上等于视图；8 个视图在训练期无法同时满足、或只有不到 {MIN_ENS:.0f} 个有效月份或 "
+    f"所以抽中月份的均值在期望上等于视图；同一阶段的视图在训练期无法同时满足、或只有不到 {MIN_ENS:.0f} 个有效月份或 "
     f"{MIN_EPISODES:.0f} 段不同的历史片段支撑时，所有视图按 λ 向先验收缩（见阶段表中的 λ）。",
     "相关性比较不含现金（月度现金收益只是缓慢变化的利率，相关系数没有意义）。",
 ]
@@ -351,17 +385,21 @@ def _ep_report(k: int, pool: PhasePool, db: MonthDB, realized: list[dict]) -> di
     }
 
 
-def view_weights(db: MonthDB, views: list[list[dict]], plan: list[int], min_ens: float = MIN_ENS) -> dict:
+def view_weights(db: MonthDB, views: list[list[dict]], plan: list[int], min_ens: float = MIN_ENS,
+                 unconditional: bool = True) -> dict:
     """Per-phase block-start weights exactly as the scenario runner sets them, with their reports,
-    plus the unconditional ones (no views) and the overrides the runner would add (oil lock)."""
+    plus the unconditional ones (no views; `unconditional=False` leaves them out) and the overrides the
+    runner would add (oil lock)."""
     prior, rare = db.prior(), getattr(db, "rare", None)
-    out = {"cond": [], "ep": [], "prior": [],
-           "overrides": with_oil_lock(views, None), "overrides_prior": [{} for _ in plan]}
+    out = {"cond": [], "ep": [], "overrides": with_oil_lock(views, None)}
+    if unconditional:
+        out.update(prior=[], overrides_prior=[{} for _ in plan])
     for k, (vs, m) in enumerate(zip(views, plan)):
         pool = pool_phase(db.frame, vs, prior, m, BLOCK, 1.0, min_ens, rare=rare)
         out["cond"].append(pool.blocks)
         out["ep"].append(_ep_report(k, pool, db, vs))
-        out["prior"].append(pool_phase(db.frame, [], prior, m, BLOCK, rare=rare).blocks)
+        if unconditional:
+            out["prior"].append(pool_phase(db.frame, [], prior, m, BLOCK, rare=rare).blocks)
     return out
 
 
@@ -438,32 +476,51 @@ def window_shocks(start, end) -> list[dict]:
             if pd.Timestamp(s["start"]) <= t1 and pd.Timestamp(s["end"]) >= t0]
 
 
-def window_setup(panel: pd.DataFrame, spec: ModelSpec, w: dict) -> dict:
+def window_setup(panel: pd.DataFrame, spec: ModelSpec, w: dict, macro_vars=None) -> dict:
     """What every run of a window shares whatever its seed and path count: the test months, the phase plan,
-    the model, month database and anchor fitted on the training months, and the pooled phase weights
-    (entropy pooling with its shrink search: nearly all of a window's run time)."""
+    the model, month database and anchor fitted on the training months, the long-run anchors knowable at the
+    train end (engine/anchors.py) and the reversion they set, and the pooled phase weights of both conditional
+    arms (entropy pooling with its shrink search: nearly all of a window's run time). `macro_vars` are the
+    views of the macro-only arm (MACRO_VIEW_VARS)."""
     train_end = pd.Timestamp(w["train_end"])
     months = panel.loc[w["test"][0]:w["test"][1] or panel.index.max()].index
     plan = phase_plan(len(months))
     model, db, anchor = fit_window(panel, spec, train_end)
+    lr = long_run.train_end_anchors(panel, train_end)
+    macro_vars = tuple(MACRO_VIEW_VARS if macro_vars is None else macro_vars)
     return {"train_end": train_end, "months": months, "plan": plan, "model": model, "db": db, "anchor": anchor,
-            "vw": view_weights(db, realized_views(panel, months, plan), plan)}
+            "anchors": lr, "reversion": long_run.reversion(lr),
+            "vw": view_weights(db, realized_views(panel, months, plan), plan),
+            "macro_vars": macro_vars,
+            "vw_macro": view_weights(db, realized_views(panel, months, plan, macro_vars), plan, unconditional=False)}
+
+
+def anchors_report(s: dict, rev: dict, given: bool) -> dict:
+    """win["anchors"]: the train-end anchors, the reversion the window simulated with and today's defaults."""
+    effective = {**DEFAULT_REVERSION, **rev}
+    return {"rule": "given" if given else "train_end", **{k: v for k, v in s["anchors"].items() if k != "rules"},
+            "reversion": {k: float(effective[k]) for k in ANCHOR_KEYS},
+            "default": {k: float(DEFAULT_REVERSION[k]) for k in ANCHOR_KEYS}}
 
 
 def run_window(panel: pd.DataFrame, spec: ModelSpec, w: dict, n_paths: int = N_PATHS, seed: int = SEED,
-               valuation: dict | None = None, setup: dict | None = None) -> dict:
+               valuation: dict | None = None, setup: dict | None = None, reversion: dict | None = None) -> dict:
     """One holdout window. `valuation` (engine/simulate.valuation_settings; None = config.VALUATION) turns
-    the valuation state on for the main fans (cond, uncond): its CMA and pull, estimated on the training
-    months, replace CMA historical there; the *_va fans stay as they are. `setup` (window_setup of the same
-    panel, spec and window) skips the fitting and pooling."""
+    the valuation state on for the main fans (cond, cond_macro, uncond): its CMA and pull, estimated on the
+    training months, replace CMA historical there; the *_va fans stay as they are. `setup` (window_setup of
+    the same panel, spec and window) skips the fitting and pooling. `reversion`: None simulates with the
+    anchors knowable at the train end (setup["reversion"], SIM_DESIGN §5.5); a dict is passed to simulate()
+    as it is ({} = DEFAULT_REVERSION, the fixed anchors every window used before)."""
     s = setup or window_setup(panel, spec, w)
     train_end, months, plan = s["train_end"], s["months"], s["plan"]
     model, db, anchor = s["model"], s["db"], s["anchor"]
+    rev = dict(s["reversion"] if reversion is None else reversion)
     vw = {**s["vw"], "ep": copy.deepcopy(s["vw"]["ep"])}          # each run adds its own delivery stats
+    vwm = {**s["vw_macro"], "ep": copy.deepcopy(s["vw_macro"]["ep"])}
     T = len(months)
     years = T / 12.0
-    weights = {"cond": vw["cond"], "prior": vw["prior"]}
-    ovs = {"cond": vw["overrides"], "prior": vw["overrides_prior"]}
+    weights = {"cond": vw["cond"], "prior": vw["prior"], "cond_macro": vwm["cond"]}
+    ovs = {"cond": vw["overrides"], "prior": vw["overrides_prior"], "cond_macro": vwm["overrides"]}
     cmas = {m: capital_market_assumptions(db, anchor, method=m) for m in ("historical", "valuation_adjusted")}
     vset = valuation_settings(valuation)
     main = {"cma": cmas["historical"], "valuation": None}
@@ -471,10 +528,12 @@ def run_window(panel: pd.DataFrame, spec: ModelSpec, w: dict, n_paths: int = N_P
         cma_v, vm = valuation_setup(db, anchor, vset)
         main = {"cma": cma_v, "valuation": vm}
     sims = {key: simulate(db, anchor, weights[wk], plan, n_paths=n_paths, seed=seed, block=BLOCK,
-                          overrides=ovs[wk], **(main if cm == "historical" else {"cma": cmas[cm]}), **config.RESIDUALS)
+                          overrides=ovs[wk], reversion=rev, **(main if cm == "historical" else {"cma": cmas[cm]}),
+                          **config.RESIDUALS)
             for key, (wk, cm) in VARIANTS.items()}
     W = {k: summary.wealth_paths(s.total) for k, s in sims.items()}
     gap_cond = add_view_delivery(vw["ep"], db, sims["cond"], plan)
+    gap_macro = add_view_delivery(vwm["ep"], db, sims["cond_macro"], plan)
     actual = index_path(panel.loc[months, [f"r_{a}" for a in ASSETS]].to_numpy())
     oracle = oracle_paths(panel, model, anchor, months)
     pred = predict(model, panel).loc[months]
@@ -489,6 +548,7 @@ def run_window(panel: pd.DataFrame, spec: ModelSpec, w: dict, n_paths: int = N_P
         entry = {
             "dates": labels, "actual": actual[:, j], "oracle": oracle[:, j],
             "fan_cond": summary.fan(W["cond"][:, :, j]), "fan_uncond": summary.fan(W["uncond"][:, :, j]),
+            "fan_cond_macro": summary.fan(W["cond_macro"][:, :, j]),
             "fan_cond_va": {p: fan_va[p] for p in ("p5", "p50", "p95")},
             "cagr_actual": float(cagr(actual[-1, j], years)), "cagr_oracle": float(cagr(oracle[-1, j], years)),
             "r2_oracle": (r2_score(panel.loc[months, f"p_{a}"], pred[a], train_mean[f"p_{a}"])
@@ -498,7 +558,8 @@ def run_window(panel: pd.DataFrame, spec: ModelSpec, w: dict, n_paths: int = N_P
             entry[f"coverage_{k}"] = coverage(actual[:, j], band[k][0], band[k][1])
             entry[f"pit_terminal_{k}"] = pit(actual[-1, j], W[k][:, -1, j])
             entry[f"cagr_pred_{k}_p50"] = float(cagr(p50[k], years))
-        for suffix, (c, u) in {"": ("cond", "uncond"), "_va": ("cond_va", "uncond_va")}.items():
+        for suffix, (c, u) in {"": ("cond", "uncond"), "_macro": ("cond_macro", "uncond"),
+                               "_va": ("cond_va", "uncond_va")}.items():
             entry[f"decomposition{suffix}"] = decompose(actual[-1, j], oracle[-1, j], p50[c], p50[u], years)
         assets[a] = entry
 
@@ -514,18 +575,24 @@ def run_window(panel: pd.DataFrame, spec: ModelSpec, w: dict, n_paths: int = N_P
     for key, col in MACRO.items():
         macro[key] = {"actual": panel[col].reindex([train_end, *months]).to_numpy(float),
                       "cond": summary.fan(sims["cond"].macro[key].astype(float)),
+                      "cond_macro_p50": np.median(sims["cond_macro"].macro[key].astype(float), axis=0),
                       "uncond_p50": np.median(sims["uncond"].macro[key].astype(float), axis=0)}
     if main["valuation"] is not None:                    # the market P/D the valuation state tracks
         macro["pd"] = {"actual": (100.0 / panel["s_div_yield"]).reindex([train_end, *months]).to_numpy(float),
                        "cond": summary.fan(sims["cond"].macro["pd"].astype(float)),
+                       "cond_macro_p50": np.median(sims["cond_macro"].macro["pd"].astype(float), axis=0),
                        "uncond_p50": np.median(sims["uncond"].macro["pd"].astype(float), axis=0)}
 
     win = {
         "id": w["id"], "name": w["name"], "train": [config.MODEL_START, _ym(train_end)],
         "test": [_ym(months[0]), _ym(months[-1])], "phase_months": PHASE_MONTHS, "phases": plan,
         "n_paths": n_paths, "dates": labels, "assets": assets, "corr": corr, "macro": macro,
-        "ep": vw["ep"],
-        "view_gap_sd": {"cond": gap_cond["drawn"], "cond_simulated": gap_cond["simulated"]},
+        "arms": {"cond": {"name": ARM_NAMES["cond"], "view_vars": list(VIEW_VARS)},
+                 "cond_macro": {"name": ARM_NAMES["cond_macro"], "view_vars": list(s["macro_vars"])}},
+        "ep": vw["ep"], "ep_macro": vwm["ep"],
+        "view_gap_sd": {"cond": gap_cond["drawn"], "cond_simulated": gap_cond["simulated"],
+                        "cond_macro": gap_macro["drawn"], "cond_macro_simulated": gap_macro["simulated"]},
+        "anchors": anchors_report(s, rev, reversion is not None),
         "model_r2_train": {a: model.stats.r2[a] for a in model.assets},
         "shocks": window_shocks(months[0], months[-1]),
     }
@@ -553,6 +620,7 @@ def window_summary(win: dict, years: float) -> dict:
     parts = ("total", "scenario", "engine", "transmission")
     dec_abs = {p: _avg(abs(A[a]["decomposition"][f"{p}_annual"]) for a in risk) for p in parts}
     dec_mean = {p: _avg(A[a]["decomposition"][f"{p}_annual"] for a in risk) for p in parts}
+    dec_macro_abs = {p: _avg(abs(A[a]["decomposition_macro"][f"{p}_annual"]) for a in risk) for p in parts}
     va = {
         "assets": va_assets,
         "coverage_cond_historical": mean_of("coverage_cond", va_assets),
@@ -570,8 +638,10 @@ def window_summary(win: dict, years: float) -> dict:
         "gold_terminal_err_cond_historical": cond_err("decomposition", "gold"),
         "gold_terminal_err_cond_va": cond_err("decomposition_va", "gold"),
     }
-    shrunk = [{"phase": p["phase"], "shrink": p["shrink"], "reason": p["shrink_reason"],
-               "ens_requested": p["ens_requested"], "ens": p["ens"]} for p in win["ep"] if p["shrink"] < 1.0]
+    def shrunk_of(ep: list[dict]) -> list[dict]:
+        return [{"phase": p["phase"], "shrink": p["shrink"], "reason": p["shrink_reason"],
+                 "ens_requested": p["ens_requested"], "ens": p["ens"]} for p in ep if p["shrink"] < 1.0]
+
     worst = max(risk, key=lambda a: cond_err("decomposition", a))
     ep_gap = _avg(abs(v["ep_gap_sd"]) for p in win["ep"] for v in p["views"])
     s = {
@@ -590,7 +660,20 @@ def window_summary(win: dict, years: float) -> dict:
         "corr_mae_posterior": win["corr"]["mae_posterior"], "corr_mae_prior": win["corr"]["mae_prior"],
         "ens_min": min(p["ens"] for p in win["ep"]),
         "clipped_views": sorted({v for p in win["ep"] for v in p["clipped"]}),
-        "worst_asset": worst, "valuation_adjusted": va, "shrunk_phases": shrunk,
+        "worst_asset": worst, "valuation_adjusted": va, "shrunk_phases": shrunk_of(win["ep"]),
+        # the macro-only arm (fan_cond_macro): the same statistics without the three market-price views
+        "coverage_cond_macro_avg": mean_of("coverage_cond_macro", ASSETS),
+        "coverage_cond_macro_risk": mean_of("coverage_cond_macro", risk),
+        "pit_cond_macro_mad": _avg(abs(A[a]["pit_terminal_cond_macro"] - 0.5) for a in ASSETS),
+        "cagr_mae_cond_macro": cagr_mae("cagr_pred_cond_macro_p50", ASSETS),
+        "cagr_mae_cond_macro_risk": cagr_mae("cagr_pred_cond_macro_p50", risk),
+        "decomposition_macro_mean_abs_annual": dec_macro_abs,
+        "view_gap_sd_ep_macro": _avg(abs(v["ep_gap_sd"]) for p in win["ep_macro"] for v in p["views"]),
+        "view_gap_sd_drawn_macro": win["view_gap_sd"]["cond_macro"],
+        "view_gap_sd_simulated_macro": win["view_gap_sd"]["cond_macro_simulated"],
+        "ens_min_macro": min(p["ens"] for p in win["ep_macro"]),
+        "clipped_views_macro": sorted({v for p in win["ep_macro"] for v in p["clipped"]}),
+        "shrunk_phases_macro": shrunk_of(win["ep_macro"]),
     }
     s["interpretation"] = _window_text(win, s, worst)
     return s
@@ -602,34 +685,58 @@ def main_source(dec_abs: dict) -> str:
     return max(("engine", "transmission"), key=lambda p: dec_abs[p])
 
 
+def _gain_text(gain: float, what: str) -> str:
+    return (f"{what}让误差减少 {gain:.1%}/年" if gain > 0.002 else
+            (f"{what}几乎没有改善误差" if gain > -0.002 else f"{what}反而让误差增加 {-gain:.1%}/年"))
+
+
+def _shrunk_text(phases: list[dict], n_views: int, what: str) -> str:
+    ph = "、".join(f"第 {p['phase']} 阶段（λ={p['shrink']:.2f}）" for p in phases)
+    return (f"{ph}的 {n_views} 个真实均值在训练期找不到足够多同时满足的历史区块，"
+            f"视图按 λ 向训练期均值收缩，这些阶段只部分“知道”{what}。")
+
+
 def _window_text(win: dict, s: dict, worst: str) -> str:
     A = win["assets"]
     t0, t1 = win["test"]
+    full, macro_only = win["arms"]["cond"]["view_vars"], win["arms"]["cond_macro"]["view_vars"]
+    market = [v for v in full if v not in macro_only]
     gain = s["cagr_mae_uncond_risk"] - s["cagr_mae_cond_risk"]
+    gain_fc = s["cagr_mae_cond_macro_risk"] - s["cagr_mae_cond_risk"]
     dec = s["decomposition_mean_abs_annual"]
     main = main_source(dec)
     wd = A[worst]["decomposition"]
     w_part = max(("engine", "transmission"), key=lambda p: abs(wd[p]))
     txt = [
         f"测试期 {t0} 至 {t1}（{s['years']:.1f} 年，{s['n_phases']} 个阶段）。",
-        f"已知每 24 个月的真实宏观均值时，风险资产（股票、REITs、黄金）年化收益中位数的平均绝对误差为 "
-        f"{s['cagr_mae_cond_risk']:.1%}，不知道宏观时为 {s['cagr_mae_uncond_risk']:.1%}，"
-        + (f"知道宏观情景让误差减少 {gain:.1%}/年。" if gain > 0.002 else
-           ("知道宏观情景几乎没有改善误差。" if gain > -0.002 else f"知道宏观情景反而让误差增加 {-gain:.1%}/年。")),
-        f"实际路径落在 90% 区间内的月份占比：条件 {s['coverage_cond_risk']:.0%}，无条件 {s['coverage_uncond_risk']:.0%}。",
-        f"对数终值误差拆分（年化，风险资产绝对值平均）：不知道宏观时 {dec['total']:.1%}；知道宏观让中位数平均移动 "
-        f"{dec['scenario']:.1%}（情景部分）；知道宏观之后剩下的误差里，引擎部分 {dec['engine']:.1%}、"
+        f"已知每 24 个月的真实宏观与金融条件均值时（{len(full)} 个视图变量"
+        + (f"，其中{_view_list(market)}是市场价格" if market else "") + "），"
+        f"风险资产（股票、REITs、黄金）年化收益中位数的平均绝对误差为 {s['cagr_mae_cond_risk']:.1%}；"
+        f"只知道宏观（{len(macro_only)} 个）时为 {s['cagr_mae_cond_macro_risk']:.1%}；都不知道时为 "
+        f"{s['cagr_mae_uncond_risk']:.1%}。" + _gain_text(gain, "知道宏观与金融条件") + "；与只知道宏观相比，"
+        + _gain_text(gain_fc, "再加上金融条件") + "。",
+        f"实际路径落在 90% 区间内的月份占比：宏观与金融条件 {s['coverage_cond_risk']:.0%}，只有宏观 "
+        f"{s['coverage_cond_macro_risk']:.0%}，无条件 {s['coverage_uncond_risk']:.0%}。",
+        f"对数终值误差拆分（年化，风险资产绝对值平均）：不知道宏观时 {dec['total']:.1%}；知道宏观与金融条件让中位数平均移动 "
+        f"{dec['scenario']:.1%}（情景部分）；知道之后剩下的误差里，引擎部分 {dec['engine']:.1%}、"
         f"传导部分 {dec['transmission']:.1%}，主要来自{PARTS_CN[main]}。",
         f"偏差最大的是{NAMES[worst]}：实际年化 {A[worst]['cagr_actual']:.1%}，条件中位数 "
         f"{A[worst]['cagr_pred_cond_p50']:.1%}，主要来自{PARTS_CN[w_part]}（{wd[w_part + '_annual']:+.1%}/年）。",
-        f"被抽中月份的 {len(VIEW_VARS)} 个宏观视图变量与真实均值平均相差 {s['view_gap_sd_drawn']:.2f} 个标准差"
+        f"被抽中月份的 {len(full)} 个视图变量与真实均值平均相差 {s['view_gap_sd_drawn']:.2f} 个标准差"
         f"（6 个月均值的标准差；截断和收缩造成 {s['view_gap_sd_ep']:.2f}，其余是抽样误差）；"
         f"按今天的水平缩放、加上均值回归之后，模拟路径相差 {s['view_gap_sd_simulated']:.2f}。这些都计入引擎误差。",
     ]
     if s["shrunk_phases"]:
-        ph = "、".join(f"第 {p['phase']} 阶段（λ={p['shrink']:.2f}）" for p in s["shrunk_phases"])
-        txt.append(f"{ph}的 {len(VIEW_VARS)} 个真实宏观均值在训练期找不到足够多同时满足的历史区块，"
-                   f"视图按 λ 向训练期均值收缩，这些阶段只部分“知道”宏观。")
+        txt.append(_shrunk_text(s["shrunk_phases"], len(full), "宏观与金融条件"))
+    if s["shrunk_phases_macro"]:
+        txt.append("只有宏观的一档：" + _shrunk_text(s["shrunk_phases_macro"], len(macro_only), "宏观"))
+    lr = win.get("anchors") or {}
+    rev, dflt = lr.get("reversion") or {}, lr.get("default") or {}
+    if rev and dflt:
+        txt.append(("长期锚按训练期末可知的规则" if lr.get("rule") == "train_end" else "长期锚由调用方给定")
+                   + f"：中性实际利率 {rev['r_star']:.2f}、期限利差 {rev['term_premium']:.2f}、信用利差 "
+                   f"{rev['spread_level']:.2f}、失业率 {rev['unrate_level']:.2f}（前瞻情景用 {dflt['r_star']:g}、"
+                   f"{dflt['term_premium']:g}、{dflt['spread_level']:g}、{dflt['unrate_level']:g}）。")
     va = s["valuation_adjusted"]
     h, v = va["terminal_err_cond_historical"], va["terminal_err_cond_va"]
     gh, gv = va["gold_terminal_err_cond_historical"], va["gold_terminal_err_cond_va"]
@@ -647,10 +754,11 @@ def _window_text(win: dict, s: dict, worst: str) -> str:
 
 def overall_summary(windows: list[dict], trans: dict) -> dict:
     rows = []
-    pits = []
+    pits, pits_macro = [], []
     for w in windows:
         s = w["summary"]
         d = s["decomposition_mean_abs_annual"]
+        dm = s["decomposition_macro_mean_abs_annual"]
         rows.append({"id": w["id"], "name": w["name"], "test": w["test"],
                      "coverage_cond_risk": s["coverage_cond_risk"], "coverage_uncond_risk": s["coverage_uncond_risk"],
                      "cagr_mae_cond_risk": s["cagr_mae_cond_risk"], "cagr_mae_uncond_risk": s["cagr_mae_uncond_risk"],
@@ -658,23 +766,32 @@ def overall_summary(windows: list[dict], trans: dict) -> dict:
                      "transmission_abs_annual": d["transmission"],
                      "terminal_err_cond_historical": s["valuation_adjusted"]["terminal_err_cond_historical"],
                      "terminal_err_cond_va": s["valuation_adjusted"]["terminal_err_cond_va"],
-                     "view_gap_sd_drawn": s["view_gap_sd_drawn"], "view_gap_sd_simulated": s["view_gap_sd_simulated"]})
+                     "view_gap_sd_drawn": s["view_gap_sd_drawn"], "view_gap_sd_simulated": s["view_gap_sd_simulated"],
+                     "coverage_cond_macro_risk": s["coverage_cond_macro_risk"],
+                     "cagr_mae_cond_macro_risk": s["cagr_mae_cond_macro_risk"],
+                     "scenario_abs_annual_macro": dm["scenario"], "engine_abs_annual_macro": dm["engine"],
+                     "view_gap_sd_drawn_macro": s["view_gap_sd_drawn_macro"]})
         pits += [w["assets"][a]["pit_terminal_cond"] for a in RISK_ASSETS]
+        pits_macro += [w["assets"][a]["pit_terminal_cond_macro"] for a in RISK_ASSETS]
     agg = {k: _avg(r[k] for r in rows) for k in rows[0] if k not in ("id", "name", "test")}
     tail = float(np.mean([(p < 0.05) or (p > 0.95) for p in pits]))
+    tail_macro = float(np.mean([(p < 0.05) or (p > 0.95) for p in pits_macro]))
     text = (f"宏观因子在样本内解释风险资产月度价格波动的 {trans['r2_risk_avg']:.0%}；在 {trans['oos_start']} 以后的同一批月份上，"
             f"样本内模型解释 {trans['r2_in_sample_oos_months_risk_avg']:.0%}，扩展窗口的样本外模型只有 "
             f"{trans['r2_oos_risk_avg']:.0%}（以训练期均值为基准）：模拟 K 线的大部分波动来自重抽样的真实历史残差，"
             f"因子决定的是条件分布的位置。"
-            f"{len(rows)} 个回测窗口平均：已知宏观时风险资产年化误差 {agg['cagr_mae_cond_risk']:.1%}"
-            f"（不知道宏观 {agg['cagr_mae_uncond_risk']:.1%}），"
-            f"90% 区间覆盖率 {agg['coverage_cond_risk']:.0%}（无条件 {agg['coverage_uncond_risk']:.0%}），"
-            f"{len(pits)} 个终值中落在 5%/95% 尾部之外的比例 {tail:.0%}（校准良好时约 10%；同一窗口内各资产高度相关，"
-            f"这个比例的抽样误差很大）。"
-            f"知道宏观后剩下的误差中传导部分平均 {agg['transmission_abs_annual']:.1%}/年，引擎部分 "
-            f"{agg['engine_abs_annual']:.1%}/年；引擎部分包括抽中月份的宏观视图平均偏离真实值 "
-            f"{agg['view_gap_sd_drawn']:.2f} 个标准差，缩放和均值回归之后模拟路径偏离 {agg['view_gap_sd_simulated']:.2f}。")
-    return {"windows": rows, **agg, "pit_tail_share_cond": tail, "n_pit": len(pits), "text": text}
+            f"{len(rows)} 个回测窗口平均：已知宏观与金融条件时风险资产年化误差 {agg['cagr_mae_cond_risk']:.1%}"
+            f"（只知道宏观 {agg['cagr_mae_cond_macro_risk']:.1%}，都不知道 {agg['cagr_mae_uncond_risk']:.1%}），"
+            f"90% 区间覆盖率 {agg['coverage_cond_risk']:.0%}（只知道宏观 {agg['coverage_cond_macro_risk']:.0%}，"
+            f"无条件 {agg['coverage_uncond_risk']:.0%}），"
+            f"{len(pits)} 个终值中落在 5%/95% 尾部之外的比例 {tail:.0%}（只知道宏观 {tail_macro:.0%}；校准良好时约 10%；"
+            f"同一窗口内各资产高度相关，这个比例的抽样误差很大）。"
+            f"知道宏观与金融条件后剩下的误差中传导部分平均 {agg['transmission_abs_annual']:.1%}/年，引擎部分 "
+            f"{agg['engine_abs_annual']:.1%}/年；引擎部分包括抽中月份的视图变量平均偏离真实值 "
+            f"{agg['view_gap_sd_drawn']:.2f} 个标准差，缩放和均值回归之后模拟路径偏离 {agg['view_gap_sd_simulated']:.2f}。"
+            "各窗口的长期锚（中性利率、期限利差、信用利差、失业率）按训练期末可知的规则估计。")
+    return {"windows": rows, **agg, "pit_tail_share_cond": tail, "pit_tail_share_cond_macro": tail_macro,
+            "n_pit": len(pits), "text": text}
 
 
 # ---------------------------------------------------------------- custom windows (POST /api/backtest/run)
@@ -787,9 +904,10 @@ def _cached_setup(panel: pd.DataFrame, spec: ModelSpec, w: dict) -> dict:
 
 def run_custom(panel: pd.DataFrame, spec: ModelSpec, train_end: str, months: int, n_paths: int = CUSTOM_PATHS,
                seed: int = SEED) -> dict:
-    """One custom holdout window: the same run_window as the built-in windows (fan_cond with the realized
-    macro as oracle views, fan_uncond, coverage, PIT, CAGR, decomposition, posterior correlations), plus
-    `custom` (the request) and `label`. The fitted and pooled window is reused across seeds and path counts."""
+    """One custom holdout window: the same run_window as the built-in windows (fan_cond and fan_cond_macro
+    with the realized paths as oracle views, fan_uncond, coverage, PIT, CAGR, decomposition, posterior
+    correlations, the train-end anchors), plus `custom` (the request) and `label`. The fitted and pooled
+    window is reused across seeds and path counts."""
     w = custom_window(panel, train_end, months)
     win = run_window(panel, spec, w, n_paths=n_paths, seed=seed, setup=_cached_setup(panel, spec, w))
     win["label"] = w["label"]
@@ -812,7 +930,9 @@ def run(ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED, windows: l
     return {
         "assets": ASSETS, "asset_names": NAMES, "risk_assets": RISK_ASSETS,
         "spec": ctx.spec.to_dict(), "describe": ctx.spec.describe(), "n_paths": n_paths, "seed": seed,
-        "view_vars": list(VIEW_VARS), "units": UNITS, "notes": notes, "shocks": config.EXOGENOUS_SHOCKS,
+        "view_vars": list(VIEW_VARS), "view_vars_macro": list(MACRO_VIEW_VARS), "arm_names": ARM_NAMES,
+        "anchor_rules": dict(long_run.RULES), "default_reversion": {k: DEFAULT_REVERSION[k] for k in ANCHOR_KEYS},
+        "units": UNITS, "notes": notes, "shocks": config.EXOGENOUS_SHOCKS,
         "custom": {"paths": CUSTOM_PATHS, "paths_range": list(CUSTOM_PATHS_RANGE),
                    "months_range": list(CUSTOM_MONTHS_RANGE), "min_train_months": MIN_TRAIN_MONTHS_CUSTOM,
                    "earliest_train_end": _ym(pd.Timestamp(config.MODEL_START)

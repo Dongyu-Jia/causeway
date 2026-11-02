@@ -681,9 +681,17 @@ def simulate(db: MonthDB, anchor: Anchor, phase_weights: list, phase_months: lis
       asset_drift:  {asset_id: annual price-return drift added (decimal)}
       resid_scale:  multiplier on drawn residuals (volatility of the unexplained part)
       r_star:       neutral real policy rate for this phase (e.g. negative under
-                    financial repression)
+                    financial repression); the policy rate reverts toward
+                    r_star + inflation and the 10-year toward r_star + inflation
+                    + term_premium, so it moves both targets
+      term_premium: the 10-year's target over r_star + inflation in this phase
+                    (default: the reversion's term_premium), so a phase that states
+                    its policy path through r_star need not move the 10-year
+                    target with it (SIM_DESIGN P0.6)
     reversion: overrides for DEFAULT_REVERSION (pass kappa_*=0 to disable;
-    oil_target_shift moves the real-oil anchor by that many log points).
+    oil_target_shift moves the real-oil anchor by that many log points). Forward
+    scenarios keep DEFAULT_REVERSION; backtests pass the anchors knowable at their
+    train end (engine/anchors.py).
     resid_mode / resid_window / resid_coupling / resid_seed: where the drawn
     months' residuals come from (residuals.draw; ablation only). The default
     "coupled" uses each drawn month's own residual, exactly as before.
@@ -733,9 +741,12 @@ def simulate(db: MonthDB, anchor: Anchor, phase_weights: list, phase_months: lis
     yoy = 100.0 * (np.exp(roll[:, 12:] - roll[:, :-12]) - 1.0)   # (n, T+1)
     infl_anchor = np.clip(yoy, -2.0, 15.0)
     r_star = np.full(T, rev["r_star"], dtype=float)
+    term_premium = np.full(T, rev["term_premium"], dtype=float)
     for k, ov in enumerate(overrides):
         if "r_star" in ov:
             r_star[phase_of == k] = float(ov["r_star"])
+        if "term_premium" in ov:
+            term_premium[phase_of == k] = float(ov["term_premium"])
 
     # ---- rates and unemployment re-anchored with level scaling + reversion
     ff = np.empty((n_paths, T + 1)); ff[:, 0] = anchor.ff
@@ -755,7 +766,7 @@ def simulate(db: MonthDB, anchor: Anchor, phase_weights: list, phase_months: lis
         dy = dy + rate_drift["y10"][t]
         dsp = dsp + rate_drift["spread"][t]
         ff_target = r_star[t] + infl_anchor[:, t]
-        y10_target = r_star[t] + infl_anchor[:, t] + rev["term_premium"]
+        y10_target = r_star[t] + infl_anchor[:, t] + term_premium[t]
         dff = dff + rev["kappa_ff"] * (ff_target - ff[:, t])
         dy = dy + rev["kappa_y10"] * (y10_target - y10[:, t])
         dsp = dsp + rev["kappa_spread"] * (rev["spread_level"] - sp[:, t])
