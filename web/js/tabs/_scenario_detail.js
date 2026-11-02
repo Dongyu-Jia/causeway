@@ -3,12 +3,23 @@
 // per asset, macro paths, correlations, the income-distribution calculator, probability
 // and the validation report. Used by tabs/scenarios.js and tabs/lab.js; the leading
 // underscore keeps the router from treating this module as a tab.
+// A built-in's detail also has the quarterly stack's section (季度模型，试运行; SIM_DESIGN §10.3, _qdetail.js): what the
+// scenario's reviewed QTable states and what the model completes, quarter by quarter, the valuation block, the
+// attribution bars, the financial-conditions block and the regime readout on quarterly paths. It runs the QTable when
+// the section comes into view (or on its button); the monthly engine stays the default until the switch gate passes.
+// Once it has passed (the state the scenarios tab loaded, _switch.js), the quarterly section comes first, labelled 默认,
+// and the monthly engine's sections follow as the comparison.
 //
 //   renderScenarioDetail(root, detail, ctx, { state, labLink })
 //   detail = GET /api/scenarios/<id> (scenarios/runner.run_spec + library.py extras)
 import * as ui from '../ui.js';
 import * as charts from '../charts.js';
 import * as api from '../api.js';
+import { renderQuarterlyDetail, runQuarterly, ensureQStyle, TRIAL } from './_qdetail.js';
+import { lastSwitch, quarterlyDefault } from './_switch.js';
+
+// 试运行 until the switch gate T-S passes, then 默认 (the state the scenarios tab loaded: _switch.js, P9)
+const qTag = () => (quarterlyDefault(lastSwitch()) ? '默认' : TRIAL);
 
 const { h, card } = ui;
 const STYLE_ID = 'style-fe3';
@@ -738,12 +749,16 @@ function headerCard(d, opts) {
       `${d.n_paths || '—'} 条路径 · 起点 ${String(d.start || d.labels?.[0] || '').slice(0, 7)} · ${Math.max((d.labels || []).length - 1, 0)} 个月`),
   ];
   const lab = opts.labLink ? h('a', { class: 'btn', href: src === 'builtin' ? `#lab?tpl=${d.id}` : `#lab?${d.id}` }, '在实验室里修改这个情景') : null;
+  const qlink = src === 'builtin' && d.id ? h('a', { class: 'btn', href: `#scenarios?${d.id}`, onclick: (e) => {
+    const el = document.getElementById(`q-${d.id}`);
+    if (el) { e.preventDefault(); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  } }, `季度模型（${qTag()}）↓`) : null;
   return h('div', { class: 'card' },
     h('div', { class: 'scenarios-head' },
       h('div', { style: { minWidth: 0, flex: '1 1 480px' } },
         h('h2', { class: 'scenarios-name' }, d.name || d.id || '未命名情景'),
         h('div', { class: 'scenarios-chips' }, chips)),
-      lab),
+      h('div', { class: 'row' }, qlink, lab)),
     d.summary ? h('p', { class: 'scenarios-summary' }, d.summary) : null,
     h('div', { class: 'scenarios-kpis scenarios-kpis4' }, kpis));
 }
@@ -1709,6 +1724,55 @@ function regimeSection(d, later) {
   notes.length ? h('div', { class: 'scenarios-rg-notes' }, notes.map(n => ui.notice(n, 'info'))) : null)];
 }
 
+// The quarterly stack's version of a built-in scenario (its reviewed QTable on the quarterly stack, 试运行): run when
+// the section scrolls into view or on the button; a result arriving after the reader moved to another scenario is
+// dropped. Lab-saved custom scenarios are monthly specs without a QTable: they get no section.
+const Q_RUNS = new Map();               // scenario id -> the run promise of this page load (switching back is instant)
+function quarterlySection(d, ctx) {
+  if ((d.source || 'builtin') !== 'builtin' || !d.id) return [];
+  ensureQStyle();
+  const box = h('div', { class: 'qd-scope' });
+  const status = h('span', { class: 'qd-status' });
+  const btn = h('button', { class: 'btn', type: 'button', onclick: () => start() }, '用季度模型推演这个情景');
+  const wrap = h('div', { class: 'scenarios-anchor', id: `q-${d.id}` },
+    card({ cls: 'qd-trial', title: `季度模型（${qTag()}）：这个情景说了什么，模型补了什么`,
+      sub: '同一个情景的季度情景表（由情景规格换算并人工审阅）在季度模型上运行：逐季列出情景写下的陈述和模型补全的部分，以及估值、归因和金融条件。'
+        + (quarterlyDefault(lastSwitch()) ? '切换关 T-S 已通过：季度模型是这个情景的默认引擎，下面月度引擎的数字作对照。'
+          : '在切换关通过之前，这个页面上面的数字仍来自月度引擎。'),
+      actions: h('div', { class: 'row' }, btn, status) },
+    box, h('p', { class: 'muted', style: { fontSize: '12px', margin: '6px 0 0' } }, '滚动到这里时自动运行（约 5–10 秒，1000 条路径）；', h('a', { href: `#lab?q=${d.id}` }, '在实验室里修改这张情景表 →'))));
+  let started = false;
+  function start() {
+    if (started) return;
+    started = true;
+    btn.disabled = true;
+    let p = Q_RUNS.get(d.id);
+    if (!p) {
+      p = runQuarterly({ scenario: d.id, n_paths: 1000, seed: 0, mode: 'path' }, { signal: ctx.signal },
+        (t) => { if (status.isConnected) status.textContent = t; });
+      Q_RUNS.set(d.id, p);
+      p.catch(() => Q_RUNS.delete(d.id));
+    } else status.textContent = '季度模型运行中…';
+    p.then((run) => {
+      if (!box.isConnected) return;
+      status.textContent = `完成：${run.info?.n_paths ?? '—'} 条路径，${run.scenario_quarters ?? '—'} 个季度`;
+      renderQuarterlyDetail(box, run, ctx, { title: `「${d.name || d.id}」的季度模型结果（${qTag()}）` });
+    }).catch((err) => {
+      if (!box.isConnected || err?.name === 'AbortError') return;
+      status.className = 'qd-status err';
+      status.textContent = `季度模型运行失败：${err.message}`;
+      btn.disabled = false;
+      started = false;
+    });
+  }
+  if (typeof IntersectionObserver === 'function') {
+    const io = new IntersectionObserver((es) => { if (es.some(e => e.isIntersecting)) { io.disconnect(); start(); } }, { rootMargin: '300px 0px' });
+    requestAnimationFrame(() => { if (wrap.isConnected) io.observe(wrap); else io.disconnect(); });
+    ctx.signal?.addEventListener('abort', () => io.disconnect(), { once: true });
+  }
+  return [h('div', { class: 'section-title' }, `季度模型（${qTag()}）`), wrap];
+}
+
 function specSection(d) {
   if (!d.spec) return [];
   let text = '';
@@ -1735,10 +1799,15 @@ export function renderScenarioDetail(root, d, ctx = {}, opts = {}) {
   const bus = {};                        // the attribution card's phase pick re-labels the causal chain
   const section = (t) => h('div', { class: 'section-title' }, t);
 
+  // once the switch gate T-S has passed, a built-in's quarterly section comes first and the monthly engine's sections
+  // follow as the comparison (P9)
+  const qFirst = quarterlyDefault(lastSwitch()) && (d.source || 'builtin') === 'builtin' && !!d.id;
   root.append(
     headerCard(d, opts),
     h('div', { style: { height: '16px' } }),
     validationCard(d.validation),
+    ...(qFirst ? [...quarterlySection(d, ctx),
+      ui.notice('下面是同一个情景在月度引擎上的结果：切换关 T-S 通过之后，月度引擎留作对照。', 'info')] : []),
     section('叙事与因果传导'),
     h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus),
       transmissionCard(d)),
@@ -1753,6 +1822,7 @@ export function renderScenarioDetail(root, d, ctx = {}, opts = {}) {
     section('相关性：情景如何改变资产之间的联动'),
     h('div', { class: 'scenarios-stack' }, corrSection(d, state, later)),
     ...calibrationSection(d, later),
+    ...(qFirst ? [] : quarterlySection(d, ctx)),
     section('概率'),
     ...probabilitySection(d, later),
     h('div', { style: { height: '16px' } }),

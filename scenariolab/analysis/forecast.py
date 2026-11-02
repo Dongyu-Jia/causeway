@@ -1010,7 +1010,7 @@ def _reconcile_text(rec: dict, cal: dict, skill: dict | None, calibrated: bool) 
                    f"（KL {one['kl']:.2f}）；5 个宏观变量全部对齐到 {full['us_equity']['p50']:+.1%}（KL {full['kl']:.2f}）。"
                    "差距主要来自情景库对第一年宏观（尤其失业率）的设定；"
                    + ("相似起点法对失业率有预测能力，校准已经包含它。" if u_ok else
-                      "相似起点法对失业率的预测没有通过检验，一年期打分因此不足以支持据此下调衰退类情景的概率。"))
+                      "相似起点法对失业率 12 个月变化的回放没有通过检验，一年期打分因此不足以支持据此下调衰退类情景的概率。"))
     if not rec["paths_reproduced"]:
         out.append("注意：重跑情景得到的路径与情景结果里存的路径不完全一致（情景结果与当前引擎不是同一次构建），"
                    "请运行 python -m scenariolab.build --only scenarios forecast。")

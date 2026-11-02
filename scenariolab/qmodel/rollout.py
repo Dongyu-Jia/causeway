@@ -51,8 +51,8 @@ same Φ applied to the path draws, so path and step modes share one state roll.
 
 Exports: core_view_draws (the instruments' CoreView.from_quarterly input), disaggregate (monthly paths for monthly
 consumers during the transition, labelled 季内月度路径为历史季度形态拆分（假设）), summary (the API's JSON),
-attribution (stated / completed / drift / valuation / residual, §4.4) and from_qtable (a minimal QTable reading for
-/api/q/run; P6's qtable.py owns validation).
+attribution (stated / completed / drift / valuation / residual, §4.4) and from_qtable (the QTable reading for
+/api/q/run: a thin wrapper of P6's qtable.constraints).
 
 The quarterly stack is 试运行 until the switch gate T-S passes. Nothing here downloads or calls an LLM.
 """
@@ -111,6 +111,33 @@ CEILING_NOTE = "失业率或信用利差钉到模型的上界以上（失业率 
 TAIL_GZ, TAIL_U, TAIL_SPREAD, TAIL_RETURN = 12.0, 20.0, 10.0, 1.0
 TAIL_NOTE = ("因子层的长期尾部远在历史之外（GZ 信用利差 > 12、Baa − 10 年利差 > 10、失业率 > 20% 或美股单季对数回报"
              "超过 ±100%）：这些粒子的结果只是极端尾部，解读要谨慎")
+
+
+_ZH: dict | None = None
+
+
+def _field_zh(f: str) -> str:
+    """A field's Chinese name from the model card (reader text never shows a code id)."""
+    global _ZH
+    if _ZH is None:
+        try:
+            from . import card as qcard
+            _ZH = {r["id"]: r["zh"] for r in qcard.load_card()["rows"]}
+        except Exception:  # noqa: BLE001 - no card: a generic word
+            _ZH = {}
+    return _ZH.get(f, "这个字段")
+
+
+def reader_notes(notes) -> list:
+    """Notes for a page: a factor-layer clip note written as "<field id>：…" (keyed field or var) gets the field's
+    Chinese name."""
+    out = []
+    for n in notes or []:
+        f = (n.get("field") or n.get("var")) if isinstance(n, dict) else None
+        if f and isinstance(n.get("text"), str) and n["text"].startswith(f"{f}："):
+            n = {**n, "text": f"{_field_zh(f)}{n['text'][len(f):]}"}
+        out.append(n)
+    return out
 
 
 def tail_flags(gz, unrate, us_total, spread=None) -> np.ndarray:
@@ -962,7 +989,7 @@ class Stepper:
         nclip = clipped.sum(axis=1)
         for j, f in enumerate(ids):
             if clipped[:, j].any():
-                notes.append({"field": f, "particles": int(clipped[:, j].sum()), "text": f"{f}：{F.CLIP_TEXT}"})
+                notes.append({"field": f, "particles": int(clipped[:, j].sum()), "text": f"{_field_zh(f)}：{F.CLIP_TEXT}"})
         priv[:, PV["floor_bound"]] = floor_bound.astype(float)
         priv[:, PV["bound_hit"]] = bound.astype(float)
         priv[:, PV["saturated"]] = nclip
@@ -1631,255 +1658,68 @@ SUMMARY_FIELDS = ("d_ff", "d_unrate", "d_ip", "d_rgdp", "d_cpi_goods", "d_cpi_se
 SUMMARY_LEVELS = ("ff", "unrate", "y10", "spread", "gz", "cpi_yoy", "core_yoy")
 
 
+MIN_BAND_PATHS = 50                      # fewer non-divergent paths than this: the bands use every path (and say so)
+
+
+def band_mask(roll: Rollout) -> tuple[np.ndarray, dict]:
+    """(paths the fans use, how): the paths the model itself flags as tail-divergent (tail_flags: GZ > 15,
+    unemployment > 20%, a quarterly US-equity log return beyond ±100%, or not finite) are left out of every band, as
+    the forecast tab's mixture leaves them out; their share is reported beside the bands."""
+    ax, fx = roll.ax, roll.fx
+    tails = tail_flags(fx.levels["gz"], fx.levels["unrate"], ax.total[:, :, IA["us_equity"]]).any(axis=1)
+    keep = ~tails
+    used = int(keep.sum())
+    if used < MIN_BAND_PATHS:
+        return np.ones_like(keep), {"excludes_tail": False, "tail_share": float(tails.mean()), "n_used": int(keep.size),
+                                    "text": "不可信的发散路径太多，区间只能用全部路径（含发散路径）"}
+    share = float(tails.mean())
+    return keep, {"excludes_tail": bool(tails.any()), "tail_share": share, "n_used": used,
+                  "text": (f"区间与表格不含模型标为不可信的发散路径（占 {share:.1%}；与未来一年页的情景加权同一条规则）"
+                           if tails.any() else "")}
+
+
 def summary(roll: Rollout) -> dict:
     """JSON-ready quarterly fans (p10 / p50 / p90): each asset's cumulative log total return, the main factor
-    fields and levels, the implied CAPE and P/D paths, plus delivery, rarity, notes and the attribution."""
+    fields and levels, the implied CAPE and P/D paths, plus delivery, rarity, notes and the attribution. The fans
+    leave out the paths the model flags as tail-divergent (band_mask; info.bands says how many)."""
     ax, fx = roll.ax, roll.fx
-    assets = {a: {"cum_total": _q(np.cumsum(ax.total[:, :, IA[a]], axis=1)),
-                  "quarter_total": _q(ax.total[:, :, IA[a]])} for a in ASSETS}
-    factors = {f: _q(fx.x[f]) for f in SUMMARY_FIELDS if f in fx.x}
-    levels = {v: _q(fx.levels[v]) for v in SUMMARY_LEVELS if v in fx.levels}
+    keep, bands = band_mask(roll)
+    assets = {a: {"cum_total": _q(np.cumsum(ax.total[:, :, IA[a]], axis=1)[keep]),
+                  "quarter_total": _q(ax.total[:, :, IA[a]][keep])} for a in ASSETS}
+    factors = {f: _q(np.asarray(fx.x[f])[keep]) for f in SUMMARY_FIELDS if f in fx.x}
+    levels = {v: _q(np.asarray(fx.levels[v])[keep]) for v in SUMMARY_LEVELS if v in fx.levels}
     stated = {}
     for st in roll.statements:
         for q in st.quarters:
             stated.setdefault(int(q), set()).add(st.var)
-    return {"label": cq.TRIAL_LABEL, "zh": "季度模型（试运行）：情景条件模拟，不是预测", "info": roll.info,
+    return {"label": cq.TRIAL_LABEL, "zh": "季度模型（试运行）：情景条件模拟，不是预测", "info": {**roll.info, "bands": bands},
             "quarters": roll.labels, "scenario_quarters": roll.H,
             "assets": assets, "factors": factors, "levels": levels,
-            "valuation": {"cape": _q(np.exp(ax.log_cape)), "pd": _q(np.exp(ax.log_pd)), "y_mult": _q(ax.y_mult),
+            "valuation": {"cape": _q(np.exp(ax.log_cape)[keep]), "pd": _q(np.exp(ax.log_pd)[keep]),
+                          "y_mult": _q(ax.y_mult[keep]),
                           "statements": [{"quarters": list(s.quarters), "mode": s.mode, "direction": s.direction,
                                           "size": s.size} for s in roll.valuation]},
             "stated": {str(q): sorted(v) for q, v in sorted(stated.items())},
             "delivery": fx.delivery, "rarity": {k: v for k, v in (fx.rarity or {}).items()},
-            "notes": roll.notes, "attribution": attribution(roll)}
+            "notes": reader_notes(roll.notes), "attribution": attribution(roll)}
 
 
-# ================================================================ a minimal QTable reading (for /api/q/run)
-
-def _sd_table(Q: pd.DataFrame, train_end: str, fields) -> dict:
-    from . import panel as qpanel
-    fs = qpanel.field_stats(Q, [f for f in fields if f in Q.columns], train_end)
-    return {f: float(fs.at[f, "sd"]) for f in fs.index}
-
-
-CONSTRAINT_KINDS = ("sum", "mean", "yoy", "level", "range")
-# a c_q 'level' constraint written on a change field means that field's level (Appendix B: kind level on d_ff = the
-# policy rate's level); a change field without a level observable cannot take one
-LEVEL_OF_CHANGE = {"d_ff": "ff", "d_unrate": "unrate", "d_y10": "y10", "d_spread": "spread", "d_gz": "gz",
-                   "d_usd": "usd"}
-YOY_VARS = {"d_cpi_goods": "cpi_yoy", "d_cpi": "cpi_yoy", "d_core": "core_yoy", "s_cpi_yoy": "cpi_yoy",
-            "s_core_yoy": "core_yoy", "cpi_yoy": "cpi_yoy", "core_yoy": "core_yoy"}
-
-
-def _num(v, what: str, *, optional: bool = False) -> float | None:
-    """A finite JSON number (not a string, not a boolean), else a Chinese RolloutError (the API's 400)."""
-    if v is None and optional:
-        return None
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        raise RolloutError(f"{what} 必须是数字（写的是 {v!r}）")
-    x = float(v)
-    if not math.isfinite(x):
-        raise RolloutError(f"{what} 必须是有限的数字（写的是 {v!r}）")
-    return x
-
-
-def _int(v, what: str) -> int:
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not float(v).is_integer():
-        raise RolloutError(f"{what} 必须是整数（写的是 {v!r}）")
-    return int(v)
-
-
-def _sd_of(e: dict, what: str) -> float | None:
-    s = _num(e.get("sd"), f"{what} 的 sd", optional=True)
-    if s is not None and s <= 0:
-        raise RolloutError(f"{what} 的 sd 必须大于 0（不写 sd 表示精确陈述）")
-    return s
-
-
-def _range_of(e: dict, what: str) -> tuple[float | None, float | None]:
-    lo = _num(e.get("min"), f"{what} 的 min", optional=True)
-    hi = _num(e.get("max"), f"{what} 的 max", optional=True)
-    if lo is None and hi is None:
-        raise RolloutError(f"{what}：范围至少要写 min 或 max")
-    if lo is not None and hi is not None and lo > hi:
-        raise RolloutError(f"{what}：min（{lo:g}）大于 max（{hi:g}）")
-    return lo, hi
-
-
-def _entry(f: str, e: dict, q: int, sd: dict, shock_sd: dict, where: str):
-    if not isinstance(e, dict):
-        raise RolloutError(f"{where} {f}：条目必须是对象")
-    if f == "x_oil_cause":
-        v = e.get("value")
-        if v not in cq.OIL_CAUSE:
-            raise RolloutError(f"{where} x_oil_cause 必须是 supply / demand / mixed（写的是 {v!r}）")
-        return F.Statement(f, (q,), cq.OIL_CAUSE[v], label=str(e.get("quote") or ""))
-    unit = shock_sd.get(f) if f in F.SHOCKS else sd.get(f)
-    what = f"{where} {f}"
-    if "value" in e and e["value"] is not None:
-        v = _num(e["value"], f"{what} 的 value")
-        return F.Statement(f, (q,), v, sd=_sd_of(e, what), label=str(e.get("quote") or ""))
-    if "sign" in e or "size" in e:
-        size = e.get("size")
-        if size not in cq.SIZE_BINS:
-            raise RolloutError(f"{where} {f}：幅度 size 必须是 {list(cq.SIZE_BINS)} 之一")
-        sign = {"+": 1.0, "-": -1.0}.get(e.get("sign"))
-        if sign is None:
-            raise RolloutError(f"{where} {f}：sign 必须是 '+' 或 '-'")
-        if not unit or not math.isfinite(unit):
-            raise RolloutError(f"{where} {f}：没有训练期标准差，不能写定性幅度")
-        return F.Statement(f, (q,), sign * cq.SIZE_BINS[size] * unit, sd=cq.QTABLE_QUAL_SD * unit,
-                           label=str(e.get("quote") or ""))
-    if "min" in e or "max" in e:
-        lo, hi = _range_of(e, what)
-        return F.Statement(f, (q,), lo=lo, hi=hi, label=str(e.get("quote") or ""))
-    raise RolloutError(f"{where} {f}：条目必须写 value、sign + size 或 min / max 之一")
-
+# ================================================================ the QTable reading (for /api/q/run)
 
 def from_qtable(qt: dict, stack: Stack | None = None, mode: str = "production", *, Q: pd.DataFrame | None = None,
-                train_end: str | None = None, x_fields=None) -> dict:
-    """A QTable/1 (Appendix B) as rollout inputs: {statements, valuation, cycle_odds, H, notes}. The structural
-    reading only: P6's qtable.py validates quotes, refusals and R1-R6 (this is what /api/q/run runs on until it
-    lands). fc.stance becomes soft statements on d_gz and d_spread (config_q.FC_STANCE); 未说明 adds the W-FC note.
-    Needs the stack, or the quarterly panel Q with the train end and x fields (no fit: the API validates with it)."""
-    from . import policy
+                train_end: str | None = None, x_fields=None, narrative: str | None = None,
+                source: str = "translator") -> dict:
+    """A QTable/1 (Appendix B) as rollout inputs: {statements, valuation, cycle_odds, H, notes, anchors, report}.
+    A thin wrapper of qtable.constraints (P6 owns the reading: validation, refusals, R1-R6, fc stances, regime
+    requests); a QTable that cannot run as written raises RolloutError with the first problem (Chinese). Needs the
+    stack, or the quarterly panel Q with the train end and x fields (no fit: the API validates with it)."""
+    from . import qtable as QT
     if mode not in ("production", "test"):
         raise RolloutError(f"未知的模式 {mode!r}（production 或 test）")
-    if not isinstance(qt, dict):
-        raise RolloutError("qtable 必须是 JSON 对象")
-    rows = qt.get("rows")
-    if not isinstance(rows, list) or not rows:
-        raise RolloutError("qtable.rows 必须是非空列表")
-    if qt.get("n_quarters") is not None:
-        H = _int(qt.get("n_quarters"), "qtable.n_quarters")
-    else:
-        try:
-            H = max(_int(r.get("q"), "行的季度 q") for r in rows if isinstance(r, dict))
-        except ValueError as err:
-            raise RolloutError("qtable.n_quarters 必须是整数") from err
-    if not 1 <= H <= cq.QTABLE_MAX_QUARTERS:
-        raise RolloutError(f"n_quarters 必须在 1..{cq.QTABLE_MAX_QUARTERS} 之间")
-    if stack is not None:
-        Q, train_end, x_fields = stack.Q, stack.train_end, stack.x_fields
-    if Q is None or train_end is None or x_fields is None:
+    if stack is None and (Q is None or train_end is None or x_fields is None):
         raise RolloutError("from_qtable 需要拟合好的模型，或季度面板、训练期末和字段列表")
-    have = set(x_fields)
-    sd = _sd_table(Q, train_end, sorted(have))
     try:
-        shock_sd = policy.shock_sd(policy.fit(Q, train_end))
-    except Exception:  # noqa: BLE001 - sign + size on a shock then raises a Chinese error
-        shock_sd = {}
-    try:
-        return _read_qtable(qt, rows, H, have, sd, shock_sd, mode)
-    except RolloutError:
-        raise
-    except (TypeError, ValueError, KeyError, AttributeError) as err:
-        raise RolloutError(f"QTable 无法读取：{err}") from err
-
-
-def _read_qtable(qt: dict, rows: list, H: int, have: set, sd: dict, shock_sd: dict, mode: str) -> dict:
-    stmts, notes = [], []
-    seen_q: set = set()
-    for r in rows:
-        if not isinstance(r, dict):
-            raise RolloutError("qtable.rows 的每一行必须是对象")
-        q = _int(r.get("q"), "行的季度 q")
-        if not 1 <= q <= H:
-            raise RolloutError(f"行的季度 q = {q} 超出 1..{H}")
-        if q in seen_q:
-            raise RolloutError(f"第 {q} 季出现了两行：每个季度只能有一行（同一季的陈述写在同一行里）")
-        seen_q.add(q)
-        where = f"第 {q} 季"
-        for part in ("x", "u", "fc"):
-            if r.get(part) is not None and not isinstance(r.get(part), dict):
-                raise RolloutError(f"{where}：{part} 必须是对象")
-        for f, e in (r.get("x") or {}).items():
-            if f not in have:
-                raise RolloutError(f"{where}：字段不存在或这个训练期没有估计：{f}")
-            stmts.append(_entry(f, e, q, sd, shock_sd, where))
-        for u, e in (r.get("u") or {}).items():
-            if u not in F.SHOCKS:
-                raise RolloutError(f"{where}：未知的政策冲击 {u}")
-            stmts.append(_entry(u, e, q, sd, shock_sd, where))
-        fc = r.get("fc") or {}
-        stance = fc.get("stance", "未说明")
-        if stance not in cq.FC_STANCES:
-            raise RolloutError(f"{where}：金融条件 fc.stance 必须是 {cq.FC_STANCES} 之一")
-        if stance == "未说明":
-            notes.append({"q": q, "code": "W-FC", "text": "金融条件未说明：信用利差由模型补全。历史检验里，补全的信用利差与"
-                                                          "无条件抽样相当，而资产结果主要取决于它"})
-        else:
-            for f in cq.FC_FIELDS:
-                if f in (r.get("x") or {}) or f not in sd:
-                    continue
-                stmts.append(F.Statement(f, (q,), cq.FC_STANCE[stance] * sd[f], sd=cq.FC_STANCE_SD * sd[f],
-                                         label=f"fc:{stance}"))
-    cqx = qt.get("c_q") or {}
-    if not isinstance(cqx, dict):
-        raise RolloutError("qtable.c_q 必须是对象")
-    for part in ("constraints", "announced", "regime", "valuation"):
-        if cqx.get(part) is not None and not isinstance(cqx.get(part), list):
-            raise RolloutError(f"c_q.{part} 必须是列表")
-    observables = set(have) | set(F.LEVEL_OBS) | {"d_cpi"}
-    for c in cqx.get("constraints") or []:
-        if not isinstance(c, dict):
-            raise RolloutError("c_q.constraints 的每一项必须是对象")
-        kind, f = c.get("kind"), c.get("field")
-        what = f"约束 {f}（{kind}）"
-        if kind not in CONSTRAINT_KINDS:
-            raise RolloutError(f"约束 {f}：kind 必须是 {list(CONSTRAINT_KINDS)} 之一（写的是 {kind!r}）")
-        qv = c.get("quarters")
-        if not isinstance(qv, list) or not qv:
-            raise RolloutError(f"{what}：quarters 必须是非空列表")
-        qs = tuple(_int(v, f"{what} 的季度") for v in qv)
-        if min(qs) < 1 or max(qs) > H:
-            raise RolloutError(f"{what}：quarters 必须在 1..{H} 之内")
-        if len(set(qs)) != len(qs):
-            raise RolloutError(f"{what}：quarters 有重复的季度")
-        var = cq.QTABLE_LEVEL_VARS.get(f, f)
-        if kind == "level":
-            var = LEVEL_OF_CHANGE.get(f, var)
-            if var in have and var.startswith("d_"):
-                raise RolloutError(f"{what}：{f} 是变化量，没有对应的水平量；水平约束请写 s_ff、unrate、y10、spread、gz 等")
-        elif kind == "yoy":
-            var = YOY_VARS.get(f)
-            if var is None:
-                raise RolloutError(f"{what}：同比约束只能写 CPI（d_cpi、d_cpi_goods、s_cpi_yoy）或核心 CPI（d_core）")
-        if var not in observables:
-            raise RolloutError(f"{what}：字段不存在或这个训练期没有估计")
-        agg = {"sum": "sum", "mean": "mean"}.get(kind, "each")
-        if kind == "range" or c.get("value") is None:
-            lo, hi = _range_of(c, what)
-            stmts.append(F.Statement(var, qs, lo=lo, hi=hi, agg="each" if kind == "range" else agg))
-        else:
-            stmts.append(F.Statement(var, qs, _num(c.get("value"), f"{what} 的 value"), sd=_sd_of(c, what), agg=agg))
-    for a in cqx.get("announced") or []:
-        if not isinstance(a, dict):
-            raise RolloutError("c_q.announced 的每一项必须是对象")
-        what = f"预告路径 {a.get('field')}"
-        qs = list(a.get("quarters") or ())
-        vals = list(a.get("values") or ())
-        if len(qs) != len(vals):
-            raise RolloutError(f"{what}：quarters 与 values 的长度不同")
-        sd_a = _sd_of(a, what)
-        for q, v in zip(qs, vals):
-            q = _int(q, f"{what} 的季度")
-            if not 1 <= q <= H:
-                raise RolloutError(f"{what}：季度 {q} 超出 1..{H}")
-            stmts.append(F.Statement(a.get("field"), (q,), _num(v, f"{what} 的值"), sd=sd_a))
-    odds = None
-    for rg in cqx.get("regime") or []:
-        if rg.get("label") in cq.CONTRACTION_LABELS:
-            odds = {"contraction": float(rg.get("share", 1.0)), "quarters": [int(q) for q in rg.get("quarters") or []]}
-        else:
-            notes.append({"code": "regime", "text": f"体制请求 {rg.get('label')!r} 还没有接到分类器规则（P6），未作输入"})
-    if cqx.get("anchors"):
-        notes.append({"code": "anchors", "text": "情景的长期锚（c_q.anchors）要等 P6 接入：这次运行用 §3.8 的默认锚"})
-    for a in cqx.get("announced") or []:
-        if a.get("field") not in have:
-            raise RolloutError(f"预告路径：字段不存在或这个训练期没有估计：{a.get('field')}")
-    try:
-        vst = val.parse_statements(list(cqx.get("valuation") or []), H, mode=mode)
-    except ValueError as err:                       # the valuation block's own Chinese message
+        return QT.constraints(qt, stack=stack, Q=Q, train_end=train_end, x_fields=x_fields, mode=mode,
+                              narrative=narrative, source=source)
+    except QT.QTableError as err:
         raise RolloutError(str(err)) from err
-    return {"statements": stmts, "valuation": vst, "cycle_odds": odds, "H": H, "notes": notes}

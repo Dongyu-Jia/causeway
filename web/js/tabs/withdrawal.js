@@ -9,15 +9,17 @@
 // coverage by year and payout-cut pressure, and the estimated tickers' α (收缩后 / 减半 / 原始) is an explicit
 // choice, with the three versions side by side. Inputs are shared with 组合评估.
 // Deep links: #withdrawal?income, #withdrawal?rate=3.5&horizon=10&nominal&strategy=div_then_winners&scenario=stagflation,
-// #withdrawal?preset=income_tickers&alpha=half, #withdrawal?w=MAIN:10,QQQI:15,SCHD:20
+// #withdrawal?preset=income_tickers&alpha=half, #withdrawal?w=MAIN:10,QQQI:15,SCHD:20, #withdrawal?set=quarterly
+// Scenario sets (P9, SIM_DESIGN §11.3): the monthly engine's built-ins, or the quarterly stack's (step_months = 3, its
+// own continuation to year 40; withdrawals stay yearly); the default follows the switch gate T-S (shared.set).
 import {
-  shared, probEditor, customPicker, statusPill, liveRequest, debounce, errorNotice, parseParam,
+  shared, probEditor, customPicker, setPicker, statusPill, liveRequest, debounce, errorNotice, parseParam,
   scenarioRows, rangeChart, labelWidth, rowsHeight, shortName, fmtProb, isNum, esc,
   niceAxis, plainNote, injectStyle,
 } from './_weights.js';
 import {
   portfolioEditor, allPresets, loadCatalog, parseLinkWeights, isEstimated, holdingsCard, cashFlowView, alphaCompare,
-  weightsText, catalog, TK,
+  weightsText, catalog, TK, TICKERS_Q, TICKERS_Q_ONLY,
 } from './_tickers.js';
 
 const INK = '#1d2433', INK2 = '#4a5468', INK3 = '#7a8396', LINE = '#e3e6ec';
@@ -188,7 +190,23 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
   editor.setCatalog(cat);
   const heldEstimated = () => editor.heldTickers().some(isEstimated);
   const probs = probEditor({ onChange: () => refresh() });
-  const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); refresh(); } });
+  const sets = setPicker({ want: q.kv.set || null, onChange: () => {
+    shared.probs = null;                // the set's own scenarios and default probabilities
+    shared.probMode = 'posterior';
+    probs.setRows(rowsNow(), infoNow());
+    editor.lockTickers(quarterlySet() ? TICKERS_Q : null);
+    paintHints();
+    refresh();
+  } });
+  const quarterlySet = () => sets.stepMonths() > 1;
+  // the weights a request carries: on the quarterly set only the asset classes (never a request known to fail)
+  const reqWeights = () => (quarterlySet() ? editor.getAssets() : editor.get());
+  const tickerOnly = () => quarterlySet() && !!editor.get() && !editor.getAssets();
+  const qNote = () => (quarterlySet() && editor.heldTickers().length ? [ui.notice(TICKERS_Q, 'info')] : []);
+  const contWords = () => (quarterlySet() ? '季度模型不加陈述续推' : '按历史月份无条件续抽');
+  const rowsNow = () => scenarioRows(scen, picker.items(), sets.entry());
+  const infoNow = () => ({ ...probInfo, basis: sets.current() && sets.current() !== 'monthly' ? 'prior' : 'posterior' });
+  const picker = customPicker({ onChange: () => { probs.setRows(rowsNow(), infoNow()); refresh(); } });
   const schedule = debounce(() => refresh(), 400);
 
   const initialIn = h('input', { type: 'number', min: 0, step: 10, value: String(Math.round(params.initial / 100) / 100), 'aria-label': '初始资产（万）' });
@@ -206,7 +224,7 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
     horizonVal.textContent = `${params.horizon} 年`;
     const S = themedYears;
     horizonHint.textContent = params.horizon > S
-      ? `前 ${S} 年按各情景路径；第 ${S + 1}–${params.horizon} 年没有情景主题，按历史月份无条件续抽（${HORIZON_MIN}–${HORIZON_MAX} 年可选）`
+      ? `前 ${S} 年按各情景路径；第 ${S + 1}–${params.horizon} 年没有情景主题，${contWords()}（${HORIZON_MIN}–${HORIZON_MAX} 年可选）`
       : `全部 ${params.horizon} 年都在情景路径之内（情景路径共 ${S} 年；${HORIZON_MIN}–${HORIZON_MAX} 年可选）`;
   }
   initialIn.addEventListener('input', () => {
@@ -278,6 +296,7 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
   root.append(h('div', { class: 'grid cols-3' }, editor.el,
     card({ title: '提取参数', sub: '破产概率只取决于提取率，初始金额只决定财富数字的大小', cls: 'weights-side' },
       h('div', { class: 'withdrawal-form' },
+        field('情景集', sets.el),
         field('初始资产（万）', h('div', { class: 'withdrawal-inline' }, initialIn, initialHint), amountHint),
         field('年提取率（占初始资产）', h('div', { class: 'withdrawal-inline' }, rateRange, rateIn, h('span', { class: 'muted' }, '%')), rateHint),
         field('通胀挂钩', ui.seg([{ value: 'real', label: '随通胀上调' }, { value: 'nominal', label: '名义固定' }],
@@ -362,6 +381,14 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
       return h('div', { class: 'withdrawal-cont plain' }, `期限 ${res.horizon_years} 年全部在情景路径之内（情景路径共 ${S} 年），`
         + '所有数字都只来自各情景自己的宏观路径。');
     }
+    if (c.method && c.method !== 'unconditional') {       // a set's own continuation (the quarterly stack's)
+      return h('div', { class: 'withdrawal-cont' },
+        h('div', { class: 'withdrawal-cont-label' }, c.label || `第 ${S + 1} 年起没有情景主题：同一个模型不加陈述续推`),
+        h('p', {}, `前 ${S} 年是各情景自己的路径；第 ${c.first_year ?? S + 1}–${res.horizon_years} 年是${c.text || '同一个模型在情景之后不加陈述接着往下推'}。`
+          + (c.shared ? `续推路径共 ${c.n_paths ?? '—'} 条，部分情景路径按序号循环共用。` : `每条情景路径各接一条续推路径（共 ${c.n_paths ?? '—'} 条）。`)),
+        h('p', {}, '和月度情景集不同：月度引擎第 16 年起改用对历史月份的无条件抽样；季度情景集让同一个模型接着走，路径从各自情景的季末状态出发。'
+          + 'CPI、分红和利息照常延续，随通胀上调的提取额按整条路径的 CPI 换算。'));
+    }
     const at = c.at_start || {};
     const levels = [isNum(c.inflation_p50) ? `续抽期通胀中位数约每年 ${pct(c.inflation_p50)}` : null,
       isNum(at.y10) ? `10 年期收益率从约 ${at.y10.toFixed(1)}% 起步` : null].filter(Boolean).join('，');
@@ -385,7 +412,7 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
     const Y = res.horizon_years, S = part.years;
     view.compareTitle.textContent = `前 ${S} 年（情景主题内）与 ${Y} 年对比`;
     view.compareSub.textContent = `前 ${S} 年的数字只来自各情景路径，就是在第 ${S} 年末截断的同一批提取路径（与只算 ${S} 年完全相同）；`
-      + `${Y} 年的数字包含第 ${S + 1} 年起的无条件续抽。两者的差距就是“再多撑 ${Y - S} 年”的代价。`;
+      + `${Y} 年的数字包含第 ${S + 1} 年起的${(res.step_months || 1) > 1 ? '续推' : '无条件续抽'}。两者的差距就是“再多撑 ${Y - S} 年”的代价。`;
     const rows = STRATS.filter(s => res.strategies?.[s.id])
       .map(s => ({ s, a: aggOf(res, s.id), p: part.strategies?.[s.id]?.aggregate || {} }));
     // each cell reads "first S years -> whole horizon", so three columns hold the comparison
@@ -405,7 +432,7 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
   // the continuation years on a chart whose x axis is res.dates (category axis)
   const contArea = (res, x) => {
     const part = partOf(res);
-    return part && x.length > part.years ? [{ from: x[part.years], to: x[x.length - 1], label: '无条件续抽', color: CONT_SHADE }] : undefined;
+    return part && x.length > part.years ? [{ from: x[part.years], to: x[x.length - 1], label: (res.step_months || 1) > 1 ? '续推' : '无条件续抽', color: CONT_SHADE }] : undefined;
   };
 
   // ---- lookups on one result
@@ -733,13 +760,16 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
     const custom = idx.list.filter(e => e.source === 'custom').length;
     view.head.textContent = `${res.horizon_years} 年内三种提取方式的破产概率（按情景概率加权）`;
     const est = (res.instruments?.estimated || []).length > 0;
+    const ss = res.scenario_set;
+    const q3 = (res.step_months || 1) > 1;
     view.summary.textContent = [
+      ss ? `${ss.name}${ss.label ? `（${ss.label}）` : ''}` : null,
       weightsText(res.weights), `初始 ${money(res.initial)}`, `每年提取 ${rateTxt(res.rate)}（${money(res.annual_withdrawal)}）`,
       res.inflation_indexed ? '随通胀上调' : '名义固定',
       est ? `估计型标的 α：${res.instruments.alpha_mode_name || res.instruments.alpha_mode}` : null,
-      part ? `${res.horizon_years} 年（前 ${part.years} 年情景 + ${res.horizon_years - part.years} 年无条件续抽）` : `${res.horizon_years} 年`,
+      part ? `${res.horizon_years} 年（前 ${part.years} 年情景 + ${res.horizon_years - part.years} 年${q3 ? '续推' : '无条件续抽'}）` : `${res.horizon_years} 年`,
       `${idx.list.length} 个情景${custom ? `（含 ${custom} 个自定义）` : ''}`,
-      adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : '模型后验概率',
+      adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : q3 ? '手设先验概率' : '按今天状态倾斜的概率（模型后验）',
     ].filter(Boolean).join(' · ');
     view.cont.replaceChildren(contNote(res));
     view.kpis.replaceChildren(...kpis(res));
@@ -762,11 +792,12 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
 
   // ---- requests
   function body() {
-    const weights = editor.get();
+    const weights = reqWeights();
     if (!weights) return null;
     const b = { weights, initial: params.initial, rate: params.rate, strategy: 'all',
       inflation_indexed: params.indexed, horizon_years: params.horizon };
-    if (TK.alpha !== 'shrunk' && heldEstimated()) b.alpha_mode = TK.alpha;
+    if (shared.set) b.scenario_set = shared.set;
+    if (TK.alpha !== 'shrunk' && heldEstimated() && !quarterlySet()) b.alpha_mode = TK.alpha;
     if (shared.include.length) b.include_custom = shared.include.slice();
     const sp = probs.overrides();
     if (sp) b.scenario_probs = sp;
@@ -790,9 +821,9 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
   }
   function watchWeights() {
     if (!alive()) return;
-    if (!editor.get()) { if (!stale) refresh(); return; }
+    if (!reqWeights()) { if (!stale) refresh(); return; }
     if (!stale) return;
-    errBox.replaceChildren();
+    errBox.replaceChildren(...qNote());
     clearTimeout(staleTimer);
     const key = keyOf(body());
     if (shown && key === shownKey) { setStale(false); pill.done('已恢复'); return; }
@@ -842,8 +873,8 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
       show(res, { adjusted });
       shownKey = key;
       probs.sync(idx.list);
-      if (!editor.get()) { setStale(true); pill.fail('权重合计为 0：未计算'); return; }   // cleared while it ran
-      errBox.replaceChildren();
+      if (!reqWeights()) { setStale(true); pill.fail('权重合计为 0：未计算'); return; }   // cleared while it ran
+      errBox.replaceChildren(...qNote());
       setStale(false);
       pill.done('已更新');
       runAlpha(b, res);
@@ -857,12 +888,12 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
       if (live) return;                    // keep the last good result on screen
       const d = defaults || await defaultsP;
       if (!alive()) return;
-      if (d && !d.error && d.withdrawal) {
+      if (d && !d.error && d.withdrawal && (!shared.set || shared.set === 'monthly')) {
         errBox.append(ui.notice(`下面先显示构建时预先计算的默认结果（60/40、100 万、每年 4%、随通胀上调、${d.withdrawal.horizon_years || HORIZON_DEFAULT} 年），`
           + '实时计算恢复后会自动替换。', 'info'));
         show(d.withdrawal);
         shownKey = null;
-        setStale(!editor.get());
+        setStale(!reqWeights());
       } else if (!view) {
         results.replaceChildren();
       }
@@ -877,21 +908,24 @@ export async function render(root, { api, charts, ui, meta, param, rerender }) {
     const b = body();
     if (!b) {
       setStale(true);
-      errBox.replaceChildren(ui.notice(ZERO, 'error'));
-      pill.fail('权重合计为 0：未计算');
+      errBox.replaceChildren(ui.notice(tickerOnly() ? TICKERS_Q_ONLY : ZERO, 'error'));
+      pill.fail(tickerOnly() ? '季度情景集算不了标的：未计算' : '权重合计为 0：未计算');
       return;
     }
     if (!(params.initial > 0)) { errBox.replaceChildren(ui.notice('初始资产必须大于 0。', 'error')); return; }
+    errBox.replaceChildren(...qNote());
     pendingKey = keyOf(b);
     go({ b, adjusted: !b.scenario_probs ? false : probs.mode() === 'calibrated' ? 'calibrated' : probs.adjusted() });
   }
 
   // ---- scenario list + saved custom scenarios, then the first evaluation; presets fill in later
-  const [s, items] = await Promise.all([scenP, picker.load()]);
+  const [s] = await Promise.all([scenP, picker.load(), sets.load()]);
   if (!alive()) return;
   scen = s && !s.error ? s : null;
   probInfo = { method: scen?.probability_method, gamma: scen?.probability?.gamma };
-  probs.setRows(scenarioRows(scen, items), probInfo);
+  probs.setRows(rowsNow(), infoNow());
+  editor.lockTickers(quarterlySet() ? TICKERS_Q : null);
+  paintHints();
   if (scen && !wantScope) wantScope = take(t => (scen.scenarios || []).some(x => x.id === t));
   if (tokens.length) {
     root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id、提取方式 id 或 nominal）。`, 'info'), errBox);

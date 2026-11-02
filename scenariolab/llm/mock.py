@@ -17,6 +17,13 @@ one the prompt carries (under "## 输出格式（JSON schema）"); its schema_ve
     a P5 repair                      the previous output, re-parsed and with probabilities renormalised.
     the translator's spec            a valid spec built from keywords of the narrative (oil, recession, inflation,
                                      rate cuts or hikes), in the shape SPEC_JSON_SCHEMA describes.
+    qtable/1 (the quarterly          a recorded replay when one is registered for the narrative (register_qtable,
+    translator, qtranslator.py)      or MSL_LLM_MOCK_QTABLES=<dir>/<qtable_key>.json); in test mode (the blind
+                                     prompt) the minimal QTable, every field absent and fc 未说明 (SIM_DESIGN §8.5);
+                                     otherwise sign + size entries in quarter 1 from keywords of the narrative, each
+                                     quoting the clause that holds its keyword (so the validator accepts it).
+    narrative-probe-1 (the narrative "unknown": the mock never recognises a period (the narrative test's probe,
+    test's recognition probe)        evaluation/narrative/prompts.py).
 
 Fixtures turn a call into an edge case (FIXTURES): malformed or fenced JSON, trailing commas, full-width quotes,
 percent probabilities, a bad probability sum, a price sentence, an out-of-power write, a decline, a refusal (as
@@ -117,14 +124,24 @@ def schema_version(schema: dict | None) -> str | None:
     return enum[0] if enum else None
 
 
+def is_qtable_schema(schema: dict | None) -> bool:
+    """The QTable/1 output schema (the quarterly translator, qtranslator.prompt_schema)."""
+    sv = ((schema or {}).get("properties") or {}).get("schema") or {}
+    return sv.get("const") == QTABLE_ID or QTABLE_ID in (sv.get("enum") or [])
+
+
 def call_kind(schema: dict | None, user: str) -> str:
-    """actor | node | synth | root | probe | story | repair | translator | generic."""
+    """actor | node | synth | root | probe | story | repair | translator | qtable | nprobe | generic."""
     if "<previous_output>" in str(user or ""):
         return "repair"
     version = schema_version(schema)
+    if version == NARRATIVE_PROBE:
+        return "nprobe"
     for kind, v in VERSIONS.items():
         if version == v:
             return kind
+    if is_qtable_schema(schema):
+        return "qtable"
     if "phases" in ((schema or {}).get("properties") or {}):
         return "translator"
     return "generic"
@@ -417,6 +434,15 @@ def story_answer(schema: dict, user: str) -> dict:
             "story": truncate("；".join(lines) or "模拟后端：没有路径。", 600), "facts_used": []}
 
 
+NARRATIVE_PROBE = "narrative-probe-1"               # evaluation/narrative/prompts.PROBE_SCHEMA's schema_version
+
+
+def nprobe_answer(schema: dict | None = None) -> dict:
+    """The narrative test's recognition probe: the mock never recognises a period."""
+    return {"schema_version": NARRATIVE_PROBE, "known": False, "period": "unknown", "start_year": None,
+            "end_year": None, "confidence": 0.0, "clues": []}
+
+
 def probe_answer(schema: dict, user: str) -> dict:
     return {"schema_version": VERSIONS["probe"], "year_guess": 2000, "quarter_guess": 1, "confidence": 0.0,
             "episode": "模拟后端：不识别", "clues": []}
@@ -465,6 +491,120 @@ def translator_answer(schema: dict, user: str) -> dict:
             "prior_prob": 0.05, "analogs": [], "causal_chain": chain, "phases": phases}
 
 
+QTABLE_ID = "qtable/1"
+QTABLE_TEST_LINE = "模式：叙事检验（盲测）"          # qtranslator.MODE_LINE["test"]
+QTABLE_LENGTH = (re.compile(r"情景长度：\s*([0-9]+)\s*个季度"), re.compile(r"覆盖期约\s*([0-9]+)\s*个季度"))
+QTABLE_DEFAULT_QUARTERS = 4
+QTABLE_NOTE = "模拟后端：按叙事的关键词生成的季度情景表，不代表任何判断"
+CLAUSE = re.compile(r"[^。！？!?；;，,\n]+")
+# (subject, verb, (slot, field, sign, size)): an entry in quarter 1 whose quote is the first clause holding both
+QTABLE_THEMES = (
+    (r"油价|原油", r"上涨|大涨|飙升|翻倍|走高|上行|攀升", ("x", "d_oil", "+", "大幅")),
+    (r"油价|原油", r"下跌|暴跌|回落|走低|下行|崩", ("x", "d_oil", "-", "明显")),
+    (r"失业", r"上升|攀升|走高|增加|升至|升到|上涨", ("x", "d_unrate", "+", "明显")),
+    (r"衰退|萧条", r"", ("x", "d_ip", "-", "明显")),
+    (r"通胀|物价", r"上升|升温|走高|加速|上涨|抬头|攀升", ("x", "d_cpi_goods", "+", "温和")),
+    (r"通胀|物价", r"回落|下降|降温|放缓|走低", ("x", "d_cpi_serv", "-", "温和")),
+    (r"降息", r"", ("x", "d_ff", "-", "明显")),
+    (r"加息", r"", ("x", "d_ff", "+", "明显")),
+)
+QTABLE_INTERVENTION = r"紧急|意外|临时|被迫"
+QTABLE_CREDIT = (r"信用利差|公司债利差|信用", r"走阔|扩大|上升|飙升|急升|攀升|骤升", r"收窄|回落|下降")
+QTABLE_SUPPLY = r"战争|冲突|禁运|减产|供应中断|供给|断供|封锁"
+QTABLE_REPLAYS: dict[str, dict] = {}                # narrative key -> a recorded QTable (P7's stand-in replays)
+
+
+def qtable_key(narrative: str) -> str:
+    """The replay key of a narrative: sha256 of its NFKC text without whitespace (first 16 hex digits)."""
+    import unicodedata
+    s = re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(narrative or "")))
+    return hashlib.sha256(s.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def register_qtable(narrative: str, qtable: dict) -> str:
+    """Make the mock answer `qtable` for this narrative (in-process); returns the key. The same works across
+    processes with MSL_LLM_MOCK_QTABLES=<dir> holding <key>.json."""
+    k = qtable_key(narrative)
+    QTABLE_REPLAYS[k] = copy.deepcopy(qtable)
+    return k
+
+
+def _qtable_replay(narrative: str) -> dict | None:
+    k = qtable_key(narrative)
+    if k in QTABLE_REPLAYS:
+        return copy.deepcopy(QTABLE_REPLAYS[k])
+    root = _env("MSL_LLM_MOCK_QTABLES")
+    if root:
+        try:
+            rec = json.loads((Path(root) / f"{k}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        rec = rec.get("qtable", rec) if isinstance(rec, dict) else None
+        return rec if isinstance(rec, dict) else None
+    return None
+
+
+def _clause(narrative: str, subject: str, verb: str = "") -> str | None:
+    for c in CLAUSE.findall(narrative):
+        if re.search(subject, c) and (not verb or re.search(verb, c)):
+            return c.strip()[:120]
+    return None
+
+
+def qtable_answer(schema: dict | None, system: str, user: str) -> dict:
+    """A QTable/1 for the narrative: a recorded replay when one is registered; in test mode (the narrative test's
+    blind prompt) the minimal QTable (every field absent, fc 未说明); otherwise entries in quarter 1 from keywords of
+    the narrative (oil, unemployment, recession, inflation, rate moves, credit spreads), each a sign + size whose
+    quote is the clause that holds the keyword, so it passes the quote and keyword rules."""
+    narrative = _tag(user, "narrative") or ""
+    replay = _qtable_replay(narrative)
+    if replay is not None:
+        return replay
+    H = QTABLE_DEFAULT_QUARTERS
+    for rx in QTABLE_LENGTH:
+        m = rx.search(str(user or ""))
+        if m:
+            H = max(1, min(int(m.group(1)), 60))
+            break
+    rows = [{"q": q, "x": {}, "fc": {"stance": "未说明"}} for q in range(1, H + 1)]
+    qt = {"schema": QTABLE_ID, "model_card": "card/1 (schema-revise-2 3.0 + SIM_DESIGN)", "n_quarters": H,
+          "rows": rows, "c_q": {}, "events": [], "notes": []}
+    if QTABLE_TEST_LINE in str(system or "") or not narrative.strip():
+        return qt
+    x, u = rows[0]["x"], {}
+    for subject, verb, (_, field, sign, size) in QTABLE_THEMES:
+        if field in x:
+            continue
+        clause = _clause(narrative, subject, verb)
+        if not clause:
+            continue
+        if field == "d_ff" and re.search(QTABLE_INTERVENTION, clause):
+            u["u_ff"] = {"sign": sign, "size": size, "src": "stated_qual", "quote": clause}
+            continue
+        x[field] = {"sign": sign, "size": size, "src": "stated_qual", "quote": clause}
+    if "d_oil" in x:
+        cause = _clause(narrative, QTABLE_SUPPLY)
+        if cause:
+            x["x_oil_cause"] = {"value": "supply", "src": "stated_qual", "quote": cause}
+    subj, wider, narrower = QTABLE_CREDIT
+    wide = _clause(narrative, subj, wider)
+    if wide:
+        rows[0]["fc"] = {"stance": "明显收紧" if re.search(r"急|飙|骤", wide) else "收紧", "quote": wide}
+    else:
+        narrow = _clause(narrative, subj, narrower)
+        if narrow:
+            rows[0]["fc"] = {"stance": "宽松", "quote": narrow}
+    if u:
+        rows[0]["u"] = u
+    channels = sorted(x) + sorted(u)
+    if channels:
+        first = next(e["quote"] for e in list(x.values()) + list(u.values()))
+        qt["events"].append({"text": first[:200], "quarters": [1], "templates": [], "channels": channels,
+                             "generic_footprint": True, "how_decomposed": "模拟后端：按关键词拆成通用渠道"})
+        qt["notes"].append(QTABLE_NOTE)
+    return qt
+
+
 def generic_answer(schema: dict) -> object:
     """A minimal instance of a schema (first enum value, empty strings and arrays, zero numbers)."""
     if not isinstance(schema, dict):
@@ -494,14 +634,17 @@ def _renormalise(obj):
     return obj
 
 
-def repair_answer(schema: dict | None, user: str, mode: str = "modal", seed: str = "0") -> object:
+def repair_answer(schema: dict | None, user: str, mode: str = "modal", seed: str = "0", system: str = "") -> object:
     """A P5 repair: the previous output re-parsed with its probabilities renormalised; when it does not parse, a
-    fresh answer from the schema alone (a repair call sees no state, so menus come from the schema's enums)."""
+    fresh answer from the schema alone (a repair call sees no state, so menus come from the schema's enums; a QTable
+    repair carries the narrative, so its fresh answer is built from it)."""
     previous = _tag(user, "previous_output").replace("＜", "<").replace("＞", ">")
     obj, _ = extract_json(previous)
     if isinstance(obj, dict):
         return _renormalise(obj)
     kind = call_kind(schema, "")
+    if kind == "qtable":
+        return qtable_answer(schema, system, user)
     builders = {"actor": actor_answer, "node": node_answer}
     if kind in builders:
         return builders[kind](schema, "", mode, seed)
@@ -672,6 +815,7 @@ class MockClaude:
         with self._lock:
             self._queue.clear()
             self.calls.clear()
+        QTABLE_REPLAYS.clear()
 
     @staticmethod
     def _matches(match, kind: str, system: str, user: str) -> bool:
@@ -711,14 +855,15 @@ class MockClaude:
         mode = mode if mode in MODES else "modal"
         seed = _env("MSL_LLM_MOCK_SEED", "0")
         if kind == "repair":
-            return kind, repair_answer(schema, user, mode, seed)
+            return kind, repair_answer(schema, user, mode, seed, system)
         if schema is None:
             return kind, {}
         builders = {"actor": lambda: actor_answer(schema, user, mode, seed),
                     "node": lambda: node_answer(schema, user, mode, seed),
                     "synth": lambda: synth_answer(schema, user), "root": lambda: root_answer(schema, user),
                     "story": lambda: story_answer(schema, user), "probe": lambda: probe_answer(schema, user),
-                    "translator": lambda: translator_answer(schema, user)}
+                    "translator": lambda: translator_answer(schema, user),
+                    "qtable": lambda: qtable_answer(schema, system, user), "nprobe": lambda: nprobe_answer(schema)}
         return kind, builders.get(kind, lambda: generic_answer(schema))()
 
     @staticmethod

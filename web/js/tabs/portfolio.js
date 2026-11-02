@@ -5,21 +5,27 @@
 // paths (fans per scenario and mixed, payouts per share, attribution, correlations).
 // Deep links: #portfolio?all_weather, #portfolio?preset=income&rebalance=annual&scenario=ai_bust,
 // #portfolio?w=us_equity:50,gold:50, #portfolio?w=MAIN:10,QQQI:15,brk.b:5 (any case),
-// #portfolio?preset=income_tickers, #portfolio?ticker=TQQQ (opens 标的推演 on TQQQ), #portfolio?TQQQ
+// #portfolio?preset=income_tickers, #portfolio?ticker=TQQQ (opens 标的推演 on TQQQ), #portfolio?TQQQ,
+// #portfolio?set=quarterly (the quarterly stack's set; P9, SIM_DESIGN §11.3: a set with step_months = 3 rebalances
+// every quarter or year, annualizes volatility by √4 and reports quarter-end drawdowns; the default set follows the
+// switch gate T-S)
 import {
-  shared, probEditor, customPicker, statusPill, liveRequest, errorNotice, parseParam,
+  shared, probEditor, customPicker, setPicker, statusPill, liveRequest, errorNotice, parseParam,
   scenarioRows, rangeChart, rowsHeight, rankColor, shortName, fmtMult, isNum, esc,
   signOf, plainNote, injectStyle,
 } from './_weights.js';
 import {
   portfolioEditor, allPresets, loadCatalog, parseLinkWeights, resolveId, isTicker, holdingsCard, projection, weightsText, TK,
+  TICKERS_Q, TICKERS_Q_ONLY,
 } from './_tickers.js';
 
 const REBALANCE = [
   { value: 'monthly', label: '每月再平衡', help: '每个月末把各资产调回目标权重：纪律最强，组合波动最低。' },
+  { value: 'quarterly', label: '每季再平衡', help: '每个季度末调回一次目标权重，季内随涨跌漂移（季度情景集的每一步）。' },
   { value: 'annual', label: '每年再平衡', help: '每满 12 个月调回一次目标权重，年内随涨跌漂移。' },
   { value: 'none', label: '不再平衡', help: '期初买入后一直持有：涨得多的资产权重越来越大，组合会向赢家集中。' },
 ];
+const NO_MONTHLY = '季度情景集每步一个季度，没有月内路径：不能每月再平衡';
 const SORTS = [{ value: 'prob', label: '按概率' }, { value: 'real', label: '按实际回报' }, { value: 'sharpe', label: '按夏普' }];
 
 // view state kept while the page is open
@@ -80,28 +86,62 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
   // ---- inputs (built before any data arrives)
   let scen = null, probInfo = {};
   const pill = statusPill();
+  // the scenario set (monthly engine / quarterly stack / an agent-tree export): the default follows the switch gate
+  const sets = setPicker({ want: q.kv.set || null, onChange: () => { setChanged(); contextChanged(); } });
+  const quarterlySet = () => sets.stepMonths() > 1;
   const editor = portfolioEditor({ assets: meta?.assets, presets, initial, cls: 'span-2',
     onChange: () => refresh() });
   editor.setCatalog(cat);
   // scenario probabilities and custom scenarios: the portfolio and 标的推演 both follow them
   const contextChanged = () => { refresh(); proj.refresh(); };
   const probs = probEditor({ onChange: contextChanged });
-  const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); contextChanged(); } });
+  const rowsNow = () => scenarioRows(scen, picker.items(), sets.entry());
+  const infoNow = () => ({ ...probInfo, basis: sets.current() && sets.current() !== 'monthly' ? 'prior' : 'posterior' });
+  const picker = customPicker({ onChange: () => { probs.setRows(rowsNow(), infoNow()); contextChanged(); } });
   if (focusTicker && !rerender) TK.pj.ticker = focusTicker;
   const proj = projection({ signal, focus: !!focusTicker && !rerender,
     getContext: () => ({ include_custom: shared.include, scenario_probs: probs.overrides() }) });
 
   const rebHelp = h('div', { class: 'portfolio-help' });
-  const paintReb = () => { rebHelp.textContent = REBALANCE.find(r => r.value === rebalance)?.help || ''; };
+  const rebSeg = h('div', { class: 'seg weights-rebal', role: 'group', 'aria-label': '再平衡方式' });
+  const paintReb = () => {
+    const q3 = quarterlySet();
+    rebSeg.replaceChildren(...REBALANCE.map(r => h('button', { type: 'button', class: r.value === rebalance ? 'on' : '',
+      disabled: q3 && r.value === 'monthly' ? true : null, title: q3 && r.value === 'monthly' ? NO_MONTHLY : r.help,
+      onclick: () => { if (rebalance === r.value) return; rebalance = r.value; paintReb(); refresh(); } }, r.label)));
+    rebHelp.textContent = (REBALANCE.find(r => r.value === rebalance)?.help || '') + (q3 ? `（${NO_MONTHLY}。）` : '');
+  };
+  // a set change: its own scenarios and default probabilities (a quarterly set: hand-set priors), and no monthly
+  // rebalancing on a quarterly set
+  function setChanged() {
+    shared.probs = null;
+    shared.probMode = 'posterior';
+    probs.setRows(rowsNow(), infoNow());
+    if (quarterlySet() && rebalance === 'monthly') rebalance = 'quarterly';
+    editor.lockTickers(quarterlySet() ? TICKERS_Q : null);
+    paintReb();
+    paintHorizon();
+  }
+  const paintHorizon = () => {
+    const e = sets.entry();
+    if (e && e.id !== 'monthly') {
+      horizonNote.textContent = `期限 ${e.years || 15} 年，每个情景 ${e.n_paths || '—'} 条季度路径（${e.name}${e.trial ? '，试运行' : ''}）；`
+        + '和「未来情景」页的月度路径不是同一批。';
+    } else if (scen) {
+      horizonNote.textContent = `期限 ${Math.round((scen.horizon_months || 180) / 12)} 年（${scen.start || '—'} 起），每个情景 ${scen.n_paths || '—'} 条模拟路径，`
+        + '与「未来情景」页是同一批路径。';
+    }
+  };
   const probState = h('span', { class: 'muted' });
   const paintProbState = () => { probState.textContent = probs.label(); };   // posterior, calibrated or hand-set
   const horizonNote = h('div', { class: 'portfolio-help' });
   paintReb();
   paintProbState();
   root.append(h('div', { class: 'grid cols-3' }, editor.el,
-    card({ title: '计算设置', sub: '再平衡方式、纳入哪些情景、按什么概率混合', cls: 'weights-side' },
+    card({ title: '计算设置', sub: '情景集、再平衡方式、纳入哪些情景、按什么概率混合', cls: 'weights-side' },
+      h('div', { class: 'portfolio-label' }, '情景集'), sets.el,
       h('div', { class: 'portfolio-label' }, '再平衡方式'),
-      ui.seg(REBALANCE.map(r => ({ value: r.value, label: r.label })), rebalance, (v) => { rebalance = v; paintReb(); refresh(); }),
+      rebSeg,
       rebHelp,
       h('div', { class: 'portfolio-label' }, '纳入已保存的自定义情景'), picker.el,
       h('div', { class: 'portfolio-label' }, '情景概率'),
@@ -160,13 +200,15 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
   function kpis(res) {
     const a = res.aggregate?.weighted || {};
     const yrs = Math.round((res.horizon_months || 180) / 12);
+    const q3 = (res.step_months || 1) > 1;
     return [
       ui.kpi('名义年化回报 CAGR（中位数）', pct(a.cagr_p50, 2), `5%–95% 路径：${pct(a.cagr_p5)} ~ ${pct(a.cagr_p95)}`, signOf(a.cagr_p50, 2)),
       ui.kpi('实际年化回报（扣除通胀，中位数）', pct(a.real_cagr_p50, 2), `5%–95% 路径：${pct(a.real_cagr_p5)} ~ ${pct(a.real_cagr_p95)}`, signOf(a.real_cagr_p50, 2)),
-      ui.kpi('年化波动率', pct(a.vol), '月度收益的标准差 × √12，各路径平均'),
+      ui.kpi('年化波动率', pct(a.vol), q3 ? '季度收益的标准差 × √4，各路径平均' : '月度收益的标准差 × √12，各路径平均'),
       ui.kpi('夏普比率', ui.fmtNum(a.sharpe, 2), '相对现金的年化超额收益 ÷ 年化波动（中位数）'),
-      ui.kpi('索提诺比率', ui.fmtNum(a.sortino, 2), '分母只计跑输现金的月份（下行波动）'),
-      ui.kpi('最大回撤（中位数）', pct(a.max_dd_p50), `坏尾部：5% 的路径深于 ${pct(a.max_dd_p95)}`, signOf(a.max_dd_p50)),
+      ui.kpi('索提诺比率', ui.fmtNum(a.sortino, 2), q3 ? '分母只计跑输现金的季度（下行波动）' : '分母只计跑输现金的月份（下行波动）'),
+      ui.kpi(q3 ? '最大回撤（中位数，季末口径）' : '最大回撤（中位数）', pct(a.max_dd_p50),
+        `坏尾部：5% 的路径深于 ${pct(a.max_dd_p95)}${q3 ? '；季末口径会低估月内最深点（美股约 0.89 倍）' : ''}`, signOf(a.max_dd_p50)),
       ui.kpi(`${yrs} 年后实际亏损概率`, pct(a.prob_loss_real), '期末购买力低于期初的路径占比', a.prob_loss_real > 0.25 ? 'is-bad' : ''),
       ui.kpi('CVaR 5%：最差 5% 路径的期末财富', fmtMult(a.cvar5_terminal),
         `期初 = 1 倍（名义）；扣除通胀后 ${fmtMult(a.cvar5_terminal_real)}`, isNum(a.cvar5_terminal) && a.cvar5_terminal < 1 ? 'is-bad' : ''),
@@ -273,7 +315,7 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
     const signed = (key, label) => ({ key, label, fmt: (v) => pct(v), cls: (v) => signOf(v) });
     const tbl = ui.table([
       { key: 'name', label: '情景', wrap: true, fmt: (v, r) => h('span', {},
-        r.source === 'custom' ? r.name : h('a', { href: `#scenarios?${r.id}`, title: '查看这个情景的宏观设定与传导链' }, r.name),
+        r.source !== 'builtin' ? r.name : h('a', { href: `#scenarios?${r.id}`, title: '查看这个情景的宏观设定与传导链' }, r.name),
         r.id === wid ? [' ', ui.chip('最差', 'bad')] : null, r.id === bid ? [' ', ui.chip('最好', 'good')] : null,
         r.source === 'custom' ? [' ', ui.chip('自定义', 'accent')] : null) },
       { key: 'prob', label: '概率', fmt: (v) => pct(v) },
@@ -302,12 +344,15 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
     const yrs = Math.round((res.horizon_months || 180) / 12);
     const dates = res.dates || [];
     const custom = per.filter(e => e.source === 'custom').length;
+    const ss = res.scenario_set;
     view.summary.textContent = [
+      ss ? `${ss.name}${ss.label ? `（${ss.label}）` : ''}` : null,
       weightsText(res.weights), REBALANCE.find(r => r.value === res.rebalance)?.label || res.rebalance,
       `${yrs} 年${dates.length ? `（${dates[0]} → ${dates[dates.length - 1]}）` : ''}`,
       `${per.length} 个情景${custom ? `（含 ${custom} 个自定义）` : ''}`,
-      adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : '模型后验概率',
-    ].join(' · ');
+      adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率'
+        : ss && ss.id !== 'monthly' ? '手设先验概率' : '按今天状态倾斜的概率（模型后验）',
+    ].filter(Boolean).join(' · ');
     view.kpis.replaceChildren(...kpis(res));
     const hc = holdingsCard(res, { scenarioYears: yrs, include: shared.include });
     view.holdings.replaceChildren(...(hc ? [hc] : []));
@@ -320,10 +365,15 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
   }
 
   // ---- requests
+  // the weights a request carries: on the quarterly set only the asset classes (never a request known to fail)
+  const reqWeights = () => (quarterlySet() ? editor.getAssets() : editor.get());
+  const tickerOnly = () => quarterlySet() && !!editor.get() && !editor.getAssets();
+  const qNote = () => (quarterlySet() && editor.heldTickers().length ? [ui.notice(TICKERS_Q, 'info')] : []);
   function body() {
-    const weights = editor.get();
+    const weights = reqWeights();
     if (!weights) return null;
     const b = { weights, rebalance };
+    if (shared.set) b.scenario_set = shared.set;
     if (shared.include.length) b.include_custom = shared.include.slice();
     const sp = probs.overrides();
     if (sp) b.scenario_probs = sp;
@@ -347,9 +397,9 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
   }
   function watchWeights() {
     if (!alive()) return;
-    if (!editor.get()) { if (!stale) refresh(); return; }
+    if (!reqWeights()) { if (!stale) refresh(); return; }
     if (!stale) return;
-    errBox.replaceChildren();
+    errBox.replaceChildren(...qNote());
     clearTimeout(staleTimer);
     const key = keyOf(body());
     if (shown && key === shownKey) { setStale(false); pill.done('已恢复'); return; }
@@ -373,8 +423,8 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
       show(res, { adjusted });
       shownKey = key;
       probs.sync(res.per_scenario);
-      if (!editor.get()) { setStale(true); pill.fail('权重合计为 0：未计算'); return; }   // cleared while it ran
-      errBox.replaceChildren();
+      if (!reqWeights()) { setStale(true); pill.fail('权重合计为 0：未计算'); return; }   // cleared while it ran
+      errBox.replaceChildren(...qNote());
       setStale(false);
       pill.done('已更新');
       // a deep-linked row or section: kept in view while the results above it settle (tables stack a frame later)
@@ -390,11 +440,11 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
       if (live) return;                    // keep the last good result on screen
       const d = defaults || await defaultsP;
       if (!alive()) return;
-      if (d && !d.error && d.portfolio) {
+      if (d && !d.error && d.portfolio && (!shared.set || shared.set === 'monthly')) {
         errBox.append(ui.notice('下面先显示构建时预先计算的默认组合（60/40、模型后验概率、每月再平衡），实时计算恢复后会自动替换。', 'info'));
         show(d.portfolio);
         shownKey = null;
-        setStale(!editor.get());
+        setStale(!reqWeights());
       } else if (!view) {
         results.replaceChildren();
       }
@@ -407,28 +457,31 @@ export async function render(root, { api, charts, ui, meta, param, signal, reren
     const b = body();
     if (!b) {
       setStale(true);
-      errBox.replaceChildren(ui.notice(ZERO, 'error'));
-      pill.fail('权重合计为 0：未计算');
+      errBox.replaceChildren(ui.notice(tickerOnly() ? TICKERS_Q_ONLY : ZERO, 'error'));
+      pill.fail(tickerOnly() ? '季度情景集算不了标的：未计算' : '权重合计为 0：未计算');
       return;
     }
+    errBox.replaceChildren(...qNote());
     pendingKey = keyOf(b);
     go({ b, adjusted: !b.scenario_probs ? false : probs.mode() === 'calibrated' ? 'calibrated' : probs.adjusted() });
   }
 
-  // ---- scenario list + saved custom scenarios, then the first evaluation; presets fill in later
-  const [s, items] = await Promise.all([scenP, picker.load()]);
+  // ---- scenario list + saved custom scenarios + the scenario sets, then the first evaluation; presets fill in later
+  const [s] = await Promise.all([scenP, picker.load(), sets.load()]);
   if (!alive()) return;
   scen = s && !s.error ? s : null;
   probInfo = { method: scen?.probability_method, gamma: scen?.probability?.gamma };
-  probs.setRows(scenarioRows(scen, items), probInfo);
+  probs.setRows(rowsNow(), infoNow());
+  if (quarterlySet() && rebalance === 'monthly') rebalance = 'quarterly';
+  editor.lockTickers(quarterlySet() ? TICKERS_Q : null);
+  paintReb();
+  paintHorizon();
   if (scen) proj.setScenarios(scen.scenarios || []);
   if (scen) {
-    horizonNote.textContent = `期限 ${Math.round((scen.horizon_months || 180) / 12)} 年（${scen.start || '—'} 起），每个情景 ${scen.n_paths || '—'} 条模拟路径，`
-      + '与「未来情景」页是同一批路径。';
     const ids = (scen.scenarios || []).map(x => x.id);
     if (!focus) focus = take(t => ids.includes(t));
   }
-  if (tokens.length) root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id、标的代码或 monthly / annual / none）。`, 'info'), errBox);
+  if (tokens.length) root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id、标的代码或 monthly / quarterly / annual / none）。`, 'info'), errBox);
   if (linkNotes.length) root.insertBefore(ui.notice(`${linkNotes.join('；')}。`, 'info'), errBox);
   refresh();
   const d = defaults || await defaultsP;

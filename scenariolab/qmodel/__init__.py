@@ -13,5 +13,9 @@ P1 provides the data layer and the contract the later phases build on:
   quarter-end levels and the release-lagged ``__known`` lags of every x field.
 - ``sources_q`` cache-only readers of the raw files and the one-off import of the research rounds' downloads.
 
+Later phases: ``factors`` (P3), ``assets`` and ``valuation`` (P2), ``rollout``, ``adapter`` and ``api`` (P4), and
+``qtable`` (P6): the QTable/1 scenario layer (validation and refusals, the rollout inputs, the monthly engine's
+phase spec, the 13 reviewed built-in scenarios under scenarios/qtables/); its translator is llm/qtranslator.py.
+
 The quarterly stack is 试运行 until the switch gate T-S passes (SIM_DESIGN §4.6).
 """

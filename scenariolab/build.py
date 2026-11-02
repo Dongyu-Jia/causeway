@@ -27,11 +27,17 @@ it reads scenario_paths.npz and the scenarios step's scenario_macro.npz, so rebu
 it after --only scenarios); regimes reuses the engine's
 unconditional reference run that the scenario readouts computed (rebuild it
 after --only scenarios); forecast scores rolling one-year-ahead forecasts and
-needs the scenario paths; valuation tests the valuation state on the backtest
+needs the scenario paths, then mixes the built-in scenarios' next four quarters
+by their probabilities on both engines (forecast_mix.json, the 未来一年 tab;
+the quarterly stack's half is 试运行) and appends the forward ledger
+(results/ledger/forecast_ledger.jsonl; python -m scenariolab.analysis.scenario_mix
+rebuilds only the mixture); valuation tests the valuation state on the backtest
 windows and the forecast and checks itself against backtest.json,
 scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
 the scenario paths (and the example ticker portfolio when the instruments step
-has run); llm writes what the translator would send the model (it
+has run) and, once the switch gate T-S has passed (evaluation/switch.py), rebuilds
+the 13 built-ins on the quarterly stack as the quarterly scenario set
+(portfolio/qsets.py, scenario_paths_q.npz); llm writes what the translator would send the model (it
 never calls a model: its status runs only `claude --version` and `claude auth
 status`, which spend no usage; its regime section reads regimes.json).
 agents_accounts needs no engine context and runs right after the panel: it
@@ -103,6 +109,30 @@ def build_instruments(ctx: EngineContext) -> dict:
     that follows the paths to year 40, one 480-month path per scenario path with the portfolio step's seeds
     (portfolio.tickers: instrument_continuation.npz, its summary added to instrument_meta.json)."""
     return {"paths": _run("instruments.build", ctx), "continuation": _run("portfolio.tickers", ctx)}
+
+
+def build_forecast(ctx: EngineContext, out) -> dict:
+    """The forecast step: the rolling one-year record (forecast.json, 历史回放) and the scenario mixture of the next
+    four quarters (forecast_mix.json, 未来一年：情景条件模拟, SIM_DESIGN §9; it also appends the forward ledger
+    data/results/ledger/forecast_ledger.jsonl). The mixture reads the scenario paths and forecast.json, so it runs
+    second."""
+    fc = jsonio.dump(_run("analysis.forecast", ctx), out / "forecast.json")
+    mix = _run("analysis.scenario_mix", ctx, results=out)
+    return {"forecast": fc, "forecast_mix": out / "forecast_mix.json", "ledger": (mix or {}).get("ledger_write")}
+
+
+def build_portfolio(ctx: EngineContext, out) -> dict:
+    """The portfolio step: the presets on the monthly engine's scenario paths (portfolio_default.json, the unconditional
+    continuation), then, only once the switch gate T-S has passed (evaluation/switch.py), the 13 built-ins rebuilt on
+    the quarterly stack as the quarterly scenario set (portfolio/qsets.py, scenario_paths_q.npz; about 1-2 minutes).
+    Before that the quarterly set is built only by hand: python -m scenariolab.portfolio.qsets build."""
+    res = {"monthly": _run("portfolio.service", ctx)}
+    from .evaluation import switch
+    if switch.state(out).get("quarterly"):
+        res["quarterly"] = _run("portfolio.qsets", ctx, results=out)
+    else:
+        print("[build] portfolio: the quarterly scenario set is rebuilt only after the switch gate T-S passes", flush=True)
+    return res
 
 
 def build_meta(ctx: EngineContext) -> dict:
@@ -199,9 +229,9 @@ def main(argv=None) -> int:
     step("scenarios", lambda: _run("scenarios.library", ctx, n_paths=args.paths))
     step("instruments", lambda: build_instruments(ctx))
     step("regimes", lambda: jsonio.dump(_run("analysis.regimes", ctx), out / "regimes.json"))
-    step("forecast", lambda: jsonio.dump(_run("analysis.forecast", ctx), out / "forecast.json"))
+    step("forecast", lambda: build_forecast(ctx, out))
     step("valuation", lambda: jsonio.dump(_run("analysis.valuation", ctx), out / "valuation.json"))
-    step("portfolio", lambda: _run("portfolio.service", ctx))
+    step("portfolio", lambda: build_portfolio(ctx, out))
     step("llm", lambda: _run("llm.translator", ctx))
     step("qmodel", lambda: _run("qmodel.factor_checks", ctx))      # writes data/results/qmodel.json itself
     step("meta", lambda: jsonio.dump(build_meta(ctx), out / "meta.json"))

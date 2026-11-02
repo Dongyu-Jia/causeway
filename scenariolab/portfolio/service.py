@@ -94,6 +94,24 @@ withdrawal page's alpha_mode (shrunk / half / raw) swaps the estimated
 tickers' yearly factors for the build's precomputed variants (they differ in
 the alpha scalar only). The ticker files are loaded on the first request that
 holds a ticker (about 160 MB), never at start.
+
+Scenario sets (SIM_DESIGN §11.3, §4.6; AGENT_DESIGN §14). `scenario_set` picks the paths a request runs on:
+  monthly        the monthly engine's 13 built-ins (scenario_paths.npz above; "builtin" is the same set). Every
+                 statistic of a monthly request is computed exactly as before sets existed.
+  quarterly      the 13 built-ins' reviewed QTables on the quarterly stack (scenario_paths_q.npz + scenarios_q.json,
+                 portfolio/qsets.py): step_months = 3, 60 quarters, and the set's own continuation to year 40 (its
+                 cont_* arrays, the same model run on without statements) instead of continuation_paths.npz.
+  agent:<id>     a quarterly set the agent tree exports (data/agents/sets/<id>.npz + .json, the same layout).
+  None           the default: monthly until the switch gate T-S passes (evaluation/switch.py state()), then quarterly
+                 (falling back to monthly, with a note, while the quarterly set is not built).
+A set with step_months = s has 12 / s steps a year: volatility is annualized by sqrt(12 / s) (x sqrt(4) for a quarterly
+set), Sharpe and Sortino likewise; rebalancing is every step for "monthly" (refused on a quarterly set: there is no
+month inside a quarter) and every 3 / s steps for "quarterly" (offered on both sets, so they can be compared on the
+same rule), every 12 / s steps for "annual"; drawdowns of a quarterly set are quarter-end figures (季末口径). Yearly
+withdrawals are unchanged: the withdrawal loop reads yearly factors, built from the steps of each year. A monthly
+custom scenario included in a quarterly set is summed to quarter-ends (total returns exactly; its yearly factors are
+its own monthly ones, so its withdrawal figures equal the monthly set's). Tickers need monthly paths: a quarterly set
+refuses them.
 """
 from __future__ import annotations
 
@@ -131,6 +149,30 @@ CONTINUATION_CMA = "valuation_state"     # valuation_adjusted without its 15-yea
 CONTINUATION_SEED = zlib.crc32(b"continuation") % 2**31     # library.seed_for("continuation")
 CONTINUATION_CHUNK = 600             # paths per simulate() call of build_continuation (memory: 480 months each)
 BUILD_PORTFOLIO = "python -m scenariolab.build --only portfolio"
+# scenario sets (module docstring)
+QUARTERLY_FILE = "scenario_paths_q.npz"
+QUARTERLY_INDEX = "scenarios_q.json"
+AGENT_SETS_DIR = config.DATA_DIR / "agents" / "sets"     # module attribute: tests point it elsewhere
+BUILD_QSETS = "python -m scenariolab.portfolio.qsets build"
+SET_ALIASES = {"monthly": "monthly", "builtin": "monthly", "quarterly": "quarterly", "builtin_q": "quarterly"}
+AGENT_SET_RE = re.compile(r"^agent:([A-Za-z0-9_-]{1,80})$")
+SET_NAMES = {"monthly": "13 个内置情景 · 月度引擎", "quarterly": "13 个内置情景 · 季度模型"}   # with 13 scenarios
+
+REBALANCE = ("monthly", "quarterly", "annual", "none")       # rebalancing rules a request may name
+REBALANCE_MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
+QUARTER_END_DD = {"us_equity": 0.888, "nasdaq": 0.932, "treasury_10y": 0.918}   # quarter-end / monthly max drawdown
+QUARTERLY_DD_NOTE = ("季末口径：季度情景集只有季末的数值，最大回撤按季末计，会低估月内的最深点（1973–2026 年滚动 10 年窗口，"
+                     "季末回撤 ÷ 月度最大回撤的中位数：美股 0.888（第 10 百分位 0.776）、纳指 0.932、10 年期美债 0.918）；"
+                     "不做月内插值。")
+
+
+def set_name(set_id: str, n: int | None = None, meta: dict | None = None) -> str:
+    """'13 个内置情景 · 月度引擎', '11 个内置情景 · 季度模型' (a set may leave a diverging scenario out), or the agent
+    set's own name."""
+    if set_id in ("monthly", "quarterly"):
+        return SET_NAMES[set_id] if not n else f"{n} 个内置情景 · {'月度引擎' if set_id == 'monthly' else '季度模型'}"
+    return str((meta or {}).get("name") or set_id)
+
 
 DEFAULT_WEIGHTS = {"us_equity": 0.6, "treasury_10y": 0.4}
 PRESETS = [
@@ -176,9 +218,13 @@ class _Block:
     probs: np.ndarray | None     # (S,) if the npz stores them
     factors: wd.YearFactors      # (S*N, Y, A)
     _fingerprint: str | None = field(default=None, repr=False)
+    step_months: int = 1         # months per step: 1 (the monthly engine), 3 (a quarterly set)
+    cont: "_Continuation | None" = None     # a set file's own continuation (its cont_* arrays), if it has one
+    cont_issue: str = ""                    # why a set file's continuation could not be read
 
     @property
     def months(self) -> int:
+        """The number of steps T (months for the monthly engine's files, quarters for a quarterly set)."""
         return self.total.shape[1]
 
     def fingerprint(self) -> str:
@@ -191,7 +237,11 @@ class _Block:
         return self._fingerprint
 
 
+CONT_KEYS = ("cont_total_y", "cont_price_y", "cont_income_y", "cont_cpi_y")   # a set file's own continuation
+
+
 def _load_block(path: Path) -> _Block:
+    cont_arrays = None
     try:
         with np.load(path, allow_pickle=False) as z:
             total = np.asarray(z["total"], dtype=np.float32)
@@ -201,8 +251,18 @@ def _load_block(path: Path) -> _Block:
             assets = [str(x) for x in z["assets"]]
             labels = [str(x) for x in z["labels"]] if "labels" in z.files else []
             probs = np.asarray(z["probs"], dtype=float) if "probs" in z.files else None
-    except (OSError, KeyError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as err:
+            step = int(z["step_months"]) if "step_months" in z.files else 1
+            if all(k in z.files for k in CONT_KEYS):
+                cont_arrays = {"total_y": z["cont_total_y"], "price_y": z["cont_price_y"],
+                               "income_y": z["cont_income_y"], "cpi_y": z["cont_cpi_y"], "assets": z["assets"],
+                               "labels": z["cont_labels"] if "cont_labels" in z.files else None,
+                               "start": str(z["cont_start"]) if "cont_start" in z.files else None,
+                               "offset": int(z["cont_offset"]) if "cont_offset" in z.files else None,
+                               "info": json.loads(str(z["cont_info"])) if "cont_info" in z.files else {}}
+    except (OSError, KeyError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zlib.error) as err:
         raise PathsNotReady(f"无法读取 {path.name}（可能正在重新生成，请稍后重试）：{err}") from err
+    if step < 1 or MONTHS % step:
+        raise PathsNotReady(f"{path.name} 的步长 step_months = {step} 不是 12 的约数")
     S, N, T, A = total.shape
     if income.shape != total.shape or cpi.shape != (S, N, T + 1) or len(ids) != S or len(assets) != A:
         raise PathsNotReady(f"{path.name} 的数组形状不一致")
@@ -211,9 +271,37 @@ def _load_block(path: Path) -> _Block:
     cpi = cpi / cpi[:, :1]
     if len(labels) != T + 1:
         labels = [str(k) for k in range(T + 1)]
-    return _Block(ids=ids, n_paths=N, total=total, cpi=cpi, assets=assets, labels=labels,
-                  probs=probs if probs is not None and probs.shape == (S,) else None,
-                  factors=wd.year_factors(total, income.reshape(S * N, T, A), cpi))
+    blk = _Block(ids=ids, n_paths=N, total=total, cpi=cpi, assets=assets, labels=labels,
+                 probs=probs if probs is not None and probs.shape == (S,) else None,
+                 factors=wd.year_factors(total, income.reshape(S * N, T, A), cpi, months=MONTHS // step),
+                 step_months=step)
+    if cont_arrays is not None:
+        if cont_arrays["labels"] is None or cont_arrays["start"] is None or cont_arrays["offset"] is None:
+            blk.cont_issue = f"{path.name} 的续推数组缺少 cont_labels / cont_start / cont_offset"
+        else:
+            try:
+                blk.cont = _continuation_from(cont_arrays)
+            except PathsNotReady as err:
+                blk.cont_issue = f"{path.name} 的续推数组：{err}"
+    return blk
+
+
+def _aggregate_block(blk: _Block, step: int) -> _Block:
+    """A monthly block summed to steps of `step` months (a custom scenario in a quarterly set): total returns compound
+    exactly (prod(1 + r) - 1 over the step) and the CPI is taken at the step ends; that is all the portfolio report
+    reads per step. The yearly factors (the withdrawal loop's input: total, price and income growth per year) are the
+    block's own monthly ones, so its withdrawal figures are exactly the monthly set's."""
+    if blk.step_months == step:
+        return blk
+    if blk.step_months != 1 or step % blk.step_months or blk.months < step:
+        raise ValueError(f"无法把步长 {blk.step_months} 个月的路径换成 {step} 个月一步")
+    P, T, A = blk.total.shape
+    K = T // step
+    r = blk.total[:, :K * step].astype(np.float64).reshape(P, K, step, A)
+    tot = np.prod(1.0 + r, axis=2) - 1.0
+    return _Block(ids=blk.ids, n_paths=blk.n_paths, total=tot.astype(np.float32), cpi=blk.cpi[:, 0:K * step + 1:step],
+                  assets=blk.assets, labels=blk.labels[0:K * step + 1:step], probs=blk.probs, factors=blk.factors,
+                  step_months=step)
 
 
 def _load_json(path: Path) -> dict:
@@ -228,6 +316,10 @@ def _load_json(path: Path) -> dict:
 
 def continuation_label(scenario_years: int) -> str:
     return f"第 {scenario_years + 1} 年起没有情景主题：按历史月份无条件续抽"
+
+
+def continuation_label_q(scenario_years: int) -> str:
+    return f"第 {scenario_years + 1} 年起没有情景主题：同一个模型不加陈述续推"
 
 
 @dataclass
@@ -511,11 +603,19 @@ class ScenarioSet:
     root: Path | None = None                         # the results directory of the built-in files
     _extended: wd.YearFactors | None = field(default=None, repr=False)   # factors + continuation, built once
     _tickers: tuple | None = field(default=None, repr=False)   # (tickers.ticker_key, tickers.TickerSet), on first use
+    step_months: int = 1                             # months per step (`months` above counts steps: T)
+    set_id: str = "monthly"                          # monthly | quarterly | agent:<id> (module docstring)
+    set_meta: dict = field(default_factory=dict)     # the set file's own description (scenarios_q.json "set", …)
+
+    @property
+    def spy(self) -> int:
+        """Steps per year: 12 for the monthly engine's paths, 4 for a quarterly set."""
+        return MONTHS // self.step_months
 
     @property
     def years(self) -> int:
         """Years with a scenario theme: the length of the scenario paths."""
-        return self.months // MONTHS
+        return self.months // self.spy
 
     @property
     def max_years(self) -> int:
@@ -525,14 +625,14 @@ class ScenarioSet:
     def groups(self) -> np.ndarray:
         return np.repeat(np.arange(len(self.ids)), [b - a for a, b in self.ranges])
 
-    def _label(self, month: int) -> str:
-        return self.labels[month] if month < len(self.labels) else _shift_label(self.labels[0], month)
+    def _label(self, step: int) -> str:
+        return self.labels[step] if step < len(self.labels) else _shift_label(self.labels[0], step * self.step_months)
 
     def year_labels(self, years: int) -> list[str]:
-        return [self._label(MONTHS * k)[:4] for k in range(years + 1)]
+        return [self._label(self.spy * k)[:4] for k in range(years + 1)]
 
     def year_dates(self, years: int) -> list[str]:
-        return [self._label(MONTHS * k)[:7] for k in range(years + 1)]
+        return [self._label(self.spy * k)[:7] for k in range(years + 1)]
 
     def continuation_rows(self) -> np.ndarray:
         """The continuation path each row goes on with: row r of the stacked scenarios -> path r mod N.
@@ -582,7 +682,10 @@ class ScenarioSet:
     def tickers(self) -> "tk.TickerSet":
         """The tickers' columns for these rows (tickers.compose): loaded on the first request that holds a ticker
         and again whenever one of their files changes. PathsNotReady when the built-in ticker files are missing or
-        belong to other scenario paths; ValueError when an included custom scenario was saved without them."""
+        belong to other scenario paths; ValueError when an included custom scenario was saved without them, or when
+        the set is not monthly (the ticker layer runs on the monthly engine's paths)."""
+        if self.step_months != 1:
+            raise ValueError(TICKERS_MONTHLY_ONLY)
         key = tk.ticker_key(self)
         with _LOCK:
             if self._tickers is None or self._tickers[0] != key:
@@ -590,15 +693,23 @@ class ScenarioSet:
             return self._tickers[1]
 
 
+TICKERS_MONTHLY_ONLY = ("季度情景集暂不支持标的：标的层（QQQ、TQQQ、BDC 等）按月度引擎的情景路径计算；"
+                        "请换回月度情景集，或只用 13 类资产")
+
+
 def _continuation_issue(data: ScenarioSet, cont: _Continuation) -> str:
     """Why `cont` cannot follow `data`'s paths ("" when it can)."""
-    again = f"请运行 {BUILD_PORTFOLIO} 重新生成"
+    monthly = data.step_months == 1
+    name = f"{CONTINUATION_FILE} " if monthly else "情景集文件里的续推数组"
+    again = (f"请运行 {BUILD_PORTFOLIO} 重新生成" if monthly else "请重新导出这个情景集" if data.set_id.startswith("agent:")
+             else f"请运行 {BUILD_QSETS} 重新生成")
+    unit = "个月" if monthly else f"步（每步 {data.step_months} 个月）"
     if sorted(cont.assets) != sorted(data.assets):
-        return f"{CONTINUATION_FILE} 的资产列表与情景路径不一致：{again}"
-    if cont.offset != data.months or data.months % MONTHS:
-        return f"{CONTINUATION_FILE} 接在第 {cont.offset} 个月之后，而情景路径有 {data.months} 个月：{again}"
+        return f"{name}的资产列表与情景路径不一致：{again}"
+    if cont.offset != data.months or data.months % data.spy:
+        return f"{name}接在第 {cont.offset} {unit}之后，而情景路径有 {data.months} {unit}：{again}"
     if cont.start != data.labels[0]:
-        return f"{CONTINUATION_FILE} 是按 {cont.start} 起的数据生成的，情景路径从 {data.labels[0]} 开始：{again}"
+        return f"{name}是按 {cont.start} 起的数据生成的，情景路径从 {data.labels[0]} 开始：{again}"
     return ""
 
 
@@ -642,12 +753,17 @@ def _compose(parts: list[tuple[str, Path, Path, str | None]], key: tuple, cont_p
     return out
 
 
-def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) -> ScenarioSet:
+def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple, set_id: str = "monthly") -> ScenarioSet:
     loaded = [(kind, _cached(npz, _load_block), _cached(js, _load_json) if js.exists() else {}, cid)
               for kind, npz, js, cid in parts]
     main = loaded[0][1]
+    step = main.step_months
+    spy = MONTHS // step
+    if step != 1:          # monthly custom scenarios in a quarterly set: summed to its steps (_aggregate_block)
+        loaded = [(kind, blk if kind != "custom" else _aggregate_block(blk, step), info, cid)
+                  for kind, blk, info, cid in loaded]
     T = min(b.months for _, b, _, _ in loaded)
-    if T < MONTHS:
+    if T < spy:
         raise PathsNotReady("情景路径不足一年")
     meta = {str(s.get("id")): s for s in loaded[0][2].get("scenarios", []) if isinstance(s, dict)}
     ids, names, sources, probs, ranges, blocks, factors, notes = [], [], [], [], [], [], [], []
@@ -660,7 +776,7 @@ def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) 
                          "（可能是数据更新前保存的）；混合时按同一起点对齐，建议重新运行该情景。")
         cols = None if blk.assets == main.assets else [blk.assets.index(a) for a in main.assets]
         for k, sid in enumerate(blk.ids):
-            if kind == "builtin":
+            if kind in ("builtin", "agent"):
                 m = meta.get(sid, {})
                 p = _first_number(m.get("prob"), None if blk.probs is None else blk.probs[k])
                 name = str(m.get("name") or sid)
@@ -672,6 +788,9 @@ def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) 
                     sid = f"custom:{sid}"
                 notes.append(f"自定义情景「{name}」默认以先验概率 {p:.1%} 与内置情景一起重新归一化后计入加权汇总"
                              "（可用 scenario_probs 修改）。")
+                if step != 1:
+                    notes.append(f"自定义情景「{name}」来自月度引擎：按季末汇总后与这个季度情景集一起混合"
+                                 "（总回报按月复利精确汇总；提取用它自己的年度数据）。")
             ids.append(sid)
             names.append(name)
             sources.append(kind)
@@ -679,7 +798,7 @@ def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) 
             ranges.append((row, row + blk.n_paths))
             row += blk.n_paths
         blocks.append((blk, cols))
-        factors.append(blk.factors.select(cols, T // MONTHS))
+        factors.append(blk.factors.select(cols, T // spy))
     p = np.asarray(probs, dtype=float)
     p[np.isnan(p)] = 1.0 / len(p)
     if p.sum() <= 0:
@@ -687,12 +806,55 @@ def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) 
     return ScenarioSet(ids=ids, names=names, sources=sources, default_probs=p / p.sum(), ranges=ranges,
                        assets=list(main.assets), labels=main.labels[:T + 1], months=T, parts=blocks,
                        factors=wd.YearFactors.concat(factors), key=key, notes=notes,
-                       files=[(kind, Path(npz), cid) for kind, npz, _, cid in parts], root=Path(parts[0][1]).parent)
+                       files=[(kind, Path(npz), cid) for kind, npz, _, cid in parts], root=Path(parts[0][1]).parent,
+                       step_months=step, set_id=set_id,
+                       set_meta=dict(loaded[0][2].get("set") or {}) if isinstance(loaded[0][2], dict) else {})
 
 
-def load_scenarios(include_custom=(), results_dir: str | Path | None = None) -> ScenarioSet:
-    """Built-in scenarios plus the requested custom ones (cached by file mtimes)."""
+def _compose_set(parts: list[tuple[str, Path, Path, str | None]], key: tuple, set_id: str) -> ScenarioSet:
+    """A set file (quarterly or agent) with its own continuation (its cont_* arrays) after its last step."""
+    data = _compose_paths(parts, key, set_id)
+    main = data.parts[0][0]
+    if main.cont is not None:
+        out = data.with_continuation(main.cont)
+    else:
+        out = data.with_continuation(None, main.cont_issue or "这个情景集没有续推数组：期限只能到情景路径的长度")
+    out.key = key
+    return out
+
+
+def normalize_set(scenario_set) -> str:
+    """'monthly' | 'quarterly' | 'agent:<id>' for an explicit scenario_set (ValueError with a Chinese message)."""
+    if not isinstance(scenario_set, str):
+        raise ValueError("scenario_set 必须是文字：monthly、quarterly 或 agent:<编号>")
+    s = scenario_set.strip()
+    if s in SET_ALIASES:
+        return SET_ALIASES[s]
+    if AGENT_SET_RE.match(s):
+        return s
+    raise ValueError(f"未知情景集：{s[:60]}（可选 monthly / quarterly / agent:<编号>，不写则按切换关的默认）")
+
+
+def set_files(set_id: str, root: Path) -> tuple[Path, Path]:
+    """(npz, index json) of a set."""
+    if set_id == "monthly":
+        return root / PATHS_FILE, root / INDEX_FILE
+    if set_id == "quarterly":
+        return root / QUARTERLY_FILE, root / QUARTERLY_INDEX
+    m = AGENT_SET_RE.match(set_id)
+    if not m:
+        raise ValueError(f"未知情景集：{set_id}")
+    base = Path(AGENT_SETS_DIR)
+    return base / f"{m.group(1)}.npz", base / f"{m.group(1)}.json"
+
+
+def load_scenarios(include_custom=(), results_dir: str | Path | None = None, scenario_set: str = "monthly") -> ScenarioSet:
+    """Built-in scenarios (of one scenario set: the monthly engine's by default) plus the requested custom ones
+    (cached by file mtimes)."""
     root = Path(RESULTS_DIR if results_dir is None else results_dir)
+    sid = normalize_set(scenario_set)
+    if sid != "monthly":
+        return _load_set(sid, include_custom, root)
     main = root / PATHS_FILE
     if not main.exists():
         raise PathsNotReady(f"{PATHS_FILE} 还没有生成：请先运行 python -m scenariolab.build")
@@ -710,6 +872,114 @@ def load_scenarios(include_custom=(), results_dir: str | Path | None = None) -> 
             _SETS.move_to_end(key)
             return hit
         return _remember(_SETS, key, _compose(parts, key, cont), _MAX_SETS)
+
+
+def _load_set(sid: str, include_custom, root: Path) -> ScenarioSet:
+    main, index = set_files(sid, root)
+    if not main.exists():
+        if sid == "quarterly":
+            raise PathsNotReady(f"季度情景集（{QUARTERLY_FILE}）还没有生成：请运行 {BUILD_QSETS}")
+        raise ValueError(f"情景集 {sid} 不存在")
+    parts = [("builtin" if sid == "quarterly" else "agent", main, index, None)]
+    for cid in _custom_ids(include_custom):
+        npz = root / CUSTOM_DIR / f"{cid}.npz"
+        if not npz.exists():
+            raise ValueError(f"自定义情景 {cid} 不存在或没有保存路径数据")
+        parts.append(("custom", npz, root / CUSTOM_DIR / f"{cid}.json", cid))
+    key = ("set", sid) + tuple((str(npz), _stamp(npz), _stamp(js)) for _, npz, js, _ in parts)
+    with _LOCK:
+        hit = _SETS.get(key)
+        if hit is not None:
+            _SETS.move_to_end(key)
+            return hit
+        return _remember(_SETS, key, _compose_set(parts, key, sid), _MAX_SETS)
+
+
+def _switch_state(root: Path) -> dict:
+    try:
+        from ..evaluation import switch
+        return switch.state(root)
+    except Exception as err:  # noqa: BLE001 - an unreadable switch switches nothing
+        return {"status": "invalid", "quarterly": False, "passed": False, "label": "试运行",
+                "text": f"切换关的状态读不出来（{type(err).__name__}）：默认引擎是月度引擎。", "reasons": [],
+                "default_text": "默认引擎：月度引擎"}
+
+
+def _switch_brief(st: dict) -> dict:
+    return {**{k: st.get(k) for k in ("status", "passed", "quarterly", "text", "default_text", "label", "evaluated_at",
+                                      "reasons")},
+            "certified_model": (st.get("model") or {}).get("semantic") if isinstance(st.get("model"), dict) else None}
+
+
+STALE_QSET_NOTE = ("切换关 T-S 已通过，但磁盘上的季度情景集是用另一个版本的季度模型生成的（不是切换关认证的版本）："
+                   f"请重新生成季度情景集（{BUILD_QSETS}）；在那之前默认用月度引擎的情景集，季度情景集只作试运行。")
+
+
+def _set_model(meta: dict) -> str | None:
+    """The quarterly stack's semantic version a set was built on (its index's set.model, or the head of set.stack)."""
+    m = meta.get("model")
+    if isinstance(m, str) and m.startswith("qmodel-"):
+        return m.split("/", 1)[0]
+    st = meta.get("stack")
+    return st.split("/", 1)[0] if isinstance(st, str) and st.startswith("qmodel-") else None
+
+
+def qset_certified(meta: dict, sw: dict) -> bool:
+    """A quarterly set may serve as the switched default only when it was built on the model T-S certified."""
+    want = sw.get("certified_model")
+    if want is None and isinstance(sw.get("model"), dict):
+        want = sw["model"].get("semantic")
+    got = _set_model(meta or {})
+    return bool(want) and got == want
+
+
+def _qset_meta(root: Path) -> dict:
+    idx = root / QUARTERLY_INDEX
+    info = _load_json(idx) if idx.exists() else {}
+    return dict((info or {}).get("set") or {}) if isinstance(info, dict) else {}
+
+
+def resolve_set(scenario_set=None, results_dir: str | Path | None = None) -> dict:
+    """Which set a request runs on: {id, requested, default (bool: chosen by the switch), note, switch}.
+    None / "" / "default": the switch's default (switch.state(): monthly until T-S passes), falling back to the
+    monthly set with a note while the quarterly set is not built."""
+    root = Path(RESULTS_DIR if results_dir is None else results_dir)
+    st = _switch_state(root)
+    want, note = ("quarterly" if st.get("quarterly") else "monthly"), None
+    if want == "quarterly" and not (root / QUARTERLY_FILE).exists():
+        want = "monthly"
+        note = f"切换关 T-S 已通过，但季度情景集还没有生成（{BUILD_QSETS}）：这次先用月度引擎的情景集。"
+    elif want == "quarterly" and not qset_certified(_qset_meta(root), st):
+        want, note = "monthly", STALE_QSET_NOTE
+    if scenario_set is None or (isinstance(scenario_set, str) and scenario_set.strip() in ("", "default")):
+        return {"id": want, "requested": None, "default": True, "note": note, "switch": _switch_brief(st),
+                "effective_default": want}
+    return {"id": normalize_set(scenario_set), "requested": str(scenario_set), "default": False, "note": None,
+            "switch": _switch_brief(st), "effective_default": want}
+
+
+def set_block(data: ScenarioSet, sinfo: dict | None) -> dict:
+    """The response's description of the set it ran on."""
+    sinfo = sinfo or {"id": data.set_id, "default": False, "note": None, "switch": None}
+    sw = sinfo.get("switch") or {}
+    switched = bool(sw.get("quarterly"))
+    if switched and data.set_id == "quarterly" and not qset_certified(data.set_meta, sw):
+        switched = False                         # built on another model version than T-S certified: a trial set
+    engine = "monthly" if data.set_id == "monthly" else str(data.set_meta.get("engine") or "quarterly")
+    stub = bool(data.set_meta.get("stub"))
+    trial = engine != "monthly" and not switched
+    name = set_name(data.set_id, sum(1 for x in data.sources if x == "builtin") or None, data.set_meta)
+    return {"id": data.set_id, "name": name, "engine": engine, "engine_zh": "月度引擎" if engine == "monthly" else "季度模型",
+            "step_months": data.step_months, "steps_per_year": data.spy, "trial": trial,
+            "label": ("桩模型（不是资产模型）" if stub else "试运行" if trial else "默认" if engine != "monthly" and switched
+                      else ""),
+            "is_default": (data.set_id == sinfo["effective_default"] if sinfo.get("effective_default")
+                           else (data.set_id == "quarterly") == switched) if data.set_id in ("monthly", "quarterly")
+            else False,
+            "chosen_by_default": bool(sinfo.get("default")), "note": sinfo.get("note"),
+            "switch": {k: sw.get(k) for k in ("status", "passed", "text", "default_text")} if sw else None,
+            "meta": {k: data.set_meta.get(k) for k in ("version", "created", "origin", "n_paths", "quality", "probabilities",
+                                                        "text") if k in data.set_meta}}
 
 
 def warm(results_dir: str | Path | None = None) -> bool:
@@ -818,6 +1088,8 @@ def _book(data: ScenarioSet, weights, alpha_mode=None) -> _Book:
     held = {t: x for t, x in held.items() if x > 0}
     if not held:
         return _Book(columns=list(data.assets), w=_normalized(wa), asset_cols=None, tickers=[], alpha_mode=mode)
+    if data.step_months != 1:
+        raise ValueError(TICKERS_MONTHLY_ONLY)
     cols = [i for i, x in enumerate(wa) if x > 0]
     tickers = [t for t in tk.TICKERS if t in held]
     w = _normalized(np.concatenate([wa[cols], [held[t] for t in tickers]]))
@@ -932,26 +1204,62 @@ def _ruin_rank(e: dict) -> tuple:
 
 # ---------------------------------------------------------------- portfolio
 
-def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance: str = "monthly") -> dict:
+def rebalance_rule(rebalance, step_months: int = 1) -> tuple[str, str, int]:
+    """(the rule's name, metrics.portfolio_wealth mode, period in steps) of a request's rebalancing on a set with
+    step_months: monthly every step (monthly sets only), quarterly every 3 / s steps, annual every 12 / s, none.
+    None: monthly on a monthly set, quarterly on a quarterly one."""
+    if rebalance is None:
+        rebalance = "monthly" if step_months == 1 else "quarterly"
+    if rebalance not in REBALANCE:
+        raise ValueError(f"rebalance 必须是 {' / '.join(REBALANCE)} 之一")
+    if rebalance == "none":
+        return rebalance, "none", 0
+    months = REBALANCE_MONTHS[rebalance]
+    if months < step_months or months % step_months:
+        raise ValueError(f"这个情景集每步 {step_months} 个月，没有月内路径：不能每月再平衡"
+                         f"（可选 {' / '.join(r for r in REBALANCE if r != 'monthly')}）")
+    k = months // step_months
+    return rebalance, ("monthly" if k == 1 else "annual"), k
+
+
+def _quarterly_notes(data: ScenarioSet) -> list[str]:
+    """The notes a set with steps longer than a month adds to every result."""
+    if data.step_months == 1:
+        return []
+    s = data.step_months
+    out = [f"这个情景集每步 {s} 个月（每年 {data.spy} 步）：波动率按 {s} 个月收益的标准差 × √{data.spy} 年化，"
+           f"夏普和索提诺同样按每年 {data.spy} 步；“每季再平衡”就是每一步调回目标权重，没有月内路径，所以不能每月再平衡。",
+           QUARTERLY_DD_NOTE]
+    text = data.set_meta.get("text")
+    if isinstance(text, str) and text:
+        out.append(text)
+    for line in data.set_meta.get("notes") or []:
+        if isinstance(line, str) and line:
+            out.append(line)
+    return out
+
+
+def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance: str | None = None,
+                     set_info: dict | None = None) -> dict:
     """evaluate_portfolio() on already loaded scenarios. Fans are wealth multiples of 1 at t=0."""
     book = _book(data, weights)
     w = book.w
     probs = scenario_probabilities(data, scenario_probs)
-    if rebalance not in metrics.REBALANCE_MODES:
-        raise ValueError(f"rebalance 必须是 {' / '.join(metrics.REBALANCE_MODES)} 之一")
-    T, Y = data.months, data.years
+    rebalance, mode, period = rebalance_rule(rebalance, data.step_months)
+    T, Y, spy = data.months, data.years, data.spy
     ts = data.tickers() if book.tickers else None
     cash = data.assets.index("cash") if "cash" in data.assets else None
     parts, yearly, yearly_real = [], [], []
     for k, (blk, cols) in enumerate(data.parts):
         atot = blk.total[:, :T] if cols is None else blk.total[:, :T][:, :, cols]
         total = _book_monthly(data, book, k, atot)
-        wealth = metrics.portfolio_wealth(total, w, rebalance)
+        wealth = (metrics.portfolio_wealth(total, w, mode) if mode != "annual"
+                  else metrics.portfolio_wealth(total, w, mode, period=period))
         deflator = blk.cpi[:, :T + 1]
         rf = 0.0 if cash is None else atot[:, :, cash].astype(np.float64)
-        parts.append(metrics.path_metrics(wealth, deflator, rf))
-        yearly.append(wealth[:, 0:Y * MONTHS + 1:MONTHS])
-        yearly_real.append(yearly[-1] / deflator[:, 0:Y * MONTHS + 1:MONTHS])
+        parts.append(metrics.path_metrics(wealth, deflator, rf, periods=spy))
+        yearly.append(wealth[:, 0:Y * spy + 1:spy])
+        yearly_real.append(yearly[-1] / deflator[:, 0:Y * spy + 1:spy])
     m = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
     yearly, yearly_real = np.concatenate(yearly), np.concatenate(yearly_real)
 
@@ -966,7 +1274,7 @@ def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance:
     groups = data.groups
     worst, best = _extremes(per, _real_growth)
     out = {
-        "years": data.year_labels(Y), "dates": data.year_dates(Y), "horizon_months": T,
+        "years": data.year_labels(Y), "dates": data.year_dates(Y), "horizon_months": T * data.step_months,
         "weights": book.weights_out(),
         "rebalance": rebalance,
         "per_scenario": per,
@@ -978,12 +1286,18 @@ def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance:
         "notes": [
             "财富以期初 1 元计；real 为按各路径自身 CPI 折算成期初购买力。",
             "CAGR、回撤等先在每条路径上计算，再取分位数；加权汇总把各情景的路径按情景概率混合。",
-            "夏普 = 相对现金资产的年化超额收益 / 年化波动；索提诺的分母只计跑输现金的月份。",
+            "夏普 = 相对现金资产的年化超额收益 / 年化波动；索提诺的分母只计跑输现金的"
+            + ("月份。" if data.step_months == 1 else "季度。"),
             "max_dd_p95 是回撤的坏尾部：只有 5% 的路径回撤比它更深；cvar5_terminal 是最差 5% 路径的期末财富倍数均值。",
             "最差/最好情景按扣除通胀后的实际 CAGR 中位数排序（名义收益会高估高通胀情景）。",
+            *_quarterly_notes(data),
             *data.notes,
         ],
+        "step_months": data.step_months,
+        "scenario_set": set_block(data, set_info),
     }
+    if set_info and set_info.get("note"):
+        out["notes"].insert(0, set_info["note"])
     if ts is not None:
         out["instruments"] = tk.describe(ts, book.tickers, book.alpha_mode, metrics.mixture_weights(groups, probs))
         out["notes"] += tk.notes(ts, book.tickers, book.alpha_mode, withdrawal=False, scenario_years=Y)
@@ -991,9 +1305,14 @@ def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance:
 
 
 def evaluate_portfolio(weights: dict, scenario_probs: dict | None = None,
-                       include_custom: list[str] = (), rebalance: str = "monthly") -> dict:
-    """Portfolio statistics per scenario and aggregated (docs/ARCHITECTURE.md)."""
-    return portfolio_report(load_scenarios(include_custom), weights, scenario_probs, rebalance)
+                       include_custom: list[str] = (), rebalance: str | None = None,
+                       scenario_set: str | None = None) -> dict:
+    """Portfolio statistics per scenario and aggregated (docs/ARCHITECTURE.md). scenario_set: monthly | quarterly |
+    agent:<id>, or None for the switch's default (module docstring); rebalance: monthly | quarterly | annual | none
+    (None: monthly on a monthly set, quarterly on a quarterly one)."""
+    sinfo = resolve_set(scenario_set)
+    return portfolio_report(load_scenarios(include_custom, scenario_set=sinfo["id"]), weights, scenario_probs,
+                            rebalance, set_info=sinfo)
 
 
 # ---------------------------------------------------------------- withdrawal
@@ -1030,7 +1349,27 @@ def _signed(x) -> str:
     return "—" if x is None else f"{x * 100:+.2f}%"
 
 
+DIVIDEND_NOTE_Q = ("季度情景集的分红：每个派息资产按它季初的市价股息比计（P/D 随价格与股息增长逐季滚动），10 年期美债为票息、"
+                   "现金为全部回报，按季计入、年末一起进现金池；每季的总回报 = 价格变化 + 当季收入。")
+
+
+def _continuation_notes_q(data: ScenarioSet, horizon: int) -> list[str]:
+    """The continuation of a set file (its own cont_* arrays): what follows its last step."""
+    c, S = data.continuation, data.years
+    i = c.info or {}
+    how = i.get("text") or ("同一个模型在情景的最后一季之后不加任何陈述接着往下推（每条路径从它自己的季末状态出发），"
+                            "向长期锚回归")
+    shared = data.continuation_shared()
+    return [f"第 {S + 1} 年起没有情景主题：{how}。前 {S} 年是各情景自己的路径，第 {S + 1}–{horizon} 年接的是这个续推。",
+            (f"续推路径共 {c.n_paths} 条，少于全部 {data.factors.total.shape[0]} 条情景路径："
+             f"「{'」「'.join(shared)}」的部分路径与其他路径按序号循环共用续推路径。" if shared
+             else f"每条情景路径各接一条续推路径（共 {c.n_paths} 条）。"),
+            "CPI、分红和利息在续推部分照常计算，随通胀上调的提取额按整条路径的 CPI 换算。"]
+
+
 def _continuation_notes(data: ScenarioSet, horizon: int) -> list[str]:
+    if data.step_months != 1:
+        return _continuation_notes_q(data, horizon)
     c, S = data.continuation, data.years
     i = c.info or {}
     shared = data.continuation_shared()
@@ -1095,9 +1434,25 @@ def _cash_sources(f: wd.YearFactors, book: _Book, initial: float, rate: float, i
     return out
 
 
+def _withdrawal_set_notes(data: ScenarioSet) -> list[str]:
+    """What a set with steps longer than a month adds to a withdrawal result (the rules themselves are yearly)."""
+    if data.step_months == 1:
+        return []
+    out = [f"这个情景集每步 {data.step_months} 个月：提取仍是每年年末一次，用每年 {data.spy} 步合成的年度数据计算，"
+           "规则与月度情景集完全相同。"]
+    text = data.set_meta.get("text")
+    if isinstance(text, str) and text:
+        out.append(text)
+    for line in data.set_meta.get("notes") or []:
+        if isinstance(line, str) and line:
+            out.append(line)
+    return out
+
+
 def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: float = 0.04,
                       strategy: str = "all", inflation_indexed: bool = True,
-                      scenario_probs=None, horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk") -> dict:
+                      scenario_probs=None, horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk",
+                      set_info: dict | None = None) -> dict:
     """evaluate_withdrawal() on already loaded scenarios. Wealth is in units of `initial`.
 
     Every figure is at `horizon_years`. Past the scenario paths (data.years) the years come from the
@@ -1177,17 +1532,21 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
         f"安全提取率 = 破产概率不超过 {wd.SAFE_RUIN_PROB:.0%} 的最高提取率（在 0–{wd.RATE_BOUNDS[1]:.0%} 内搜索，"
         f"达到 {wd.RATE_BOUNDS[1]:.0%} 表示上限）。",
         *(_continuation_notes(data, Y) if longer else []),
-        DIVIDEND_NOTE,
+        DIVIDEND_NOTE if data.step_months == 1 else DIVIDEND_NOTE_Q,
+        *_withdrawal_set_notes(data),
         *data.notes,
         *([] if ts is None else tk.notes(ts, book.tickers, book.alpha_mode, withdrawal=True, scenario_years=S,
                                          horizon=Y)),
     ]
+    if set_info and set_info.get("note"):
+        notes.insert(0, set_info["note"])
     flows["note"] = CASH_FLOW_NOTE
     cont = None
     if longer:
         c = data.continuation
         shared = data.continuation_shared()
-        cont = {**(c.info or {}), "label": continuation_label(S), "first_year": S + 1, "years": Y - S,
+        cont = {**(c.info or {}), "label": continuation_label(S) if data.step_months == 1 else continuation_label_q(S),
+                "first_year": S + 1, "years": Y - S,
                 "start_date": data.year_dates(S)[-1], "n_paths": c.n_paths, "rows": int(f.total.shape[0]),
                 "shared": bool(shared), "shared_scenarios": shared}
         if ts is not None:
@@ -1200,7 +1559,7 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
         "weights": book.weights_out(),
         "strategies": out, "safe_rate": safe, "ruin_curve": curve,
         "safe_ruin_prob": wd.SAFE_RUIN_PROB, "scenario_horizon": part, "continuation": cont, "notes": notes,
-        "cash_flow": flows,
+        "cash_flow": flows, "step_months": data.step_months, "scenario_set": set_block(data, set_info),
     }
     if ts is not None:
         report["instruments"] = tk.describe(ts, book.tickers, book.alpha_mode, pw)
@@ -1216,17 +1575,77 @@ CASH_FLOW_NOTE = ("现金流（cash_flow）：pot_share_y1 = 第一年各持仓�
 def evaluate_withdrawal(weights: dict, initial: float = 1e6, rate: float = 0.04,
                         strategy: str = "all", inflation_indexed: bool = True,
                         scenario_probs: dict | None = None, include_custom: list[str] = (),
-                        horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk") -> dict:
+                        horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk",
+                        scenario_set: str | None = None) -> dict:
     """Withdrawal strategies, ruin and safe rates per scenario and aggregated (docs/ARCHITECTURE.md).
 
     horizon_years: a whole number of years in HORIZON_BOUNDS (10..40, default 30). Years past the
     scenario paths (15) come from the unconditional continuation; scenario_horizon repeats the
     figures at year 15. ValueError (HTTP 400) for an invalid horizon, PathsNotReady (503) when a horizon
     needs the continuation and it is missing or stale. weights may hold tickers (module docstring);
-    alpha_mode (shrunk / half / raw) picks the estimated tickers' alpha variant.
+    alpha_mode (shrunk / half / raw) picks the estimated tickers' alpha variant. scenario_set: monthly |
+    quarterly | agent:<id>, or None for the switch's default (module docstring).
     """
-    return withdrawal_report(load_scenarios(include_custom), weights, initial, rate, strategy,
-                             inflation_indexed, scenario_probs, horizon_years, alpha_mode)
+    sinfo = resolve_set(scenario_set)
+    return withdrawal_report(load_scenarios(include_custom, scenario_set=sinfo["id"]), weights, initial, rate, strategy,
+                             inflation_indexed, scenario_probs, horizon_years, alpha_mode, set_info=sinfo)
+
+
+# ---------------------------------------------------------------- the sets a page can pick
+
+def _set_entry(set_id: str, root: Path, st: dict) -> dict:
+    npz, index = set_files(set_id, root)
+    info = _load_json(index) if index.exists() else {}
+    meta = dict(info.get("set") or {})
+    engine = "monthly" if set_id == "monthly" else str(meta.get("engine") or "quarterly")
+    switched = bool(st.get("quarterly"))
+    stale = switched and set_id == "quarterly" and npz.exists() and not qset_certified(meta, st)
+    if stale:
+        switched = False                         # the monthly set stays the default until the set is rebuilt
+    n_index = len([x for x in info.get("scenarios", []) if isinstance(x, dict)]) if isinstance(info, dict) else 0
+    out = {"id": set_id, "name": set_name(set_id, n_index or None, meta), "engine": engine,
+           "step_months": 1 if set_id == "monthly" else int(meta.get("step_months") or 3),
+           "available": npz.exists(), "issue": None,
+           "trial": engine != "monthly" and not switched,
+           "is_default": (set_id == "quarterly") == switched if set_id in ("monthly", "quarterly") else False,
+           "stub": bool(meta.get("stub")), "n_scenarios": None, "n_paths": None, "years": None,
+           "created": (meta.get("created") or _modified(npz)) if npz.exists() else None,
+           "text": meta.get("text"), "quality": meta.get("quality"), "probabilities": meta.get("probabilities")}
+    if stale:
+        out["issue"] = STALE_QSET_NOTE
+    if not npz.exists():
+        out["issue"] = (f"还没有生成：请运行 {BUILD_QSETS}" if set_id == "quarterly"
+                        else "还没有生成：请运行 python -m scenariolab.build" if set_id == "monthly" else "文件不在")
+        return out
+    sc = [s for s in info.get("scenarios", []) if isinstance(s, dict)]
+    out["n_scenarios"] = len(sc) or None
+    out["n_paths"] = meta.get("n_paths") or info.get("n_paths")
+    hm = info.get("horizon_months") or meta.get("horizon_months")
+    out["years"] = int(hm) // MONTHS if isinstance(hm, (int, float)) and hm else None
+    out["scenarios"] = [{"id": s.get("id"), "name": s.get("name"), "prob": s.get("prob"),
+                         "prior_prob": s.get("prior_prob"), "excluded": s.get("excluded"),
+                         "headline": s.get("headline") if set_id != "monthly" else None} for s in sc]
+    return out
+
+
+def sets_report(results_dir: str | Path | None = None) -> dict:
+    """The scenario sets a page can pick (GET /api/portfolio/sets): {default, sets [...], switch}."""
+    root = Path(RESULTS_DIR if results_dir is None else results_dir)
+    st = _switch_state(root)
+    sets = [_set_entry("monthly", root, st), _set_entry("quarterly", root, st)]
+    base = Path(AGENT_SETS_DIR)
+    if base.is_dir():
+        for p in sorted(base.glob("*.npz")):
+            sid = f"agent:{p.stem}"
+            if AGENT_SET_RE.match(sid):
+                sets.append(_set_entry(sid, root, st))
+    sinfo = resolve_set(None, root)
+    for e in sets:
+        if e["id"] in ("monthly", "quarterly"):
+            e["is_default"] = e["id"] == sinfo["id"]
+    return {"default": sinfo["id"], "default_note": sinfo.get("note"), "sets": sets, "switch": _switch_brief(st),
+            "rebalance": {"monthly": list(REBALANCE), "quarterly": [r for r in REBALANCE if r != "monthly"]},
+            "quarter_end_drawdown": QUARTER_END_DD, "quarter_end_note": QUARTERLY_DD_NOTE}
 
 
 # ---------------------------------------------------------------- build step

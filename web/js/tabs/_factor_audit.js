@@ -645,7 +645,7 @@ export function renderAudit(box, res, ctx) {
       { key: 'verdict', label: '结论', wrap: true, minWidth: 180 },
       { key: 'status', label: '状态', fmt: (v, r) => ui.chip(r.status_name || STATUS[v]?.[0] || v || '—', STATUS[v]?.[1] || '') },
       { key: 'new_columns', label: '新增的情景变量', wrap: true, minWidth: 140,
-        fmt: (v) => (arr(v).length ? h('a', { href: '#lab', title: '情景实验室的变量表' }, arr(v).map(vname).join('、')) : '—') },
+        fmt: (v) => (arr(v).length ? h('a', { href: '#lab?vars', title: '情景实验室（月度情景规格）的变量参考' }, arr(v).map(vname).join('、')) : '—') },
     ], cs, { stack: true })));
   }
 

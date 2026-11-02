@@ -1,6 +1,10 @@
 // Static methodology page: how the engine works, what it assumes, where data comes from.
 // valuation.json (optional) adds the valuation-state settings to the assumptions; regimes.json
 // (optional) fills the macro-regime step's thresholds, label names and episode counts.
+// The quarterly chapter (SIM_DESIGN §0, §1, §3, §4.3, §6; 季度模型，试运行) comes first: simulation, not prediction;
+// the three layers; the answer to "what are the model's factor inputs and how do they become network inputs"; the
+// valuation block; why financial conditions are required; the neural network that lost. Its counts come from the
+// model card (/api/q/card) and its valuation numbers from the quarterly panel (/api/q/valuation), both optional.
 const CMA_METHOD = { valuation_adjusted: '估值调整', historical: '历史漂移' };
 // The regime thresholds and labels as in config.REGIMES, used only when regimes.json is missing.
 const REGIME_DEFAULTS = {
@@ -14,15 +18,22 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
   const cma = meta?.cma || {};
   const pct = (x) => (x === undefined || x === null ? '—' : `${(x * 100).toFixed(2)}%`);
   // the missing-factor audit (optional, like the other two) fills step 12 and one limitation with its numbers
-  const [val, rg, fa] = api
-    ? await Promise.all([api.optional('valuation', meta), api.optional('regimes', meta), api.optional('factor_audit', meta)])
-    : [null, null, null];
+  const [val, rg, fa, qcard, qval] = api
+    ? await Promise.all([api.optional('valuation', meta), api.optional('regimes', meta), api.optional('factor_audit', meta),
+      api.get('q/card').catch(() => null), api.get('q/valuation').catch(() => null)])
+    : [null, null, null, null, null];
   if (!alive()) return;
 
   root.append(h('p', { class: 'lead' },
-    '引擎不“发明”未来。它把历史上真实发生过的每个月当作积木：情景只改变每块积木被抽中的概率，',
+    '这是模拟，不是预测。预测只在第一层：带概率的情景假说；第二层用一个内部一致的联合模型把情景没说的因子补齐，第三层把因子映射成资产。',
+    '只解释季度和更长的期限。大模型只负责把文字翻译成情景表，所有数字都由模型计算。'));
+  root.append(...quarterlyChapter(h, card, ui, meta, qcard, qval));
+
+  root.append(h('div', { class: 'section-title' }, '月度引擎（现行默认，切换关通过之前）'));
+  root.append(h('p', { class: 'lead' },
+    '月度引擎不“发明”未来。它把历史上真实发生过的每个月当作积木：情景只改变每块积木被抽中的概率，',
     '因果模型决定改哪些概率、改多少有上限，最后按今天的利率、估值和股息率把积木重新拼成 15 年的路径。',
-    'LLM 只负责把文字情景翻译成这些概率约束，所有数字都由引擎计算。'));
+    '在季度模型通过切换关之前，内置情景、组合评估和提取页都用它。'));
 
   // step 7 reads the CMA settings the build used (meta.cma), so it cannot drift from them
   const num = (x, dflt) => (typeof x === 'number' && Number.isFinite(x) ? x : dflt);
@@ -41,8 +52,9 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
       h('a', { href: '#diagnostics?ablation' }, '残差设定的消融证据见“诊断与迭代” →')],
     ['7. 估值锚定（CMA）', step7],
     ['8. K 线与提取', '每个情景 600 条路径：扇形图给出分位数；K 线展示一条“代表路径”（终值和最大回撤都接近中位数），日内高低点用布朗桥补出。组合与提取在同一批路径上计算，提取额随路径自己的 CPI 上调。提取期限超过 15 年时（最长 40 年），第 16 年起没有情景主题：每条情景路径各接一条不加视图的无条件引擎路径（长期回报假设去掉只为前 15 年设定的估值回归项）。'],
-    ['9. 怎么检验', '一年期：每年年底只用当时的数据预测下一年（相似起点法 vs 随机历史年份 vs 历史均值），看区间覆盖率、CRPS 和排序能力，外生冲击年份单独标出。多年期：只在给定情景主题时检验，回测窗口把真实宏观路径当作主题，检查引擎能否复现资产，并把误差拆成情景、引擎和传导三部分。'],
-    ['10. 估值是状态，不是因子', '市盈率（CAPE）和 P/D 的月度变化几乎就是当月的股价变化，放进因子模型等于用股价解释股价，所以只作对照；实际利率、利润增长、利润减资本开支这些外生候选在走步检验里也没有稳定提升样本外 R²，没有进入因子模型（因子模型这一轮的变化见第 12 步）。估值改作“状态”：每条模拟路径都记录 P/D（κ=0，只记录、不改变回报），每个情景详情里都能看到它隐含的 15 年后估值。把 P/D 按 −κ·(ln P/D − ln 公允 P/D) 拉回公允值的设定在回测里比现行引擎差，所以拉力关闭，长期估值假设只通过第 7 步的常数调整进入。',
+    ['9. 怎么检验', '季度和年度：情景条件检验按 1 个季度和 4 个季度报告；12–20 个季度的数字每个十年只有 2–3 个独立窗口，只能当个案。回测窗口把真实宏观路径当作情景，检查引擎能否复现资产，并把误差拆成情景、引擎和传导三部分；条件分两档：“宏观 + 金融条件（含市场价格）”和“只有宏观”。另有相似起点法的一年期回放（历史回放，不是情景结果）。'],
+    ['10. 估值：状态与一条腿', '估值的月度变化几乎就是当月的股价变化，放进因子模型等于用股价解释股价，所以不作因子。它是状态和初始条件：月度引擎逐路径记录 P/D（κ=0，只记录、不改变回报），拉回公允值的设定在回测里更差，所以拉力关闭；'
+      + '季度模型把股价拆成 CAPE 倍数和基本面两条腿（恒等式），情景可以明说“估值重估”，那相当于直接假设股价（见上面季度模型一章的“估值”）。',
       h('a', { href: '#valuation' }, '证据见“估值与盈利” →')],
   ];
   steps.push(regimeStep(h, rg, meta), auditStep(h, fa));
@@ -79,13 +91,16 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
     h('ul', { class: 'list' }, (meta?.notes || []).map(n => h('li', { class: 'muted' }, n))),
     h('p', { class: 'muted', style: { margin: '10px 0 0', fontSize: '12px' } }, COPYRIGHT)));
 
-  root.append(h('div', { class: 'section-title' }, '局限'));
+  root.append(h('div', { class: 'section-title' }, '计算口径与局限'));
   root.append(card({},
     h('ul', { class: 'list' },
-      h('li', {}, '情景结果由假设决定。这个工具的价值是内部一致和假设透明，不是预测哪种未来会发生。'),
+      h('li', {}, '情景结果由假设决定。这个工具的价值是内部一致和假设透明，不是预测哪种未来会发生；预测只在情景概率里，而概率是手设的判断。'),
+      h('li', {}, '季度模型在切换关通过之前只是试运行：它的结果和月度引擎的结果并列显示，默认数字仍来自月度引擎。'),
+      h('li', {}, '宏观本身对资产几乎没有样本外信息，已知宏观的能力几乎全部来自信用利差：情景对金融条件怎么说，几乎决定了资产结果，这是情景作者的假设。'),
+      h('li', {}, '12–20 个季度的检验统计每个十年只有 2–3 个独立窗口，只能当个案；长期扇形图是模拟，不是检验结果。'),
       h('li', {}, '历史只覆盖美国 1973 年以来；美国是过去半个世纪的赢家，存在幸存者偏差。'),
       h('li', {}, '战争、地缘政治、AGI 在模型里都是外生冲击；超出历史支持的部分（如 AGI 生产率）通过有上限的覆盖参数注入，并在界面上标出。'),
-      h('li', {}, '情景概率是透明的启发式：主观先验 × 与当前状态的相似度，不是统计意义上的预测概率。'),
+      h('li', {}, '情景概率是第一层的判断（预测只在这里）：默认用手设的主观先验；按今天状态的倾斜（主观先验 × 与当前状态的相似度）默认关闭，只作对照，组合评估的月度情景集仍按它加权并标明。13 个互相重叠的长期情景只有一个实现，这些概率无法像统计预测那样校准。'),
       h('li', {}, '一年期的资产回报本来就很难预测：滚动检验显示“今天像哪段历史”只能轻微调整预测，方向判断不比“总是猜涨”更好；模型的价值在于区间是否可靠、跨资产排序和情景一致性。'),
       h('li', {}, regimeLimit(rg)),
       h('li', {}, auditLimit(fa)),
@@ -227,4 +242,42 @@ function auditLimit(fa) {
   const u = fa?.summary?.unexplained_share_2015_2026;
   return `${isNum(u) ? `约 ${(u * 100).toFixed(0)}% ` : '大部分'}的月度价格波动在样本外解释不了（市场自身的估值与风险偏好、行业新闻、危机月份），`
     + '引擎用抽中月份的残差承载这一部分；GZ 和期限溢价是今天的修订版和模型估计值。';
+}
+
+// ---- the quarterly chapter (SIM_DESIGN §0, §1, §3, §4.3, §6; 季度模型，试运行)
+// Counts come from the model card (/api/q/card: groups x, u, s, c), the re-rating drift and today's CAPE from the quarterly
+// panel (/api/q/valuation); without them the chapter keeps its sentences and leaves the numbers out.
+function quarterlyChapter(h, card, ui, meta, qcard, qval) {
+  const rows = qcard?.rows || [];
+  const n = (g) => rows.filter(r => r.group === g).length || null;
+  const nx = n('x'), nu = n('u'), ns = n('s'), nc = n('c');
+  const cnt = (k, unit) => (k ? `${k} 个${unit}` : unit);
+  const nAssets = (meta?.assets || []).length || null;
+  const rer = (qval?.rerating || []).filter(r => typeof r.per_year === 'number');
+  const rerText = rer.length ? `${(Math.min(...rer.map(r => r.per_year)) * 100).toFixed(1)}–${(Math.max(...rer.map(r => r.per_year)) * 100).toFixed(1)}%` : '';
+  const capeNow = (qval?.today?.states || []).find(x => x.key === 'cape');
+  const train = rer.find(r => r.to === '2014Q4');
+  const steps = [
+    ['Q1. 三层：情景 → 因子 → 资产', '第一层是带概率的情景假说，唯一带判断（预测）的一层；第二层是一个联合模型：情景写了的值精确或在给定标准差内满足，没写的从历史联合分布补全，政策可以写成“干预”（同季的宏观不随它补全，市场价格当季反应）；'
+      + '第三层把补全的因子同期映射成资产（每个输入都标明是同期、前定还是假设）。情景错了是“假说误差”，前两层在情景正确时仍然算错是“模拟误差”，两者分开报告。'],
+    ['Q2. 季度单元：三个输入', `输入是季初以前的全部数据（${cnt(ns, '期初状态')}，前定）、季前文字的翻译（${cnt(nc, '长期锚')}、预告路径、跨季约束、估值陈述、体制请求，假设）和季内文字的翻译（${cnt(nx, '字段')}和 ${cnt(nu, '政策冲击')}，同期）。`
+      + `大模型只翻译两段文字；输出是季末${nAssets ? ` ${nAssets} 个` : ''}资产的联合分布。同一个模型一季一季往前滚，推 10–15 年（主要看 10 年）。`],
+    ['Q3. 模型的因子输入是什么，怎样进入模型', `因子输入是变量卡片上的情景输入字段（${cnt(nx, '')}，按货币、财政、需求、供给、价格与产出、金融条件、风险和政策分组）加上 ${cnt(nu, '政策冲击')}；大模型写的是季度情景表：每季每个字段要么空着（没说），要么带一个数值、一个定性幅度或一个范围，并附原文引文。`
+      + '模型读入的是 [期初状态, 字段值 × 掩码, 掩码]，掩码标明文字说了哪些字段；在高斯模型里掩码不需要学：说了的分量直接作条件，没说的积分掉。'],
+    ['Q4. 神经网络：做了，但输了', `带掩码的小型神经网络（输入同上）在三个十年里都输给结构化的线性高斯模型，只作对照，只有在预注册检验里每个时段都赢才会启用。`
+      + (train && nx && nu && nAssets ? `可能的原因：到 ${train.to} 的训练期只有约 ${train.n} 个季度，却要学 ${nx + nu} 个输入、${nAssets} 个输出。` : '可能的原因：训练期的季度太少，输入和输出太多。')],
+    ['Q5. 金融条件必填', '把真实的宏观路径原样喂给传导模型，样本外几乎没有解释力；“已知宏观”的能力几乎全部来自信用利差。所以情景每个阶段都要说明金融条件（信用利差的方向）；没说时由模型补全，并标出“补全的信用利差在历史检验里与无条件抽样相当”。写它接近写股权风险溢价，界面会这样标明。'],
+    ['Q6. 估值：状态，也是一条腿', `股价 = CAPE 倍数 × CPI × 10 年平均实际盈利（恒等式）：价格回报 = 倍数腿 + 基本面腿。倍数腿几乎承载了全部股价波动，所以写出一条倍数路径就等于写出一条股价路径。`
+      + `起点估值对 1–20 个季度的回报没有样本外增益（其中 12–20 个季度每个十年只有 2–3 个独立窗口，只能当个案），任何“拉回均值”都更差：模型不回归；情景可以写“倍数保持”或“重估（温和 / 明显 / 极端）”，那相当于直接假设股价。`
+      + (rerText ? `长期回报不外推训练期的倍数抬升（1973 年以来每年约 ${rerText}）。` : '长期回报不外推训练期的倍数抬升。')
+      + (capeNow ? `今天的 CAPE ${capeNow.value.toFixed(1)}（${qval.cape_since || '1973Q1'} 以来第 ${((capeNow.percentile || 0) * 100).toFixed(1)} 百分位）。` : '')],
+    ['Q7. 怎么检验、何时切换', '季度模型通过预注册的切换关之前，是试运行：内置情景、未来一年页的默认数字、组合与提取仍用月度引擎。切换关要求季度模型在已知因子路径和同一份翻译上都不比月度引擎差（差距的 90% 上界低于预先登记的门槛），且校准不比它差。叙事检验是常设功能：真实大模型只在你看过调用估算并确认之后才运行，测试和构建都用模拟后端。'],
+  ];
+  return [
+    h('div', { class: 'section-title' }, '季度模型（试运行）：情景 → 因子 → 资产'),
+    h('div', { class: 'grid cols-2 text' }, steps.map(([t, d]) => card({ title: t }, h('p', { style: { margin: 0 } }, d)))),
+    h('p', { class: 'muted', style: { fontSize: '13px', margin: '10px 0 0' } }, '对应的页面：',
+      h('a', { href: '#forecast' }, '未来一年：情景条件模拟'), '、', h('a', { href: '#lab' }, '情景实验室（季度情景表）'), '、',
+      h('a', { href: '#scenarios' }, '未来情景（每个情景的季度模型一节）'), '。'),
+  ];
 }
