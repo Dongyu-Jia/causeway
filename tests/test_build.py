@@ -82,18 +82,21 @@ def step_calls(fake_build, monkeypatch):
     return calls
 
 
-def test_regimes_runs_after_scenarios_and_before_forecast_and_two_steps_are_opt_in():
+def test_regimes_runs_after_scenarios_and_before_forecast_and_three_steps_are_opt_in():
     s = build.STEPS
     assert s.index("scenarios") < s.index("regimes") < s.index("forecast") < s.index("llm")
-    assert build.OPT_IN == {"ablation", "regime_forecast"}
-    assert s[-2:] == ["ablation", "regime_forecast"]
+    assert build.OPT_IN == {"ablation", "regime_forecast", "evaluation"}
+    assert s[-3:] == ["ablation", "regime_forecast", "evaluation"]
 
 
 def test_the_step_order_shared_with_the_regime_layer():
-    """FACTORS_DESIGN §7.6: one STEPS list for both branches; factor_audit is a default step after diagnostics."""
-    assert build.STEPS == ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios",
-                           "regimes", "forecast", "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
-    assert "factor_audit" not in build.OPT_IN
+    """FACTORS_DESIGN §7.6: one STEPS list for both branches; factor_audit is a default step after diagnostics. The
+    quarterly stack (SIM_DESIGN §3.9) adds quarterly after the monthly panel, qmodel after diagnostics (it needs
+    model_selection.json) and the opt-in evaluation last."""
+    assert build.STEPS == ["panel", "quarterly", "causality", "eras", "diagnostics", "factor_audit", "backtest",
+                           "scenarios", "regimes", "forecast", "valuation", "portfolio", "llm", "qmodel", "meta",
+                           "ablation", "regime_forecast", "evaluation"]
+    assert "factor_audit" not in build.OPT_IN and not {"quarterly", "qmodel"} & build.OPT_IN
 
 
 def test_factor_audit_runs_on_the_selected_model_after_diagnostics(fake_build, monkeypatch, tmp_path):
@@ -172,11 +175,27 @@ def test_the_default_build_runs_regimes_but_not_the_opt_in_steps(step_calls):
     assert "analysis.regimes" in step_calls
     assert step_calls.index("scenarios.library") < step_calls.index("analysis.regimes") < step_calls.index("analysis.forecast")
     assert "analysis.ablation" not in step_calls and "analysis.regime_forecast" not in step_calls
+    assert "evaluation.protocol" not in step_calls
+    assert step_calls.index("qmodel.panel") < step_calls.index("analysis.causality")
+    assert step_calls.index("analysis.diagnostics") < step_calls.index("qmodel.factor_checks")
 
 
-def test_all_includes_both_opt_in_steps(step_calls, tmp_path):
+def test_a_quarterly_step_without_its_inputs_is_skipped_not_failed(fake_build, capsys):
+    """A fresh clone has no cached quarterly raw files: the quarterly-stack steps say what is missing and the build
+    goes on (any other error still fails)."""
+    fake_build["qmodel.panel"] = FileNotFoundError("缺少原始文件 data/raw/fred/GDP.json")
+    fake_build["qmodel.factor_checks"] = FileNotFoundError("data/processed/panel_quarterly.csv")
+    assert build.main(["--only", "quarterly", "qmodel", "eras"]) == 0
+    out = capsys.readouterr().out
+    assert "[build] quarterly skipped (missing input:" in out and "[build] qmodel skipped" in out
+    assert "FAILED" not in out and "[build] eras done" in out
+    fake_build["analysis.eras"] = FileNotFoundError("x")                 # outside the quarterly stack: a failure
+    assert build.main(["--only", "eras"]) == 1
+
+
+def test_all_includes_the_opt_in_steps(step_calls, tmp_path):
     assert build.main(["--all", "--skip", "panel"]) == 0
-    assert step_calls[-2:] == ["analysis.ablation", "analysis.regime_forecast"]
+    assert step_calls[-3:] == ["analysis.ablation", "analysis.regime_forecast", "evaluation.protocol"]
     assert {"analysis.regimes", "analysis.forecast"} <= set(step_calls)
     assert (tmp_path / "regimes.json").exists() and (tmp_path / "regime_forecast.json").exists()
 
@@ -274,6 +293,34 @@ def test_a_cached_shiller_file_is_never_downloaded_again_unless_refresh(fake_net
     assert fake_net.dest.read_bytes() == src.XLS_MAGIC + b"cached"
     src.shiller(refresh=True)
     assert len(fake_net.calls) == 1 and fake_net.dest.read_bytes() == fake_net.body
+
+
+def test_a_refresh_never_replaces_a_workbook_with_one_whose_earnings_end_earlier(fake_net, monkeypatch):
+    """P0.3 imported the 2026 workbook (E to 2026-06); SHILLER_URL's copy had E only to 2023-06. A refresh keeps the
+    cached workbook unless the download's earnings reach at least as far (or the cached one does not parse)."""
+    import pandas as pd
+    fake_net.dest.parent.mkdir(parents=True)
+    fake_net.dest.write_bytes(src.XLS_MAGIC + b"2026")
+    ends = {b"2026": "2026-06-01", b"2023": "2023-06-01", b"2027": "2027-03-01"}
+
+    def parse(path):
+        tag = path.read_bytes()[len(src.XLS_MAGIC):]
+        if tag not in ends:
+            return None
+        idx = pd.date_range("2020-01-01", ends[tag], freq="MS")
+        return pd.DataFrame({"earnings": 1.0, "price": 1.0, "cpi": 1.0, "cape": 1.0}, index=idx)
+
+    monkeypatch.setattr(src, "_shiller_parse", parse)
+    fake_net.body = src.XLS_MAGIC + b"2023"                          # the older Yale copy
+    src.shiller(refresh=True)
+    assert len(fake_net.calls) == 1 and fake_net.dest.read_bytes() == src.XLS_MAGIC + b"2026"
+    fake_net.body = src.XLS_MAGIC + b"broken"                        # an unreadable download
+    src.shiller(refresh=True)
+    assert fake_net.dest.read_bytes() == src.XLS_MAGIC + b"2026"
+    fake_net.body = src.XLS_MAGIC + b"2027"                          # a newer workbook replaces it
+    src.shiller(refresh=True)
+    assert fake_net.dest.read_bytes() == src.XLS_MAGIC + b"2027"
+    assert not (fake_net.dest.parent / "ie_data.download.xls").exists()
 
 
 def test_download_false_reads_the_cache_only(fake_net):

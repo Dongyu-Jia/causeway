@@ -83,6 +83,7 @@ from scipy.stats import norm
 
 from .. import config, jsonio
 from ..context import EngineContext
+from ..engine.anchors import window_reversion
 from ..engine.ep import effective_number, entropy_pool, kl_divergence
 from ..engine.factor_model import AssetFactorModel, ModelSpec
 from ..engine.pooling import SHRINK_STEPS, start_prior
@@ -287,11 +288,13 @@ def analog_weights(db: MonthDB, state: np.ndarray, block: int = HORIZON, ens: fl
 
 
 def simulate_year(db: MonthDB, anchor, cma: dict, probs: np.ndarray, n_paths: int, seed: int,
-                  valuation=None) -> dict:
+                  valuation=None, reversion: dict | None = None) -> dict:
     """12-month total returns (n, A), inflation and macro changes from one engine run
-    (`valuation`: an engine/simulate.ValuationModel for the valuation-state mode, None = off)."""
+    (`valuation`: an engine/simulate.ValuationModel for the valuation-state mode, None = off; `reversion`: the
+    long-run anchors, engine/anchors.window_reversion(panel, t) at a historical origin t -- the anchors knowable
+    then (§5.5, P0.1) -- and None = DEFAULT_REVERSION, the forward default)."""
     sim = simulate(db, anchor, [BlockProbs(probs, HORIZON)], [HORIZON], n_paths=n_paths, seed=seed,
-                   block=HORIZON, cma=cma, valuation=valuation, **config.RESIDUALS)
+                   block=HORIZON, cma=cma, valuation=valuation, reversion=reversion, **config.RESIDUALS)
     growth = np.prod(1.0 + sim.total.astype(float), axis=1) - 1.0
     macro = {k: _macro_change(sim.macro[k], kind) for k, (_, kind) in MACRO.items()}
     infl = sim.macro["cpi"][:, HORIZON].astype(float) / sim.macro["cpi"][:, 0].astype(float) - 1.0
@@ -406,8 +409,9 @@ def forecast_origin(panel: pd.DataFrame, spec: ModelSpec, t: pd.Timestamp, n_pat
     eng = origin_engine(panel, spec, t, cma_method, valuation)
     db, anchor, cma, vm = eng["db"], eng["anchor"], eng["cma"], eng["vm"]
     w, info = analog_weights(db, state_at(panel, t), ens=analog_ens, share=analog_share)
-    runs = {"uncond": simulate_year(db, anchor, cma, eng["prior"], n_paths, seed, valuation=vm),
-            "analog": simulate_year(db, anchor, cma, w, n_paths, seed, valuation=vm)}
+    rev = window_reversion(panel, t)                  # the anchors knowable at t (§5.5), not the post-2008 constants
+    runs = {"uncond": simulate_year(db, anchor, cma, eng["prior"], n_paths, seed, valuation=vm, reversion=rev),
+            "analog": simulate_year(db, anchor, cma, w, n_paths, seed, valuation=vm, reversion=rev)}
     real, assets, macro = score_runs(panel, t, runs)
     out = {"date": t.strftime("%Y-%m"), "end": real["end"].strftime("%Y-%m"),
            "shocks": shock_names(t + pd.DateOffset(months=1), real["end"]),

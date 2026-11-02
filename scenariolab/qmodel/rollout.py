@@ -26,9 +26,12 @@ intervention ("do") on a field with a policy shock (d_ff -> u_ff on the shadow r
 d_transfers, d_perstax) fixes its structural shock so that the field hits the pin: E0 macro, ordered before it in
 the recursion, is unmoved in the quarter; E1 / E2 respond on impact (the do-operator of §5.3). "do_last" sets a
 satellite after the quarter's draw (nothing else responds in the quarter; its own lags carry it on). The policy
-rate's floor (observed ff = max(shadow, 0.1)), the log-shifted variables (u = 2 + exp(lu), spreads = 0.1 + exp(.)),
-the ±4 sd saturation (d_oil and d_y10 pass through) and the dollar hold (config_q.USD_HOLD: where d_usd is not
-pinned, its expected change is zero) follow the factor layer.
+rate's floor (observed ff = max(shadow, 0.1)), the bounded variables (unemployment in (2, 30), the spreads in (0.1,
+15) and (0.1, 20) on logit scales, factors.Bounded; pins are delivered inside), the observed 10-year's floor (its
+shadow carried in the state), the ±4 training-sd saturation (§3.5; d_oil and d_y10 pass through), the cycle
+module's level
+(config_q.CYCLE_CENTER) and the dollar hold (config_q.USD_HOLD: where d_usd is not pinned, its expected change is zero)
+follow the factor layer.
 
 The state (a dict of arrays, first axis = particle; keys with "_" are private) carries the factor layer's stacked
 vector of the last two quarters (_z), the inflation trend, the CPI level and history, the block states of the cycle
@@ -69,9 +72,10 @@ from scipy.stats import chi2
 from . import assets as AS
 from . import config_q as cq
 from . import factors as F
+from . import spec
 from . import valuation as val
 
-VERSION = "1"
+VERSION = "2"                   # 2: the fix round (content-derived versions, published root info, §3.5 rules)
 ASSETS = list(cq.ASSETS)
 IA = {a: i for i, a in enumerate(ASSETS)}
 RISK_COLS = [IA[a] for a in AS.RISK]
@@ -82,7 +86,7 @@ FLOOR = cq.FF_FLOOR
 CODE = {"free": 0, "reduced": 1, "do": 2, "do_last": 3, "shock": 4}
 # private per-particle columns a step draw carries for the state roll (Draws.x["_q"] in the agent adapter)
 PRIV = ("shadow", "d_usd_raw", "x_oil_raw", "y_dg", "y_fund", "y_eq", "res_pos", "res_left", "cyc_pos", "cyc_left",
-        "floor_bound", "bound_hit", "saturated")
+        "floor_bound", "bound_hit", "saturated", "shadow_y10")
 PV = {k: j for j, k in enumerate(PRIV)}
 # the public state keys every state carries (besides <x>_l1 for every x field, d_cpi_l1, d_unrate_l2, <asset>_l1)
 PUBLIC_STATES = ("s_ff", "s_unrate", "s_core_yoy", "s_cpi_yoy", "s_spread", "s_gz", "s_y10", "s_term", "s_real_y10",
@@ -100,17 +104,22 @@ STATE_ZH = {"s_ff": "政策利率（季末）", "s_unrate": "失业率（季末�
             "s_pd": "log 市价/股息（CRSP）", "s_vol": "已实现波动（美股季度回报）", "nasdaq_4q": "纳指过去 4 季对数回报",
             "real_oil_d1": "实际油价 1 季变化", "real_oil_d2": "实际油价 2 季变化", "s_tariff": "有效关税率"}
 FLOOR_NOTE = "政策利率钉在下限 0.1% 以下：按下限交付"
+Y10_FLOOR_NOTE = "10 年期收益率钉在下限 0 以下：按下限交付（影子利率保留在状态里）"
 BOUND_NOTE = "失业率或信用利差钉到模型的下界以下：按下界交付"
-# far outside history (GZ max about 8, quarterly unemployment max about 13): the factor layer's long-horizon tails
-TAIL_GZ, TAIL_U, TAIL_RETURN = 15.0, 20.0, 1.0
-TAIL_NOTE = ("因子层的长期尾部发散（GZ 信用利差 > 15、失业率 > 20% 或美股单季对数回报超过 ±100%）：这些粒子的结果"
-             "远在历史之外，不可信")
+CEILING_NOTE = "失业率或信用利差钉到模型的上界以上（失业率 30%、Baa − 10 年 15、GZ 20）：按上界交付"
+# far outside history (post-1973 quarter-end maxima: u 11.0, GZ 7.7, Baa - 10y 5.8; P4b's acceptance thresholds)
+TAIL_GZ, TAIL_U, TAIL_SPREAD, TAIL_RETURN = 12.0, 20.0, 10.0, 1.0
+TAIL_NOTE = ("因子层的长期尾部远在历史之外（GZ 信用利差 > 12、Baa − 10 年利差 > 10、失业率 > 20% 或美股单季对数回报"
+             "超过 ±100%）：这些粒子的结果只是极端尾部，解读要谨慎")
 
 
-def tail_flags(gz, unrate, us_total) -> np.ndarray:
+def tail_flags(gz, unrate, us_total, spread=None) -> np.ndarray:
     """Particles (or path-quarters) whose state left history far behind, or whose returns are not finite."""
     gz, u, r = (np.asarray(a, float) for a in (gz, unrate, us_total))
-    return ~np.isfinite(r) | ~np.isfinite(gz) | (gz > TAIL_GZ) | (u > TAIL_U) | (np.abs(r) > TAIL_RETURN)
+    out = ~np.isfinite(r) | ~np.isfinite(gz) | (gz > TAIL_GZ) | (u > TAIL_U) | (np.abs(r) > TAIL_RETURN)
+    if spread is not None:
+        out = out | (np.asarray(spread, float) > TAIL_SPREAD)
+    return out
 
 
 class RolloutError(ValueError):
@@ -152,20 +161,27 @@ def _systems(model: F.FactorModel) -> list:
         s = dict(model.system(d))
         s["Pinv"] = np.linalg.inv(s["P"])
         s["kgain"] = s["Sigma"][:, I["ip"]] / s["Sigma"][I["ip"], I["ip"]]
+        s["cycle_shift"] = model.cycle_shift(d)
         out.append(s)
     return out
 
 
 def _panel_digest() -> str:
-    try:
-        from . import panel as qpanel
-        meta = qpanel.load_meta()["info"]
-        stamp = f"{meta.get('inputs_digest', '')}|{meta.get('card_digest', '')}|{cq.PANEL_Q_PATH.stat().st_mtime_ns}"
-    except (OSError, KeyError, ValueError):
-        stamp = "no-meta"
-    sel = AS.SELECTION_PATH
-    stamp += f"|{sel.stat().st_mtime_ns if sel.exists() else 0}"
-    return hashlib.sha256(stamp.encode("utf-8")).hexdigest()[:12]
+    """The stack's identity from content only (qmodel.spec.stack_identity: the sha256 of the stack's code closure,
+    config_q included, and of its input files -- the quarterly panel and its meta, the monthly panel, model F and the
+    card). Never file modification times: a touched or byte-identical rewritten file keeps the version, any changed
+    byte (code or data) changes it."""
+    return spec.stack_identity()["digest"][:12]
+
+
+def _frame_digest(*frames) -> str:
+    """Exact content digest of in-memory panels (fit_stack(Q=..., P=...)): columns, index and values."""
+    h = hashlib.sha256()
+    for D in frames:
+        h.update(",".join(map(str, D.columns)).encode())
+        h.update(",".join(map(str, D.index)).encode())
+        h.update(np.ascontiguousarray(D.select_dtypes("number").to_numpy(float)).tobytes())
+    return h.hexdigest()
 
 
 def last_data_quarter(Q: pd.DataFrame) -> str:
@@ -178,13 +194,18 @@ def last_data_quarter(Q: pd.DataFrame) -> str:
 
 
 def fit_stack(train_end: str | None = None, *, origin: str | None = None, anchors: str = "forward", seed: int = 0,
-              n_boot: int | None = None, Q: pd.DataFrame | None = None, P: pd.DataFrame | None = None) -> Stack:
+              n_boot: int | None = None, Q: pd.DataFrame | None = None, P: pd.DataFrame | None = None,
+              information: str = "auto") -> Stack:
     """Fit both layers on the quarters up to `train_end` (default: the last data quarter) and the origin's
     initial state (default origin: the quarter after the train end). anchors: 'forward' (§3.8 judgment values,
-    scenarios and the agent tree) or 'train_end' (§5.5, backtests)."""
+    scenarios and the agent tree) or 'train_end' (§5.5, backtests). information: the initial state's information
+    set (factors.initial_state: 'auto' = every value the panel holds at the forward root, only what was published by
+    the origin's start at an earlier origin)."""
     from ..data import panel as monthly_panel
     from . import panel as qpanel
     t0 = time.perf_counter()
+    in_memory = Q is not None or P is not None
+    ident = spec.stack_identity()
     Q = qpanel.load_panel() if Q is None else Q
     P = monthly_panel.load_panel() if P is None else P
     te = str(pd.Period(train_end or last_data_quarter(Q), "Q"))
@@ -195,10 +216,14 @@ def fit_stack(train_end: str | None = None, *, origin: str | None = None, anchor
     al = AS.AssetLayer.fit(te, panel=P, Q=Q, n_boot=cq.PARAM_BOOT if n_boot is None else int(n_boot), seed=seed)
     tq = pd.Period(te, "Q")
     bill = float((Q["lvl_tb3"] - Q["lvl_ff"]).loc[:tq].mean())
-    init = fm.initial_state(Q, org)
-    digest = _panel_digest()
+    init = fm.initial_state(Q, org, information=information)
+    if in_memory:                                   # panels passed in: their own content, with the code's
+        data = _frame_digest(Q, P)
+        ident = {"code": ident["code"], "inputs": data,
+                 "digest": hashlib.sha256(f"{ident['code']}|{data}".encode()).hexdigest()}
+    digest = ident["digest"][:12]
     version = (f"qmodel-r{VERSION}-f{F.VERSION}-a{AS.VERSION}/{te}/{anchors}/s{seed}"
-               f"/b{len(al.params) if al.params is not None else 0}/{digest}")
+               f"/b{len(al.params) if al.params is not None else 0}/{org}/{init.information}/{digest}")
     from . import card as qcard
     have = set(F.CORE_FIELDS) | set(fm.sats.fields)
     xf = [f for f in qcard.x_fields(qcard.load_card()) if f in have]
@@ -208,7 +233,14 @@ def fit_stack(train_end: str | None = None, *, origin: str | None = None, anchor
                "factor": {k: fm.info[k] for k in ("lambda", "nu", "rejection_rate", "n_draws", "satellites")},
                "asset_param_draws": len(al.params) if al.params is not None else 0, "bill_spread": bill,
                "root_imputed": list(init.imputed), "fit_seconds": round(time.perf_counter() - t0, 2),
-               "label": cq.TRIAL_LABEL}
+               "label": cq.TRIAL_LABEL, "identity": ident, "information": init.information}
+    if init.information == "available":             # the forward root: the agent tree's REQUIRED_STATE must be finite
+        root = root_state(st, 1)
+        bad = [k for k in cq.AGENT_REQUIRED_STATE if k in root and not np.isfinite(np.asarray(root[k], float)).all()]
+        if bad:
+            raise RolloutError(f"起点 {org} 的状态不是有限值：{'、'.join(bad)}。s_cape 需要 E 到 {cq.SHILLER_MIN_EARNINGS} "
+                               f"以后的 Shiller 工作簿（{' 或 '.join('data/raw/' + f for f in cq.SHILLER_FILES)}）；"
+                               "其余状态检查季度面板（python -m scenariolab.build --only quarterly）")
     return st
 
 
@@ -249,18 +281,32 @@ def _tariff_level(q_last) -> float:
         return float("nan")
 
 
+def asset_start(stack: Stack, xz: dict | None = None) -> dict:
+    """The asset layer's start state at the stack's origin under the factor layer's information rule, with q0 - 1's
+    macro inputs of the y_fund equation imputed by the factor layer where they were not published (prev)."""
+    if xz is None:
+        init, Q = stack.init, stack.Q
+        q0 = pd.Period(stack.origin, "Q")
+        z = np.asarray(init.z, float)
+        pi_m1 = _qval(Q, "lvl_infl_trend", q0 - 2, init.pi0)
+        xz = x_of_z(stack, z[1], z[0], float(init.pi0), pi_m1, _qval(Q, "lvl_ff", q0 - 2, init.ff0),
+                    _qval(Q, "lvl_unrate", q0 - 2, init.u0))
+    prev = {k: float(np.asarray(xz[k], float).ravel()[0]) for k in ("d_cpi", "d_ip", "d_unrate", "d_rgdp") if k in xz}
+    return stack.assets.start_state(stack.Q, stack.origin, information=stack.init.information, prev=prev)
+
+
 def x_of_z(stack: Stack, z1: np.ndarray, z0: np.ndarray, pi0, pi_m1, ff_prev, u_prev) -> dict:
     """The x fields of the quarter whose stacked vector is z1, given the quarter before (z0, its pi_trend pi_m1,
     observed ff_prev and unemployment u_prev): the inverse of the state roll's bijection (used at the root)."""
     m = stack.factors
     g = {v: z1[..., I[v]] for v in F.CORE}
     h = {v: z0[..., I[v]] for v in F.CORE}
-    sh = F.EXP_SHIFT
-    lvl = lambda zz, v: (sh[v] + np.exp(zz[v])) if v in sh else zz[v]      # noqa: E731
+    lvl = lambda zz, v: m.tf.level(v, zz[v])                                # noqa: E731
     out = {"d_cpi": g["pc"], "d_cpi_serv": g["ps"], "d_cpi_goods": (g["pc"] - m.ws * g["ps"]) / m.wg,
-           "d_ip": g["ip"] / 4.0, "d_unrate": cq.FACTOR_U_SHIFT + np.exp(g["lu"]) - u_prev,
+           "d_ip": g["ip"] / 4.0, "d_unrate": lvl(g, "lu") - u_prev,
            "d_ff": np.maximum(g["rff"] + pi0, FLOOR) - ff_prev,
-           "d_y10": (g["ry10"] + pi0) - (h["ry10"] + pi_m1), "d_spread": lvl(g, "sp") - lvl(h, "sp"),
+           "d_y10": np.maximum(g["ry10"] + pi0, cq.Y10_FLOOR) - np.maximum(h["ry10"] + pi_m1, cq.Y10_FLOOR),
+           "d_spread": lvl(g, "sp") - lvl(h, "sp"),
            "d_gz": lvl(g, "gz") - lvl(h, "gz"), "d_usd": g["usd"] - h["usd"], "d_oil": g["ro"] - h["ro"] + g["pc"] / 4}
     for j, f in enumerate(m.sats.fields):
         out[f] = z1[..., NC + j]
@@ -281,8 +327,7 @@ def root_state(stack: Stack, n: int, *, draw_index=None, param_index=None) -> di
     ql, ql2 = q0 - 1, q0 - 2
     z = np.asarray(init.z, float)
     z1, z0 = z[1], z[0]
-    sh = F.EXP_SHIFT
-    lvl = lambda zz, v: (sh[v] + math.exp(zz[I[v]])) if v in sh else float(zz[I[v]])   # noqa: E731
+    lvl = lambda zz, v: float(stack.factors.tf.level(v, zz[I[v]]))                   # noqa: E731
     full = lambda v: np.full(n, float(v))                                            # noqa: E731
     pi0 = float(init.pi0)
     s: dict = {}
@@ -291,7 +336,8 @@ def root_state(stack: Stack, n: int, *, draw_index=None, param_index=None) -> di
     s["_lcpi"] = full(init.lvl_cpi0)
     s["_pc_hist"] = np.tile(np.asarray(init.pc_hist, float), (n, 1))
     s["_core_hist"] = np.tile(np.asarray(init.core_hist, float), (n, 1))
-    u_win = Q["lvl_unrate"].reindex(pd.period_range(q0 - 4, ql, freq="Q")).to_numpy(float)
+    u_win = Q["lvl_unrate"].reindex(pd.period_range(q0 - 4, ql, freq="Q")).to_numpy(float).copy()
+    u_win[-1] = float(init.u0)                  # q0 - 1's unemployment as the factor layer has it (published or imputed)
     s["_u_win"] = np.tile(u_win, (n, 1))
     D = stack.n_draws
     if draw_index is None:
@@ -304,13 +350,15 @@ def root_state(stack: Stack, n: int, *, draw_index=None, param_index=None) -> di
     s["_pidx"] = np.asarray(param_index, float).copy()
     for k in ("_cyc_pos", "_cyc_left", "_res_pos", "_res_left"):
         s[k] = np.zeros(n)
-    a0 = stack.assets.start_state(Q, q0)
+    ff0, u0 = float(init.ff0), float(init.u0)
+    pi_m1 = _qval(Q, "lvl_infl_trend", ql2, pi0)
+    xz = x_of_z(stack, z1, z0, pi0, pi_m1, _qval(Q, "lvl_ff", ql2, ff0), _qval(Q, "lvl_unrate", ql2, u0))
+    a0 = asset_start(stack, xz)
     s["_y_eq_l1"] = full(a0["y_eq_l1"])
     s["_fund_lags"] = np.tile(np.asarray(a0["y_fund_lags"], float), (n, 1))
     s["_dg_l1"] = full(a0["y_dg_l1"])
     # ---- public levels: the quarter-end values the factor layer conditions on
-    ff0, u0 = float(init.ff0), float(init.u0)
-    y10_0 = float(z1[I["ry10"]]) + pi0
+    y10_0 = max(float(z1[I["ry10"]]) + pi0, cq.Y10_FLOOR)
     s["s_ff"], s["s_unrate"] = full(ff0), full(u0)
     s["s_spread"], s["s_gz"] = full(lvl(z1, "sp")), full(lvl(z1, "gz"))
     s["s_y10"] = full(y10_0)
@@ -335,13 +383,14 @@ def root_state(stack: Stack, n: int, *, draw_index=None, param_index=None) -> di
     ro_m3 = _qval(Q, "lvl_oil_real", q0 - 3, float(z0[I["ro"]]))
     s["real_oil_d1"] = full((z1[I["ro"]] - z0[I["ro"]]) / 100.0)
     s["real_oil_d2"] = full((z1[I["ro"]] - ro_m3) / 100.0)
-    # ---- last quarter's x values (published, else as the factor layer imputed them) and asset returns
-    pi_m1 = _qval(Q, "lvl_infl_trend", ql2, pi0)
-    xz = x_of_z(stack, z1, z0, pi0, pi_m1, _qval(Q, "lvl_ff", ql2, ff0), _qval(Q, "lvl_unrate", ql2, u0))
+    # ---- last quarter's x values (published by the start of the origin -- every value the panel holds at the
+    # forward root -- else as the factor layer imputed them, factors.initial_state) and asset returns
+    info = init.information
     for f in stack.x_fields + ["d_cpi"]:
-        v = _qval(Q, f, ql)
+        v = F._pub(Q, f, q0, 1, info)
         s[f"{f}_l1"] = full(v if math.isfinite(v) else float(xz[f]))
-    s["d_unrate_l2"] = full(_qval(Q, "d_unrate", ql2, 0.0))
+    v2 = F._pub(Q, "d_unrate", q0, 2, info)
+    s["d_unrate_l2"] = full(v2 if math.isfinite(v2) else 0.0)
     for a in ASSETS:
         s[f"{a}_l1"] = full(_qval(Q, f"yt_{a}", ql, _qval(Q, f"y_{a}", ql, 0.0)))
     nas = Q["yt_nasdaq"].reindex(pd.period_range(q0 - 4, ql, freq="Q")).to_numpy(float)
@@ -423,9 +472,15 @@ class _Fields:
         self.vec[f] = v
         return v
 
+    def exp_var(self, f: str) -> str | None:
+        """The bounded core variable a pinnable change is measured on (None for the linear fields)."""
+        return {"d_unrate": "lu", "d_spread": "sp", "d_gz": "gz"}.get(f) if f in self.m.tf.obs else None
+
     @staticmethod
-    def exp_var(f: str) -> str | None:
-        return {"d_unrate": "lu", "d_spread": "sp", "d_gz": "gz"}.get(f) if f in F.EXP_OBS else None
+    def pin_bounds(f: str) -> tuple[float, float]:
+        """(lowest, highest) level a pinned change of a bounded variable is delivered at."""
+        return {"d_unrate": (cq.PIN_U_MIN, cq.PIN_U_MAX), "d_spread": (cq.PIN_SPREAD_MIN, cq.PIN_SPREAD_MAX),
+                "d_gz": (cq.PIN_SPREAD_MIN, cq.PIN_GZ_MAX)}[f]
 
     def lin_offset(self, f: str, S: dict) -> np.ndarray | float:
         """b_f: card value = obs . y + b_f for the linear fields."""
@@ -446,10 +501,10 @@ class _Fields:
         """(tau on obs . y, the card value delivered) for value pins v (not d_ff at the floor)."""
         ev = self.exp_var(f)
         if ev is not None:
-            lo = cq.PIN_U_MIN if f == "d_unrate" else cq.PIN_SPREAD_MIN
+            lo, hi = self.pin_bounds(f)
             lv0 = self.level0(f, S)
-            lv1 = np.maximum(lv0 + v, lo)
-            return np.log(lv1 - F.EXP_SHIFT[ev]), lv1 - lv0
+            lv1 = np.clip(lv0 + v, lo, hi)
+            return self.m.tf.value(ev, lv1), lv1 - lv0
         if f == "d_ff":
             return S["ff0"] + v - (1.0 - ALPHA) * S["pi0"], v
         return v - self.lin_offset(f, S), v
@@ -532,7 +587,8 @@ class Stepper:
 
     Options: param_uncertainty (each particle's own posterior draw and asset refit; else the posterior mean and the
     point fit), cycle (the C' module in quarters without a growth pin), usd_hold (config_q.USD_HOLD), saturate
-    (±4 sd), cma ("no_rerate", the forward default, or "historical"), block (asset residual block), gaussian
+    (±4 training sd, §3.5), cma ("no_rerate", the forward default, or "historical"), block (asset residual block),
+    gaussian
     (N(0, I) whitened innovations instead of the bootstrap)."""
 
     def __init__(self, stack: Stack, *, param_uncertainty: bool = True, cycle: bool = True,
@@ -575,11 +631,10 @@ class Stepper:
         z1, z0 = z[:, 1, :], z[:, 0, :]
         pi0 = _ss(state, "_pi")
         ff0 = _ss(state, "s_ff")
-        sh = F.EXP_SHIFT
-        S = {"z1": z1, "z0": z0, "pi0": pi0, "ff0": ff0, "u0": cq.FACTOR_U_SHIFT + np.exp(z1[:, I["lu"]]),
-             "sp0": sh["sp"] + np.exp(z1[:, I["sp"]]) if "sp" in sh else z1[:, I["sp"]],
-             "gz0": sh["gz"] + np.exp(z1[:, I["gz"]]) if "gz" in sh else z1[:, I["gz"]],
-             "y10_0": z1[:, I["ry10"]] + pi0}
+        tf = self.m.tf
+        S = {"z1": z1, "z0": z0, "pi0": pi0, "ff0": ff0, "u0": tf.level("lu", z1[:, I["lu"]]),
+             "sp0": tf.level("sp", z1[:, I["sp"]]), "gz0": tf.level("gz", z1[:, I["gz"]]),
+             "y10_0": np.maximum(z1[:, I["ry10"]] + pi0, cq.Y10_FLOOR)}       # the observed start (floor, P4b)
         S["shadow0"] = np.where(ff0 > FLOOR + 1e-9, ff0, z1[:, I["rff"]] + pi0)
         d = _ss(state, "_draw").astype(int) if self.param_uncertainty else np.full(len(ff0), -1)
         S["draw"] = np.where(d < 0, -1, np.minimum(d, self.stack.n_draws - 1))
@@ -630,34 +685,34 @@ class Stepper:
         return sm["C"] + S["z1"] @ P1.T + S["z0"] @ P2.T, sm["Sigma"]
 
     def _saturate(self, ids, V, C, S, prior):
-        """Pinned values clipped to the prior predictive mean ± SATURATION_SD sd (posterior mean, no cycle module):
-        the factor layer's saturation; d_oil and d_y10 pass through, do_last pins are not conditioned on."""
+        """§3.5 as in the factor layer (factors.saturation): a pin's gap to its conditional mean -- the observable at
+        the zero-innovation prediction of the posterior-mean model from the particle's own state, no cycle module --
+        saturates at ± SATURATION_SD training sd (factors.statement_sd: the field's sd over the training quarters);
+        d_oil and d_y10 pass through, do_last pins are not conditioned on."""
         if not self.saturate or not len(ids):
             return V.copy(), np.zeros(V.shape, bool)
-        pm, Sig = prior
+        pm, _ = prior
         Vu = V.copy()
         clipped = np.zeros(V.shape, bool)
         for j, f in enumerate(ids):
             act = np.isfinite(V[:, j]) & (C[:, j] != CODE["do_last"])
             if not act.any() or f in cq.MECHANICAL_FIELDS:
                 continue
+            sdv = F.statement_sd(self.m, F.Statement(f, (1,), 0.0))
+            if not (math.isfinite(sdv) and sdv > 0):
+                continue
             if f in F.SHOCKS:
-                sdv = float(self.stack.system(-1)["P"][self.shock_pos[f], self.shock_pos[f]])
                 mu = np.zeros(len(V))
             else:
                 o = self.fields.obs(f)
-                s_lin = float(math.sqrt(max(o @ Sig @ o, 0.0)))
                 ml = pm @ o
                 ev = self.fields.exp_var(f)
-                if ev is not None:
-                    e = np.exp(ml + 0.5 * s_lin ** 2)
-                    mu = F.EXP_SHIFT[ev] + e - self.fields.level0(f, S)
-                    sdv = e * math.sqrt(math.expm1(s_lin ** 2))
-                elif f == "d_ff":
-                    mu, sdv = _censored_moments(ml + (1.0 - ALPHA) * S["pi0"], s_lin, FLOOR)
-                    mu = mu - S["ff0"]
+                if ev is not None:                       # the level at the prediction, as a change
+                    mu = self.m.tf.level(ev, ml) - self.fields.level0(f, S)
+                elif f == "d_ff":                        # the observed rate: max(shadow, floor)
+                    mu = np.maximum(ml + (1.0 - ALPHA) * S["pi0"], FLOOR) - S["ff0"]
                 else:
-                    mu, sdv = ml + self.fields.lin_offset(f, S), s_lin
+                    mu = ml + self.fields.lin_offset(f, S)
             lo, hi = mu - cq.SATURATION_SD * sdv, mu + cq.SATURATION_SD * sdv
             v = V[:, j]
             c = np.clip(v, lo, hi)
@@ -742,16 +797,18 @@ class Stepper:
             codes = C[r0]
             Vg = Vu[rows]
             red, do, shock, last, floor_j = self._rows(ids, codes, Vg, Sg, floor_rows=False)
-            E = _innov(sysm, pred, U[rows], cyc_target[rows], act)
+            tgt = cyc_target[rows] + sysm["cycle_shift"]       # the draw's long-run IP growth (factors.cycle_shift)
+            E = _innov(sysm, pred, U[rows], tgt, act)
             y = _solve(sysm, pred, E, red, do, shock)
             if floor_j is not None:
-                y, lab_g = self._floor(sysm, pred, y, Sg, ids, codes, Vg, act, cyc_target[rows], rng, lab[rows])
+                y, lab_g = self._floor(sysm, pred, y, Sg, ids, codes, Vg, act, tgt, rng, lab[rows])
                 lab[rows] = lab_g
             for p, v in last:
                 y[:, p] = v
             Y[rows] = y
             if Ym is not None:
-                Em = _innov(sysm, pred, np.broadcast_to(mean_u, (len(rows), self.nz)), cyc_mean[rows], act)
+                Em = _innov(sysm, pred, np.broadcast_to(mean_u, (len(rows), self.nz)),
+                            cyc_mean[rows] + sysm["cycle_shift"], act)
                 ym = _solve(sysm, pred, Em, red, do, shock)
                 for p, v in last:
                     ym[:, p] = v
@@ -820,7 +877,8 @@ class Stepper:
         priv[:, PV["res_left"]] = res_left
         priv[:, PV["cyc_pos"]] = cyc["pos"]
         priv[:, PV["cyc_left"]] = cyc["left"]
-        tail = tail_flags(_ss(state, "s_gz") + x["d_gz"], _ss(state, "s_unrate") + x["d_unrate"], y["us_equity"])
+        tail = tail_flags(_ss(state, "s_gz") + x["d_gz"], _ss(state, "s_unrate") + x["d_unrate"], y["us_equity"],
+                          _ss(state, "s_spread") + x["d_spread"])
         if tail.any():
             notes.append({"code": "tail", "particles": int(tail.sum()), "text": TAIL_NOTE})
         return StepDraw(x=x, y=y, inc=inc, cpi_q=x["d_cpi"] / 400.0, priv=priv,
@@ -831,11 +889,10 @@ class Stepper:
         m = self.m
         N = len(S["ff0"])
         g = {v: Y[:, I[v]] for v in F.CORE}
-        sh = F.EXP_SHIFT
         pi1 = S["pi0"] + ALPHA * (g["pc"] - S["pi0"])
         shadow1 = g["rff"] + pi1
         ff1 = np.maximum(shadow1, FLOOR)
-        lv = lambda v: (sh[v] + np.exp(g[v])) if v in sh else g[v]           # noqa: E731
+        lv = lambda v: m.tf.level(v, g[v])                                   # noqa: E731
         d_usd_raw = g["usd"] - S["z1"][:, I["usd"]]
         hold = np.zeros(N)
         if Ym is not None:
@@ -844,8 +901,9 @@ class Stepper:
                 pinned_usd = np.isfinite(V[:, ids.index("d_usd")])
             hold = np.where(pinned_usd, 0.0, Ym[:, I["usd"]] - S["z1"][:, I["usd"]])
         x = {"d_cpi": g["pc"], "d_cpi_serv": g["ps"], "d_cpi_goods": (g["pc"] - m.ws * g["ps"]) / m.wg,
-             "d_ip": g["ip"] / 4.0, "d_unrate": cq.FACTOR_U_SHIFT + np.exp(g["lu"]) - S["u0"],
-             "d_ff": ff1 - S["ff0"], "d_y10": (g["ry10"] + pi1) - S["y10_0"], "d_spread": lv("sp") - S["sp0"],
+             "d_ip": g["ip"] / 4.0, "d_unrate": lv("lu") - S["u0"],
+             "d_ff": ff1 - S["ff0"], "d_y10": np.maximum(g["ry10"] + pi1, cq.Y10_FLOOR) - S["y10_0"],
+             "d_spread": lv("sp") - S["sp0"],
              "d_gz": lv("gz") - S["gz0"], "d_usd": d_usd_raw - hold,
              "d_oil": g["ro"] - S["z1"][:, I["ro"]] + g["pc"] / 4.0}
         for j, f in enumerate(m.sats.fields):
@@ -855,6 +913,7 @@ class Stepper:
             priv[:, PV["x_oil_raw"]] = Y[:, self.j_oil]
             x["x_oil_cause"] = np.clip(x["x_oil_cause"], 0.0, 1.0)
         priv[:, PV["shadow"]] = shadow1
+        priv[:, PV["shadow_y10"]] = g["ry10"] + pi1
         priv[:, PV["d_usd_raw"]] = d_usd_raw
         bound = np.zeros(N, bool)
         notes = []
@@ -874,14 +933,25 @@ class Stepper:
                 continue
             ev = self.fields.exp_var(f)
             if ev is not None:
-                lo = cq.PIN_U_MIN if f == "d_unrate" else cq.PIN_SPREAD_MIN
+                lo, hi = self.fields.pin_bounds(f)
                 lv0 = self.fields.level0(f, S)
                 low = ok & (lv0 + v < lo)
-                x[f] = np.where(ok & ~low, v, x[f])
+                high = ok & (lv0 + v > hi)
+                x[f] = np.where(ok & ~low & ~high, v, x[f])
                 x[f] = np.where(low, lo - lv0, x[f])
-                bound |= low
+                x[f] = np.where(high, hi - lv0, x[f])
+                bound |= low | high
                 if low.any():
                     notes.append({"field": f, "particles": int(low.sum()), "text": BOUND_NOTE})
+                if high.any():
+                    notes.append({"field": f, "particles": int(high.sum()), "text": CEILING_NOTE})
+                continue
+            if f == "d_y10":                     # P4b: a pin below the 10-year's floor is delivered at the floor
+                below = ok & (S["y10_0"] + v < cq.Y10_FLOOR)
+                x[f] = np.where(ok & ~below, v, x[f])
+                x[f] = np.where(below, cq.Y10_FLOOR - S["y10_0"], x[f])
+                if below.any():
+                    notes.append({"field": f, "particles": int(below.sum()), "text": Y10_FLOOR_NOTE})
                 continue
             x[f] = np.where(ok, v, x[f])
             if f == "d_usd":
@@ -973,7 +1043,7 @@ class Stepper:
         z = _ss(state, "_z")
         z1 = z[:, 1, :]
         pi0 = _ss(state, "_pi")
-        sh = F.EXP_SHIFT
+        tf = m.tf
         out = {k: (np.array(v, copy=True) if isinstance(v, np.ndarray) else v) for k, v in state.items()}
         # ---- the factor layer's stacked vector of the quarter, recomputed from the delivered fields
         pc = m.wg * X("d_cpi_goods") + m.ws * X("d_cpi_serv")
@@ -984,18 +1054,19 @@ class Stepper:
         u1 = _ss(state, "s_unrate") + X("d_unrate")
         sp1 = _ss(state, "s_spread") + X("d_spread")
         gz1 = _ss(state, "s_gz") + X("d_gz")
-        y10_1 = _ss(state, "s_y10") + X("d_y10")
+        y10_1 = np.maximum(_ss(state, "s_y10") + X("d_y10"), cq.Y10_FLOOR)     # observed; the floor exact (P4b)
         d_usd_raw = np.where(np.isfinite(col("d_usd_raw")), col("d_usd_raw"), X("d_usd"))
         zn = np.empty_like(z1)
         zn[:, I["pc"]] = pc
         zn[:, I["ps"]] = X("d_cpi_serv")
         zn[:, I["ip"]] = 4.0 * X("d_ip")
-        zn[:, I["lu"]] = np.log(np.maximum(u1 - cq.FACTOR_U_SHIFT, 1e-4))
+        zn[:, I["lu"]] = tf.value("lu", u1, clip=True)
         zn[:, I["rff"]] = shadow - pi1
         zn[:, I["ro"]] = z1[:, I["ro"]] + X("d_oil") - pc / 4.0
-        zn[:, I["ry10"]] = y10_1 - pi1
-        zn[:, I["sp"]] = np.log(np.maximum(sp1 - sh["sp"], 1e-4)) if "sp" in sh else sp1
-        zn[:, I["gz"]] = np.log(np.maximum(gz1 - sh["gz"], 1e-4)) if "gz" in sh else gz1
+        sh10 = np.where(np.isfinite(col("shadow_y10")), col("shadow_y10"), y10_1)
+        zn[:, I["ry10"]] = np.where(y10_1 > cq.Y10_FLOOR + 1e-9, y10_1, np.minimum(sh10, cq.Y10_FLOOR)) - pi1
+        zn[:, I["sp"]] = tf.value("sp", sp1, clip=True)
+        zn[:, I["gz"]] = tf.value("gz", gz1, clip=True)
         zn[:, I["usd"]] = z1[:, I["usd"]] + d_usd_raw
         for j, f in enumerate(m.sats.fields):
             zn[:, NC + j] = X(f)
@@ -1084,8 +1155,11 @@ class Stepper:
     def rarity(self, state: dict, pins: dict | None, *, structural: dict | None = None,
                modes: dict | None = None) -> dict:
         """The §3.5 statistic per particle: m2 = the squared norm of the smallest structural-shock adjustment the
-        pins need from the prior mean (posterior-mean model, no cycle module); under the model m2 ~ chi2(df), df =
-        the number of pins; percentile and sd per constraint (the joint study's stagflation set needed 0.81)."""
+        pins need from the prior mean (posterior-mean model, no cycle module), df = the number of pins, and its
+        percentile among the same statistic for the simulator's own innovations (every bootstrap pool row read as if
+        its own values had been pinned: factors.rarity's reference at H = 1), not a chi-square (the pool's
+        covariance is not Sigma and its tails are heavier: the chi-square warned on 13% of the model's own draws).
+        chi2_percentile is kept for reference; sd per constraint (the joint study's stagflation set needed 0.81)."""
         N = len(_ss(state, "s_ff"))
         S = self._start(state)
         ids, V, C = self._pins(pins, structural, modes, N)
@@ -1094,6 +1168,7 @@ class Stepper:
         Vu, _ = self._saturate(ids, V, C, S, (pred, Sig))
         m2 = np.zeros(N)
         df = np.zeros(N, int)
+        pct = np.zeros(N)
         if ids:
             # a policy rate pinned at the floor needs no adjustment where the prior shadow rate is already below it
             floor_need = np.zeros(N, bool)
@@ -1107,6 +1182,7 @@ class Stepper:
             key = np.column_stack([C, np.isfinite(V), floor_need])
             _, inv = np.unique(key, axis=0, return_inverse=True)
             inv = np.asarray(inv).reshape(-1)
+            Eref = F.pool_innovations(self.m, 1, sysm)[:, 0, :]          # (T_pool, n)
             for g in range(int(inv.max()) + 1):
                 rows = np.flatnonzero(inv == g)
                 Sg = _take(S, rows, N)
@@ -1115,16 +1191,37 @@ class Stepper:
                 eps = (y - pred[rows]) @ sysm["Pinv"].T
                 m2[rows] = (eps ** 2).sum(axis=1)
                 df[rows] = len(red) + len(do) + len(shock)
-        pct = np.where(df > 0, chi2.cdf(m2, np.maximum(df, 1)), 0.0)
-        return {"m2": m2, "df": df, "percentile": pct, "sd_per_constraint": np.sqrt(m2 / np.maximum(df, 1)),
-                "warn": pct > cq.RARITY_WARN_PCT}
+                if df[rows[0]]:
+                    pct[rows] = F.empirical_percentile(self._rarity_reference(sysm, red, do, shock, Eref), m2[rows])
+        chi = np.where(df > 0, chi2.cdf(m2, np.maximum(df, 1)), 0.0)
+        return {"m2": m2, "df": df, "percentile": pct, "chi2_percentile": chi,
+                "sd_per_constraint": np.sqrt(m2 / np.maximum(df, 1)), "warn": pct > cq.RARITY_WARN_PCT}
+
+    @staticmethod
+    def _rarity_reference(sysm: dict, red: list, do: list, shock: list, Eref: np.ndarray) -> np.ndarray:
+        """m2 of every pool row read as its own pins (same rows and codes): the targets are the row's own values
+        (o . e for a reduced or do pin, its structural shock for a stated shock), from a zero prediction (the
+        adjustment does not depend on the prediction for pins that are linear in y_q)."""
+        T = len(Eref)
+        zero = np.zeros_like(Eref)
+        eps_ref = Eref @ sysm["Pinv"].T
+        P = sysm["P"]
+        red_r = [(o, Eref @ o) for o, _ in red]
+        do_r = [(p, o, Eref @ o) for p, o, _ in do]
+        sh_r = [(p, P[p, p] * eps_ref[:, p]) for p, _ in shock]
+        y = _solve(sysm, zero, np.zeros((T, zero.shape[1])), red_r, do_r, sh_r)
+        return ((y @ sysm["Pinv"].T) ** 2).sum(axis=1)
 
     def impute(self, state: dict, rng: np.random.Generator) -> dict:
-        """The root's unpublished fields (the quarter before the origin) redrawn per particle from their conditional
-        distribution given the published ones (the "impute" capability; root_state uses the conditional mean)."""
+        """The root's unpublished satellite fields (the quarter before the origin) redrawn per particle from their
+        conditional distribution given the published ones (the "impute" capability; root_state uses the conditional
+        mean). Core variables imputed at a backtest origin (factors.initial_state 'published': CPI, IP, unemployment
+        and the real rates tied to the known nominal ones) keep their conditional mean: the state's levels (s_unrate,
+        pi_trend, the CPI level) are built from them."""
         stack = self.stack
         miss = [nm.split("@")[0] for nm in stack.init.imputed if nm.endswith(f"@{pd.Period(stack.origin, 'Q') - 1}")]
-        pos = [stack.factors.names.index(v) for v in miss if v in stack.factors.names and v != "rff"]
+        pos = [stack.factors.names.index(v) for v in miss if v in stack.factors.names and v != "rff"
+               and stack.factors.names.index(v) >= NC]
         if not pos:
             return {k: (np.array(v, copy=True) if isinstance(v, np.ndarray) else v) for k, v in state.items()}
         Q, m = stack.Q, stack.factors
@@ -1222,6 +1319,7 @@ def path_draw(stack: Stack, fx: F.SimResult, ax: AS.SimPaths, k: int, z_prev: np
     inc = {a: ax.income[:, k, IA[a]] for a in ASSETS}
     priv = np.full((n, len(PRIV)), np.nan)
     priv[:, PV["shadow"]] = fx.levels["ff_shadow"][:, k]
+    priv[:, PV["shadow_y10"]] = fx.levels["y10_shadow"][:, k]
     priv[:, PV["d_usd_raw"]] = fx.core[:, k, I["usd"]] - z_prev[:, I["usd"]]
     m = stack.factors
     if "x_oil_cause" in m.sats.fields:
@@ -1276,7 +1374,7 @@ def run_path(stack: Stack, statements=(), valuation=(), H: int | None = None, n_
                     cycle_odds=odds, gaussian=gaussian, param_uncertainty=param_uncertainty, usd_hold=usd_hold)
     root = root_state(stack, n, draw_index=fx.draw_index, param_index=None)
     frame = asset_inputs(stack, fx, root)
-    start = stack.assets.start_state(stack.Q, stack.origin)
+    start = asset_start(stack)
     use_params = param_uncertainty and stack.assets.params is not None
     with np.errstate(invalid="ignore", over="ignore"):
         ax = stack.assets.simulate(frame, start, n_paths=n, seed=_seed(seed, 2), cma=cma or cq.CMA_FORWARD,
@@ -1298,7 +1396,8 @@ def run_path(stack: Stack, statements=(), valuation=(), H: int | None = None, n_
                 rec[kk].append(st[kk])
         st_out = {k: np.column_stack(v) for k, v in rec.items()}
         end = st
-    tails = tail_flags(fx.levels["gz"], fx.levels["unrate"], ax.total[:, :, IA["us_equity"]]).any(axis=1)
+    tails = tail_flags(fx.levels["gz"], fx.levels["unrate"], ax.total[:, :, IA["us_equity"]],
+                       fx.levels["spread"]).any(axis=1)
     if tails.any():
         notes.append({"code": "tail", "paths": int(tails.sum()), "share": float(tails.mean()), "text": TAIL_NOTE})
     info = {"tail_share": float(tails.mean()),
@@ -1563,6 +1662,50 @@ def _sd_table(Q: pd.DataFrame, train_end: str, fields) -> dict:
     return {f: float(fs.at[f, "sd"]) for f in fs.index}
 
 
+CONSTRAINT_KINDS = ("sum", "mean", "yoy", "level", "range")
+# a c_q 'level' constraint written on a change field means that field's level (Appendix B: kind level on d_ff = the
+# policy rate's level); a change field without a level observable cannot take one
+LEVEL_OF_CHANGE = {"d_ff": "ff", "d_unrate": "unrate", "d_y10": "y10", "d_spread": "spread", "d_gz": "gz",
+                   "d_usd": "usd"}
+YOY_VARS = {"d_cpi_goods": "cpi_yoy", "d_cpi": "cpi_yoy", "d_core": "core_yoy", "s_cpi_yoy": "cpi_yoy",
+            "s_core_yoy": "core_yoy", "cpi_yoy": "cpi_yoy", "core_yoy": "core_yoy"}
+
+
+def _num(v, what: str, *, optional: bool = False) -> float | None:
+    """A finite JSON number (not a string, not a boolean), else a Chinese RolloutError (the API's 400)."""
+    if v is None and optional:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise RolloutError(f"{what} 必须是数字（写的是 {v!r}）")
+    x = float(v)
+    if not math.isfinite(x):
+        raise RolloutError(f"{what} 必须是有限的数字（写的是 {v!r}）")
+    return x
+
+
+def _int(v, what: str) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not float(v).is_integer():
+        raise RolloutError(f"{what} 必须是整数（写的是 {v!r}）")
+    return int(v)
+
+
+def _sd_of(e: dict, what: str) -> float | None:
+    s = _num(e.get("sd"), f"{what} 的 sd", optional=True)
+    if s is not None and s <= 0:
+        raise RolloutError(f"{what} 的 sd 必须大于 0（不写 sd 表示精确陈述）")
+    return s
+
+
+def _range_of(e: dict, what: str) -> tuple[float | None, float | None]:
+    lo = _num(e.get("min"), f"{what} 的 min", optional=True)
+    hi = _num(e.get("max"), f"{what} 的 max", optional=True)
+    if lo is None and hi is None:
+        raise RolloutError(f"{what}：范围至少要写 min 或 max")
+    if lo is not None and hi is not None and lo > hi:
+        raise RolloutError(f"{what}：min（{lo:g}）大于 max（{hi:g}）")
+    return lo, hi
+
+
 def _entry(f: str, e: dict, q: int, sd: dict, shock_sd: dict, where: str):
     if not isinstance(e, dict):
         raise RolloutError(f"{where} {f}：条目必须是对象")
@@ -1572,10 +1715,10 @@ def _entry(f: str, e: dict, q: int, sd: dict, shock_sd: dict, where: str):
             raise RolloutError(f"{where} x_oil_cause 必须是 supply / demand / mixed（写的是 {v!r}）")
         return F.Statement(f, (q,), cq.OIL_CAUSE[v], label=str(e.get("quote") or ""))
     unit = shock_sd.get(f) if f in F.SHOCKS else sd.get(f)
+    what = f"{where} {f}"
     if "value" in e and e["value"] is not None:
-        v = float(e["value"])
-        s = e.get("sd")
-        return F.Statement(f, (q,), v, sd=float(s) if s else None, label=str(e.get("quote") or ""))
+        v = _num(e["value"], f"{what} 的 value")
+        return F.Statement(f, (q,), v, sd=_sd_of(e, what), label=str(e.get("quote") or ""))
     if "sign" in e or "size" in e:
         size = e.get("size")
         if size not in cq.SIZE_BINS:
@@ -1588,8 +1731,7 @@ def _entry(f: str, e: dict, q: int, sd: dict, shock_sd: dict, where: str):
         return F.Statement(f, (q,), sign * cq.SIZE_BINS[size] * unit, sd=cq.QTABLE_QUAL_SD * unit,
                            label=str(e.get("quote") or ""))
     if "min" in e or "max" in e:
-        lo = None if e.get("min") is None else float(e["min"])
-        hi = None if e.get("max") is None else float(e["max"])
+        lo, hi = _range_of(e, what)
         return F.Statement(f, (q,), lo=lo, hi=hi, label=str(e.get("quote") or ""))
     raise RolloutError(f"{where} {f}：条目必须写 value、sign + size 或 min / max 之一")
 
@@ -1608,10 +1750,13 @@ def from_qtable(qt: dict, stack: Stack | None = None, mode: str = "production", 
     rows = qt.get("rows")
     if not isinstance(rows, list) or not rows:
         raise RolloutError("qtable.rows 必须是非空列表")
-    try:
-        H = int(qt.get("n_quarters") or max(int(r.get("q", 0)) for r in rows if isinstance(r, dict)))
-    except (TypeError, ValueError) as err:
-        raise RolloutError("qtable.n_quarters 必须是整数") from err
+    if qt.get("n_quarters") is not None:
+        H = _int(qt.get("n_quarters"), "qtable.n_quarters")
+    else:
+        try:
+            H = max(_int(r.get("q"), "行的季度 q") for r in rows if isinstance(r, dict))
+        except ValueError as err:
+            raise RolloutError("qtable.n_quarters 必须是整数") from err
     if not 1 <= H <= cq.QTABLE_MAX_QUARTERS:
         raise RolloutError(f"n_quarters 必须在 1..{cq.QTABLE_MAX_QUARTERS} 之间")
     if stack is not None:
@@ -1628,19 +1773,26 @@ def from_qtable(qt: dict, stack: Stack | None = None, mode: str = "production", 
         return _read_qtable(qt, rows, H, have, sd, shock_sd, mode)
     except RolloutError:
         raise
-    except (TypeError, ValueError, KeyError) as err:
+    except (TypeError, ValueError, KeyError, AttributeError) as err:
         raise RolloutError(f"QTable 无法读取：{err}") from err
 
 
 def _read_qtable(qt: dict, rows: list, H: int, have: set, sd: dict, shock_sd: dict, mode: str) -> dict:
     stmts, notes = [], []
+    seen_q: set = set()
     for r in rows:
         if not isinstance(r, dict):
             raise RolloutError("qtable.rows 的每一行必须是对象")
-        q = int(r.get("q", 0))
+        q = _int(r.get("q"), "行的季度 q")
         if not 1 <= q <= H:
             raise RolloutError(f"行的季度 q = {q} 超出 1..{H}")
+        if q in seen_q:
+            raise RolloutError(f"第 {q} 季出现了两行：每个季度只能有一行（同一季的陈述写在同一行里）")
+        seen_q.add(q)
         where = f"第 {q} 季"
+        for part in ("x", "u", "fc"):
+            if r.get(part) is not None and not isinstance(r.get(part), dict):
+                raise RolloutError(f"{where}：{part} 必须是对象")
         for f, e in (r.get("x") or {}).items():
             if f not in have:
                 raise RolloutError(f"{where}：字段不存在或这个训练期没有估计：{f}")
@@ -1663,30 +1815,58 @@ def _read_qtable(qt: dict, rows: list, H: int, have: set, sd: dict, shock_sd: di
                 stmts.append(F.Statement(f, (q,), cq.FC_STANCE[stance] * sd[f], sd=cq.FC_STANCE_SD * sd[f],
                                          label=f"fc:{stance}"))
     cqx = qt.get("c_q") or {}
+    if not isinstance(cqx, dict):
+        raise RolloutError("qtable.c_q 必须是对象")
+    for part in ("constraints", "announced", "regime", "valuation"):
+        if cqx.get(part) is not None and not isinstance(cqx.get(part), list):
+            raise RolloutError(f"c_q.{part} 必须是列表")
+    observables = set(have) | set(F.LEVEL_OBS) | {"d_cpi"}
     for c in cqx.get("constraints") or []:
+        if not isinstance(c, dict):
+            raise RolloutError("c_q.constraints 的每一项必须是对象")
         kind, f = c.get("kind"), c.get("field")
-        qs = tuple(int(v) for v in c.get("quarters") or ())
-        if not qs or min(qs) < 1 or max(qs) > H:
-            raise RolloutError(f"约束 {f}：quarters 必须在 1..{H} 之内")
+        what = f"约束 {f}（{kind}）"
+        if kind not in CONSTRAINT_KINDS:
+            raise RolloutError(f"约束 {f}：kind 必须是 {list(CONSTRAINT_KINDS)} 之一（写的是 {kind!r}）")
+        qv = c.get("quarters")
+        if not isinstance(qv, list) or not qv:
+            raise RolloutError(f"{what}：quarters 必须是非空列表")
+        qs = tuple(_int(v, f"{what} 的季度") for v in qv)
+        if min(qs) < 1 or max(qs) > H:
+            raise RolloutError(f"{what}：quarters 必须在 1..{H} 之内")
+        if len(set(qs)) != len(qs):
+            raise RolloutError(f"{what}：quarters 有重复的季度")
         var = cq.QTABLE_LEVEL_VARS.get(f, f)
-        if kind == "yoy":
-            var = {"d_cpi_goods": "cpi_yoy", "d_cpi": "cpi_yoy", "d_core": "core_yoy"}.get(f, var)
+        if kind == "level":
+            var = LEVEL_OF_CHANGE.get(f, var)
+            if var in have and var.startswith("d_"):
+                raise RolloutError(f"{what}：{f} 是变化量，没有对应的水平量；水平约束请写 s_ff、unrate、y10、spread、gz 等")
+        elif kind == "yoy":
+            var = YOY_VARS.get(f)
+            if var is None:
+                raise RolloutError(f"{what}：同比约束只能写 CPI（d_cpi、d_cpi_goods、s_cpi_yoy）或核心 CPI（d_core）")
+        if var not in observables:
+            raise RolloutError(f"{what}：字段不存在或这个训练期没有估计")
         agg = {"sum": "sum", "mean": "mean"}.get(kind, "each")
-        if kind == "range":
-            stmts.append(F.Statement(var, qs, lo=c.get("min"), hi=c.get("max"), agg="each"))
+        if kind == "range" or c.get("value") is None:
+            lo, hi = _range_of(c, what)
+            stmts.append(F.Statement(var, qs, lo=lo, hi=hi, agg="each" if kind == "range" else agg))
         else:
-            v = c.get("value")
-            if v is None:
-                stmts.append(F.Statement(var, qs, lo=c.get("min"), hi=c.get("max"), agg=agg))
-            else:
-                stmts.append(F.Statement(var, qs, float(v), sd=float(c["sd"]) if c.get("sd") else None, agg=agg))
+            stmts.append(F.Statement(var, qs, _num(c.get("value"), f"{what} 的 value"), sd=_sd_of(c, what), agg=agg))
     for a in cqx.get("announced") or []:
+        if not isinstance(a, dict):
+            raise RolloutError("c_q.announced 的每一项必须是对象")
+        what = f"预告路径 {a.get('field')}"
         qs = list(a.get("quarters") or ())
         vals = list(a.get("values") or ())
         if len(qs) != len(vals):
-            raise RolloutError(f"预告路径 {a.get('field')}：quarters 与 values 的长度不同")
+            raise RolloutError(f"{what}：quarters 与 values 的长度不同")
+        sd_a = _sd_of(a, what)
         for q, v in zip(qs, vals):
-            stmts.append(F.Statement(a.get("field"), (int(q),), float(v), sd=float(a.get("sd") or 0) or None))
+            q = _int(q, f"{what} 的季度")
+            if not 1 <= q <= H:
+                raise RolloutError(f"{what}：季度 {q} 超出 1..{H}")
+            stmts.append(F.Statement(a.get("field"), (q,), _num(v, f"{what} 的值"), sd=sd_a))
     odds = None
     for rg in cqx.get("regime") or []:
         if rg.get("label") in cq.CONTRACTION_LABELS:

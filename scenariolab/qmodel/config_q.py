@@ -161,25 +161,66 @@ SHILLER_MIN_EARNINGS = "2026-01"
 # ================================================================ factor layer (P3: SIM_DESIGN §5; qmodel/factors.py)
 # core BVAR (§5.1-5.2): the joint study's B3 set, ordered as the do-operator's within-quarter recursion
 # [E0] pc ps ip lu -> [E0p] rff -> [E1c] ro -> [E1] ry10 sp gz usd. pc headline CPI and ps services CPI (annualized),
-# ip IP growth (annualized), lu = log(u - FACTOR_U_SHIFT), rff = ff - pi_trend (the shadow rate), ro 100 log real oil,
-# ry10 = y10 - pi_trend, sp = log(Baa - 10y - 0.1) and gz = log(GZ - 0.1) (FACTOR_SPREAD_LOG), usd 100 log dollar.
+# ip IP growth (annualized), lu = unemployment on its bounded scale (FACTOR_BOUNDS), rff = ff - pi_trend (the shadow
+# rate), ro 100 log real oil, ry10 = y10 - pi_trend, sp = Baa - 10y and gz = GZ on their bounded scales
+# (FACTOR_SPREAD_LOG), usd 100 log dollar.
 FACTOR_CORE = ("pc", "ps", "ip", "lu", "rff", "ro", "ry10", "sp", "gz", "usd")
 FACTOR_LAGS = 2
 FACTOR_LAMBDA_GRID = (0.05, 0.08, 0.12, 0.18, 0.25, 0.35, 0.5, 0.75, 1.0)   # Minnesota tightness: marginal likelihood
 FACTOR_SOC_TAU = 10.0                       # sum-of-coefficients prior tau = 10 lambda (Banbura-Giannone-Reichlin 2010)
 FACTOR_NU_GRID = (4.0, 8.0, 16.0, float("inf"))   # Student-t likelihood weights: nu by marginal likelihood (inf = Gaussian)
 FACTOR_DRAWS = 100                          # posterior draws; a draw with a companion root >= FACTOR_MAX_ROOT is redrawn
-FACTOR_MAX_ROOT = 1.0
+# P4b: the draw rule tests the system that is simulated, not only the VAR. In statement-free quarters the cycle module
+# sets IP growth from history, which removes the error correction that runs through IP's equation: under it 35% of the
+# draws P3 accepted (VAR roots < 1) were explosive (roots up to 1.028). A draw is kept only if every root of the VAR and
+# of the cycle-module system is below FACTOR_MAX_ROOT: every mode at least halves within the longest simulated horizon
+# (FACTOR_HALF_LIFE_MAX_Q = 160 quarters = ROLLOUT_MAX_QUARTERS, the 40-year continuations), so a continuation does
+# run toward the anchors (§3.6). Rejection rises from about 45% to about 77% at the forward fit.
+FACTOR_HALF_LIFE_MAX_Q = 160
+FACTOR_MAX_ROOT = 0.5 ** (1.0 / FACTOR_HALF_LIFE_MAX_Q)     # 0.99568
+FACTOR_DRAW_TRIES = 400                     # proposals per draw before the posterior mean is used (counted)
 FACTOR_EM_ITERS = 300
 FACTOR_EM_TOL = 1e-7
-FACTOR_U_SHIFT = 2.0                        # lu = log(u - 2): simulated unemployment stays above 2
+FACTOR_U_SHIFT = 2.0                        # the floor of unemployment's bounded scale: simulated u stays above 2
 FF_FLOOR = 0.1                              # observed ff = max(shadow ff, FF_FLOOR); quarters with lvl_ff < ZLB_FF are
                                             # missing in the EM (the shadow rate is imputed, never the floor)
 FACTOR_SHADOW = "missing"                   # §5.4 default; "censored" = the pre-registered alternative (shadow <= bound)
+# P4b: the observed 10-year yield has an effective lower bound too, as the policy rate does: y10 = max(ry10 + pi_trend,
+# Y10_FLOOR) and ry10 is the shadow real 10-year below it. Without it the linear real-rate and inflation dynamics put
+# y10 below 0 in 5-8% of the quarters of 80-quarter paths (to -39 at p0.1 before P4b), where the treasury's par-bond
+# identity is not defined (a negative coupon: about -14% a quarter, non-finite below -10%). The US 10-year's low is
+# 0.5 (2020); 0 is the stylized bound.
+Y10_FLOOR = 0.0
 SPREAD_FLOOR = 0.2                          # §5.4: the log(spread - 0.1) transform is due if the floor binds in more
 SPREAD_FLOOR_SHARE = 0.005                  # than 0.5% of draws; T-F found it binding (gz < 0.2 in 1.8-12.6% and
 SPREAD_SHIFT = 0.1                          # Baa - 10y in 0.3-5.6% of the linear model's draws), so sp and gz are
-FACTOR_SPREAD_LOG = True                    # modelled as log(spread - 0.1) (T-F reports the share again)
+FACTOR_SPREAD_LOG = True                    # transformed too (bounded scale since P4b; T-F reports the share again)
+# P4b: bounded scales (§5.4; §15 Q5's alternative, decided in T-F F6). P3's log(level - lo) made the levels lognormal:
+# 80-quarter paths reached u 109 and GZ 1.7 million at p99.9. Each variable is now a logit on (lo, hi): x = log((y -
+# lo) / (hi - y)). The floors are §5.4's (u > 2, spreads > 0.1); each ceiling is a judgment value about 2.6-2.7 times
+# the variable's post-1973 quarter-end maximum (u 11.0 in 2020Q2, Baa - 10y 5.8 and GZ 7.7 in 2008Q4), far above
+# anything in the training data, and for unemployment above the US record (about 25% in 1933): u < 30, Baa - 10y < 15,
+# GZ < 20. Below about half the ceiling the logit is close to the log, so ordinary quarters are nearly unchanged; near
+# the ceiling the level's response to the same shock shrinks to 0. "log" = P3's form (T-F's pre-registered arm).
+FACTOR_TRANSFORM = "logit"
+FACTOR_BOUNDS = {"lu": (FACTOR_U_SHIFT, 30.0), "sp": (SPREAD_SHIFT, 15.0), "gz": (SPREAD_SHIFT, 20.0)}
+# The fix round (statistics review): those ceilings were read off post-1973 maxima, so a backtest fit before 2008
+# carries post-train information in its tails (the same multiple of the maxima known at 1994Q4 gives GZ 6.9, Baa -
+# 10y 9.6, u 28.1). FACTOR_BOUNDS_RULE "train_end" sets each ceiling to FACTOR_BOUND_MULT x the level's maximum up to
+# the train end instead (factors.bound_ceilings); "fixed" keeps the constants above. The default stays "fixed" until
+# the lead decides: under "train_end" a pre-2008 fit cannot reach a 2008-size GZ (7.7) at all, which is a stronger
+# statement about the tails than the look-ahead it removes (the sensitivity of T-F's F6 tail checks is in the fix
+# round's report). The constants also sit above the pre-1973 records known at every train end (u 25% in 1933; Baa -
+# Treasury about 8 pp in 1932, x 2 = 15; GZ about 1.3 x Baa - 10y in 2008).
+FACTOR_BOUNDS_RULE = "fixed"
+FACTOR_BOUND_MULT = 2.6
+# P4b, an option (off): winsorize the bootstrap pool's whitened coordinates at this multiple of their own sd (the
+# stack's +-4 sd rule, §3.5). At 4 it cuts 13 of the 2,130 core entries at the forward fit (2020Q1-Q2, 1980, 2008Q3-Q4
+# ...; 2020Q2's unemployment coordinate is 11 of its sd) and halves the 80-quarter share of paths with u > 20 (6.0% ->
+# 3.1%), but every training quarter keeps its frequency only, not its size: a 2020Q2-size quarter no longer exists
+# (U-12), and the 4-quarter unemployment rise from today has p99 1.2 pp instead of 3.4 (history 3.9) and is above 2 pp
+# in 0.13% of paths instead of 1.8%. The 1Q-4Q behaviour would change, so it stays off; None = P3's pool.
+FACTOR_POOL_WINSOR_SD = None
 # steady-state prior (Villani 2009) on the core's unconditional means, centred on the anchors: sd 0.5 pp forward
 # (the assumption binds) and 1.0 pp in backtests (the data can move it); variables without an anchor are diffuse
 STEADY_STATE_SD = {"forward": 0.5, "train_end": 1.0}
@@ -199,12 +240,14 @@ SAT_COV_LW = (0.2, 0.5)                     # ... or shrinkage toward the diagon
 SAT_COV_SELECT_SHARE = 0.75                 # the last 25% of training quarters (qcore)
 SAT_COV_ITERS = 60
 # conditioning (§3.5, §5.3)
-SATURATION_SD = 4.0                         # stated gap vs the conditional mean saturates at +-4 sd (fixed a priori)
+SATURATION_SD = 4.0                         # stated gap vs the conditional mean saturates at +-4 TRAINING sd (§3.5,
+                                            # fixed a priori: factors.statement_sd; not a model sd, fix round)
 MECHANICAL_FIELDS = ("d_oil", "d_y10")      # own-price inputs of crude oil and the treasury pass through exactly
 TRUNC_MIN_ACCEPT = 0.10                     # ranges: accept/reject while at least 10% of paths pass, else Gibbs
 TRUNC_MAX_BATCHES = 40
 GIBBS_SWEEPS = 60
-RARITY_WARN_PCT = 0.99                      # "这个组合在历史上极少见" above the 99th chi-square percentile
+RARITY_WARN_PCT = 0.99                      # "这个组合在历史上极少见" above the 99th percentile of the same statistic
+                                            # under the simulator's own pool draws (not a chi-square, fix round)
 POLICY_DO = {"u_ff": "rff", "u_def": "d_deficit", "u_tr": "d_transfers", "u_ptax": "d_perstax", "u_bs": "d_bs"}
 # cycle module C' (§5.6): in quarters that state nothing about growth, IP growth from 2-quarter blocks of the
 # training quarters' IP growth (equal weights; entropy-tilted to stated regime odds), imposed as a soft statement
@@ -212,6 +255,14 @@ POLICY_DO = {"u_ff": "rff", "u_def": "d_deficit", "u_tr": "d_transfers", "u_ptax
 # innovations without the module
 CYCLE_BLOCK = 2
 CYCLE_SD_FACTOR = 0.5
+# P4b: the level of the module's IP growth (an option, off). The training blocks average 1.61% a year at the forward fit
+# while the anchored steady state of the VAR (posterior mean) has IP growth 0.74, so the system the module simulates
+# has another steady state (at the posterior mean: CPI 0.6, u 3.7, GZ 3.2). "steady_state" shifts the blocks by (the
+# posterior draw's steady-state IP growth - the training mean). Measured, it lowers GZ's long-horizon tail by about a
+# third (80 quarters: 2.8% -> 1.7% of paths above 12) but leaves the 40-year medians where they are (CPI y/y 3.0 -> 3.4,
+# u 4.8 -> 5.0 at 160 quarters: slow modes, not the steady state, decide them) and lengthens contractions (T-F F3
+# share > 6Q at 2026Q3 0.25 -> 0.33). Kept at P3's "training_mean"; P5 may decide.
+CYCLE_CENTER = "training_mean"
 CYCLE_ALT_BLOCK = 8
 GROWTH_FIELDS = ("d_ip", "d_rgdp", "d_unrate", "unrate")
 # regime covariance and completion shrinkage (§5.7): both are T-C candidates; P5 freezes T-C's selection
@@ -235,7 +286,7 @@ TF_ENGINE_FILL = {4: {"ur": 0.39, "sp": 0.28}, 12: {"ur": 0.49, "sp": 0.232}}   
 TC_VALIDATION = ("1995Q1", "2014Q4")        # validation origins: yearly refits on data to the previous December
 TC_TEST_END = "2014Q4"                      # test 2015Q1 .. TC_TEST_LAST
 TC_TEST_LAST = "2026Q3"
-TC_DRAWS = 1000                             # Monte Carlo draws per origin for CRPS / coverage of transformed fields
+TC_DRAWS = 1000                             # T-C's 'mc' scoring (the 2026-11-02 record); the default is exact
 QMODEL_RESULTS_PATH = config.RESULTS_DIR / "qmodel.json"
 
 # ================================================================ asset layer and valuation block (P2: SIM_DESIGN §4, §6)
@@ -309,6 +360,10 @@ ROLLOUT_H = 40
 ROLLOUT_MAX_QUARTERS = 160
 ROLLOUT_MAX_PATHS = 20000
 TRIAL_LABEL = "试运行"                     # the quarterly stack until the switch gate T-S passes (U-1)
+# the agent tree's REQUIRED_STATE (scenariolab/agents/model_adapter.py): every one must be finite at the forward root
+AGENT_REQUIRED_STATE = ("s_ff", "s_unrate", "s_core_yoy", "s_spread", "s_term", "s_infexp1", "s_rstar", "s_sahm",
+                        "s_cape", "d_ff_l1", "d_unrate_l1", "d_unrate_l2", "d_spread_l1", "d_itinv_l1", "d_gz_l1",
+                        "us_equity_l1", "nasdaq_4q", "real_oil_d1", "real_oil_d2")
 # step mode for particles with their own states (rollout.Stepper; the agent tree's ModelAdapter). A pinned field
 # with a policy shock is an intervention ("do": its gap to the model's own expectation is the structural shock of
 # §5.3, same-quarter E0 macro unmoved, markets on impact); a pinned field without one can be set last in the
@@ -318,8 +373,12 @@ TRIAL_LABEL = "试运行"                     # the quarterly stack until the sw
 DO_FIELDS = {"d_ff": "u_ff", "d_bs": "u_bs", "d_deficit": "u_def", "d_transfers": "u_tr", "d_perstax": "u_ptax"}
 STEP_GIVEN_MODES = {"d_ff": "do", "d_bs": "do", "d_tariff": "do_last", "d_lf": "do_last"}
 PIN_MODES = ("reduced", "do", "do_last")
-PIN_U_MIN = 2.05                           # a pinned unemployment change is delivered at u >= 2.05 (u = 2 + exp(lu))
-PIN_SPREAD_MIN = 0.11                      # pinned Baa - 10y and GZ changes: the level stays >= 0.11 (0.1 + exp(.))
+PIN_U_MIN = 2.05                           # a pinned unemployment change is delivered at u >= 2.05 (u's floor is 2)
+PIN_SPREAD_MIN = 0.11                      # pinned Baa - 10y and GZ changes: the level stays >= 0.11 (floor 0.1)
+# P4b: and at most this far below the bounded scale's ceiling (FACTOR_BOUNDS)
+PIN_U_MAX = FACTOR_BOUNDS["lu"][1] - 0.05
+PIN_SPREAD_MAX = FACTOR_BOUNDS["sp"][1] - 0.01
+PIN_GZ_MAX = FACTOR_BOUNDS["gz"][1] - 0.01
 FLOOR_ROUNDS = 8                           # a reduced-form policy-rate pin at the floor: rejection rounds for the
                                            # shadow rate (<= FF_FLOOR), then projection onto the floor
 # monthly disaggregation (export only, §3.6): each quarter takes the monthly profile of one of the DISAGG_K nearest
@@ -329,6 +388,9 @@ DISAGG_LABEL = "季内月度路径为历史季度形态拆分（假设）"
 # the API (/api/q/*): limits and the job queue (plain threads, like /api/backtest/run's slots)
 API_MAX_PATHS = 4000
 API_DEFAULT_PATHS = 1000
+# paths x simulated quarters of one request: the spec's budget case is 40 quarters x 1,000 paths (436 MB peak, 1.4 s);
+# a 4,000 x 160 request needed 2.8 GB and 13 s, so with API_WORKERS = 2 at most about 2 x 1.2 GB at once
+API_MAX_PATH_QUARTERS = 160_000
 API_WORKERS = 2
 API_MAX_JOBS = 32
 API_QUANTILES = (10, 50, 90)
@@ -343,3 +405,31 @@ QTABLE_LEVEL_VARS = {"s_ff": "ff", "s_unrate": "unrate", "s_cpi_yoy": "cpi_yoy",
                      "ff": "ff", "unrate": "unrate", "cpi_yoy": "cpi_yoy", "core_yoy": "core_yoy", "y10": "y10",
                      "spread": "spread", "gz": "gz"}
 CONTRACTION_LABELS = ("recession", "contraction", "depression")   # regime requests the cycle module can tilt to
+
+# ================================================================ pre-registered runs (P5: SIM_DESIGN §4.2, §4.3, §4.6, §5.8)
+# tools/run_preregistered.py writes the records <date>_TA.json, _TC.json and _TS.json here BEFORE it runs anything; a
+# run appends its result to the record's "results" and never edits the frozen part (its sha256 is in the record). The
+# derived rows of a run (conditional paths, T-C rows) go to PREREG_RESULTS_DIR (git-ignored) with their hashes in the
+# record. These constants are copied into the frozen records; tests/test_preregistered.py checks that they still agree.
+PREREG_DIR = QMODEL_DIR / "preregistered"
+PREREG_RESULTS_DIR = config.RESULTS_DIR / "preregistered"
+PREREG_SEED = 20261102                      # every bootstrap of the pre-registered runs
+# T-A (§4.2): selection on rolling origins 1990Q1-2014Q4 (yearly refits on data to the previous December, panels cut at
+# the end of 2014 so no selection fit or score can read the test decade), a single test on 2015Q1-2026Q3 (train to
+# 2014Q4: 47 quarters at 1Q, 11 non-overlapping calendar-year windows at 4Q)
+TA_SELECTION = {"roll_first": "1990-01", "roll_last": "2014-10", "refit_months": 12, "data_end": "2014-12",
+                "horizons_q": (1, 4),
+                "spans": {"1990-1994": ("1990-01", "1994-12"), "1995-2004": ("1995-01", "2004-12"),
+                          "2005-2014": ("2005-01", "2014-12"), "1990-2014": ("1990-01", "2014-12")},
+                "gate_decades": ("1995-2004", "2005-2014"), "gate_horizon_q": 1}
+TA_TEST = {"train_end": "2014-12", "first": "2015-01", "last": "2026-09", "group": "2015-2026", "horizons_q": (1, 4),
+           "n_1q": 47, "n_4q_nonoverlap": 11}
+TA_GATE = {"min_gain": 0.005, "floor": -0.02, "lb_above": 0.0}            # the schema's tier rule on two decades
+TA_TEST_RULE = {"lb_1q_above": 0.0, "lb_4q_above": -0.02, "cov80_1q": (0.75, 0.88)}
+TA_BOOT = {"n_boot": 2000, "block_1q": 4, "block_4q_nonoverlap": 1, "metrics_n_boot": 1000, "metrics_seed": 0}
+TA_HARNESS = {"n_paths": 500, "seed": 11, "band": (0.10, 0.90), "cma": "historical", "n_boot_params": PARAM_BOOT,
+              "fit_seed": 0, "resid_block": RESID_BLOCK}
+# T-S (§4.6): non-inferiority margins of the switch gate (evaluated in P9 from the P5 and P7 records)
+TS_MARGINS = {"oracle_ub": 0.02, "narrative_ub": 0.03, "pit_mad_excess": 0.02}
+TS_BOOT = {"n_boot": 2000, "unit": "episode", "upper": 0.95}
+TS_PATHS = 1000

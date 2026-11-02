@@ -39,6 +39,8 @@ include = ["scenariolab*"]
 [tool.setuptools.package-data]
 "scenariolab.scenarios" = ["specs/*.yaml"]
 "scenariolab.analysis" = ["audit_archive/*.json"]
+# the quarterly stack's committed card, schema and schema view, and the pre-registration records
+"scenariolab.qmodel" = ["*.json", "preregistered/*.json", "preregistered/README.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

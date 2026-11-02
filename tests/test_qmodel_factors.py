@@ -3,7 +3,9 @@
 P3 exit tests: the OLS limit of the BVAR (<= 1e-6); hard statements held to 1e-8 on every path; the Gaussian Monte
 Carlo mean equals the analytic conditional mean (|z| < 3); a stated u_ff leaves same-quarter E0 macro exactly
 unchanged; the observed policy rate never below 0.1; determinism by seed; T-F F1-F10 and T-C computed and stored in
-data/results/qmodel.json with pass/fail shown.
+data/results/qmodel.json with pass/fail shown. P4b (long-horizon stability): the bounded (logit) scales invert
+exactly and keep their levels inside; the draw rule tests the system the cycle module simulates; 80-quarter paths stay
+finite and bounded; the observed 10-year has its floor; statements beyond a ceiling are delivered inside it.
 
 The BVAR, covariance and sampler pieces run on synthetic data anywhere. The model tests need the quarterly panel
 (python -m scenariolab.qmodel.panel) and skip without it; the stored-results test also needs
@@ -112,6 +114,51 @@ def test_truncated_gibbs_respects_the_box():
     assert np.all(x[:, 0] >= 1.5 - 1e-12) and np.all(x[:, 0] <= 2.0 + 1e-12) and np.all(x[:, 1] <= 1e-12)
 
 
+def test_bounded_scales_invert_exactly_and_keep_levels_inside():
+    """P4b: on the logit scale lo < level < hi for every x, value() inverts level() inside the bounds, dlevel is the
+    derivative and the Gauss-Hermite moments match Monte Carlo; the 'log' kind is P3's lo + exp(x)."""
+    b = F.Bounded(2.0, 30.0)
+    x = np.linspace(-12.0, 12.0, 241)
+    y = b.level(x)
+    assert np.all((y > 2.0) & (y < 30.0))
+    assert np.max(np.abs(b.value(y) - x)) < 1e-9
+    h = 1e-6
+    assert np.allclose(b.dlevel(x), (b.level(x + h) - b.level(x - h)) / (2 * h), rtol=1e-5, atol=1e-9)
+    assert np.isnan(b.value(np.array([2.0, 30.0, 31.0, 1.0]))).all()            # data outside the bounds: missing
+    assert 2.0 < float(b.level(b.value(np.array([31.0]), clip=True))[0]) < 30.0   # a target: kept just inside
+    rng = np.random.default_rng(0)
+    m, s_ = np.array([-2.3, 0.4]), 0.6
+    mu, sd = b.moments(m, s_)
+    mc = b.level(m[:, None] + s_ * rng.standard_normal((2, 400000)))
+    assert np.allclose(mu, mc.mean(axis=1), rtol=2e-3) and np.allclose(sd, mc.std(axis=1), rtol=5e-3)
+    lg = F.Bounded(2.0, math.inf, "log")
+    assert np.allclose(lg.level(x[:60]), 2.0 + np.exp(x[:60])) and np.allclose(lg.value(lg.level(x[:60])), x[:60])
+    assert lg.moments(np.array([0.3]), 0.5)[0][0] == pytest.approx(2.0 + math.exp(0.3 + 0.125))
+    tf = F.transforms()
+    assert set(tf.vars) == {"lu", "sp", "gz"} and set(tf.obs) == {"d_unrate", "unrate", "d_spread", "spread", "d_gz",
+                                                                   "gz"}
+    assert all((bb.lo, bb.hi) == cq.FACTOR_BOUNDS[v] and bb.kind == "logit" for v, bb in tf.vars.items())
+    assert all(bb.kind == "log" and not math.isfinite(bb.hi) for bb in F.transforms("log").vars.values())
+
+
+def test_the_cycle_system_drops_ips_feedback_and_the_rule_tests_it():
+    """P4b: under the cycle module IP growth is exogenous, so the error correction that runs through IP's equation is
+    gone and the innovation regression on IP feeds it back with the opposite sign. A VAR whose unemployment is
+    explosive on its own but reverts through an IP rebound is stationary; its cycle system is not, and stable()
+    rejects it. The root limit is the 40-year half-life."""
+    n = F.NC
+    ip, lu = F.IDX["ip"], F.IDX["lu"]
+    A1, A2 = 0.5 * np.eye(n), np.zeros((n, n))
+    A1[lu, lu], A1[lu, ip], A1[ip, lu] = 1.01, -0.02, 2.0
+    Sig = np.eye(n)
+    Sig[ip, lu] = Sig[lu, ip] = -0.3
+    r_var, r_cyc = F.roots([A1, A2], Sig)
+    At = F.cycle_A([A1, A2], Sig)
+    assert np.allclose(At[0][ip], 0.0) and np.allclose(At[1][ip], 0.0)
+    assert r_var < cq.FACTOR_MAX_ROOT < 1.0 < r_cyc and not F.stable([A1, A2], Sig)
+    assert cq.FACTOR_MAX_ROOT ** cq.FACTOR_HALF_LIFE_MAX_Q == pytest.approx(0.5)
+
+
 # ================================================================ the fitted model (real data)
 
 @pytest.fixture(scope="module")
@@ -142,7 +189,7 @@ def test_fit_summary(model):
     assert info["sample"] == ["1973Q1", "2026Q3"] and info["nu"] in cq.FACTOR_NU_GRID
     assert info["lambda"] in cq.FACTOR_LAMBDA_GRID
     assert len(model.draws) == cq.FACTOR_DRAWS and 0 <= info["rejection_rate"] < 1
-    assert all(F.max_root(d[0]) < cq.FACTOR_MAX_ROOT for d in model.draws)
+    assert all(F.stable(d[0], d[2]) for d in model.draws)               # the VAR and the cycle system (P4b)
     assert len(model.sats.fields) == 42 and model.n == 52
     # the zero-bound quarters' shadow rate is imputed by the EM, never the floor
     zlb = model.core.missing[:, F.IDX["rff"]]
@@ -292,22 +339,23 @@ def test_schema_mapping_identities(model, init):
         return np.diff(np.concatenate([np.full((a.shape[0], 1), first), a], axis=1), axis=1)
     z1 = init.z[1]
     assert np.allclose(x["d_ff"], d(lv["ff"], init.ff0), atol=1e-12)
-    assert np.allclose(x["d_y10"], d(k[:, :, F.IDX["ry10"]] + lv["pi_trend"], z1[F.IDX["ry10"]] + init.pi0))
+    y10 = np.maximum(k[:, :, F.IDX["ry10"]] + lv["pi_trend"], cq.Y10_FLOOR)       # the observed 10-year (P4b floor)
+    assert np.allclose(lv["y10"], y10)
+    assert np.allclose(x["d_y10"], d(y10, max(z1[F.IDX["ry10"]] + init.pi0, cq.Y10_FLOOR)))
     assert np.allclose(x["d_unrate"], d(lv["unrate"], init.u0))
-    assert np.allclose(lv["unrate"], 2.0 + np.exp(k[:, :, F.IDX["lu"]]))
+    assert np.allclose(lv["unrate"], model.tf.level("lu", k[:, :, F.IDX["lu"]]))
     assert np.allclose(x["d_ip"], k[:, :, F.IDX["ip"]] / 4)
     assert np.allclose(x["d_oil"], d(k[:, :, F.IDX["ro"]], z1[F.IDX["ro"]]) + np.diff(
         np.concatenate([np.full((200, 1), init.lvl_cpi0), lv["cpi"]], axis=1), axis=1))
     assert np.allclose(model.wg * x["d_cpi_goods"] + model.ws * x["d_cpi_serv"], x["d_cpi"])
     assert np.allclose(x["d_usd"], d(k[:, :, F.IDX["usd"]], z1[F.IDX["usd"]]))
     for f, v, lvl in (("d_spread", "sp", "spread"), ("d_gz", "gz", "gz")):
-        shift = F.EXP_SHIFT.get(v)
-        level = shift + np.exp(k[:, :, F.IDX[v]]) if shift is not None else k[:, :, F.IDX[v]]
-        level0 = shift + np.exp(z1[F.IDX[v]]) if shift is not None else z1[F.IDX[v]]
+        level = model.tf.level(v, k[:, :, F.IDX[v]])
+        level0 = model.tf.level(v, z1[F.IDX[v]])
         assert np.allclose(lv[lvl], level) and np.allclose(x[f], d(level, level0))
-    assert lv["unrate"].min() > cq.FACTOR_U_SHIFT
-    if "gz" in F.EXP_SHIFT:
-        assert lv["gz"].min() > cq.SPREAD_SHIFT and lv["spread"].min() > cq.SPREAD_SHIFT
+    for lvl, v in (("unrate", "lu"), ("spread", "sp"), ("gz", "gz")):          # inside the bounded scales (P4b)
+        lo, hi = cq.FACTOR_BOUNDS[v]
+        assert lo < lv[lvl].min() and lv[lvl].max() < hi
 
 
 @needs_qpanel
@@ -381,6 +429,89 @@ def test_unknown_field_raises_in_chinese(model, init):
 
 
 @needs_qpanel
+def test_the_draw_rule_holds_for_the_simulated_system(model):
+    """P4b: every posterior draw is stationary as a VAR and under the cycle module, with every mode halving within
+    the longest simulated horizon; the fit records the rule, the roots and the bounded scales."""
+    info = model.info
+    assert info["root_limit"] == pytest.approx(cq.FACTOR_MAX_ROOT) and info["draw_fallbacks"] == 0
+    for A, _, Sig in model.draws:
+        assert max(F.roots(A, Sig)) < cq.FACTOR_MAX_ROOT
+    assert info["cycle_root_mean"] < cq.FACTOR_MAX_ROOT and 0.0 < info["rejection_rate"] < 1.0
+    assert info["transform"]["lu"] == {"kind": "logit", "lo": 2.0, "hi": 30.0}
+    assert len(model.draw_mu_ip) == len(model.draws)
+    if cq.CYCLE_CENTER == "training_mean":                                      # P3's level (the default)
+        assert model.cycle_shift(0) == 0.0 and model.cycle_shift(None) == 0.0
+    else:
+        assert model.cycle_shift(0) == pytest.approx(model.draw_mu_ip[0] - np.mean(model.ip_hist))
+
+
+@needs_qpanel
+def test_the_cycle_level_and_pool_winsorization_options(model, init, monkeypatch):
+    """P4b options, off by default (config_q.CYCLE_CENTER, FACTOR_POOL_WINSOR_SD): the cycle module's IP blocks
+    shifted to each draw's steady-state IP growth, and the bootstrap pool winsorized at a multiple of each coordinate's
+    sd (frequency kept, size cut)."""
+    import copy
+    monkeypatch.setattr(cq, "CYCLE_CENTER", "steady_state")
+    shift = model.cycle_shift(None)
+    assert shift == pytest.approx(model.mu[F.IDX["ip"]] - np.mean(model.ip_hist))
+    assert model.cycle_shift(3) == pytest.approx(model.draw_mu_ip[3] - np.mean(model.ip_hist))
+    a = F.simulate(model, init, 8, n_paths=300, seed=2, param_uncertainty=False)
+    monkeypatch.setattr(cq, "CYCLE_CENTER", "training_mean")
+    b = F.simulate(model, init, 8, n_paths=300, seed=2, param_uncertainty=False)
+    assert np.allclose(a.core[:, :, F.IDX["ip"]] - b.core[:, :, F.IDX["ip"]], shift)    # same blocks, new level
+    monkeypatch.setattr(cq, "FACTOR_POOL_WINSOR_SD", 4.0)
+    m2 = copy.copy(model)
+    cut = F._build_pool(m2, model.seed)
+    assert np.all(np.abs(m2.pool) <= 4.0 * model.pool.std(axis=0) + 1e-12)
+    assert cut["core_entries"] > 0 and "2020Q2" in cut["rows"] and np.array_equal(m2.pool_labels, model.pool_labels)
+
+
+@needs_qpanel
+def test_long_horizon_paths_stay_finite_and_bounded(model, init):
+    """P4b, permanent: 80 quarters of unconditional paths (the agent tree's snapshot length) stay finite and inside
+    the bounded scales, the 10-year at or above its floor, the policy rate at or above its own. Far tails are rare:
+    P3's log scales put 29% of 80-quarter paths beyond u 20, GZ 12 or Baa - 10y 10 (GZ up to 1.7 million)."""
+    res = F.simulate(model, init, 80, n_paths=400, seed=8)
+    lv = res.levels
+    for k in ("unrate", "gz", "spread", "y10", "cpi_yoy", "ff"):
+        assert np.isfinite(lv[k]).all(), k
+    assert all(np.isfinite(v).all() for v in res.x.values())
+    for lvl, v in (("unrate", "lu"), ("spread", "sp"), ("gz", "gz")):
+        lo, hi = cq.FACTOR_BOUNDS[v]
+        assert lo < lv[lvl].min() and lv[lvl].max() < hi, lvl
+    assert lv["y10"].min() >= cq.Y10_FLOOR and lv["ff"].min() >= cq.FF_FLOOR - 1e-12
+    far = (lv["unrate"] > 20).any(axis=1) | (lv["gz"] > 12).any(axis=1) | (lv["spread"] > 10).any(axis=1)
+    assert far.mean() < 0.15 and (lv["cpi_yoy"] > 15).mean() < 0.01
+
+
+@needs_qpanel
+def test_the_ten_year_has_an_effective_lower_bound(model, init):
+    """P4b: the observed 10-year is max(shadow, Y10_FLOOR) with ry10 the shadow real rate (the policy rate's
+    treatment): a statement on the shadow below the floor holds on the shadow and the observed yield sits at the
+    floor; d_y10 is the observed change."""
+    st = [S("y10_shadow", (3,), -1.5), S("y10_shadow", (4,), -1.0)]
+    res = F.simulate(model, init, 6, n_paths=300, seed=3, statements=st, saturate=False)
+    lv, x = res.levels, res.x
+    assert np.max(np.abs(lv["y10_shadow"][:, 2] + 1.5)) < 1e-8 and np.max(np.abs(lv["y10_shadow"][:, 3] + 1.0)) < 1e-8
+    assert np.allclose(lv["y10"][:, 2:4], cq.Y10_FLOOR) and lv["y10"].min() >= cq.Y10_FLOOR
+    obs0 = max(float(init.z[1][F.IDX["ry10"]] + init.pi0), cq.Y10_FLOOR)
+    assert np.allclose(x["d_y10"], np.diff(np.concatenate([np.full((300, 1), obs0), lv["y10"]], axis=1), axis=1))
+
+
+@needs_qpanel
+def test_bounded_statements_are_delivered_inside_the_bounds(model, init):
+    """P4b: a level stated beyond its ceiling is delivered just inside it; a level and an unchained unemployment
+    change on the logit scale (Newton in the space the linear rows leave free) hold to 1e-8 on every path."""
+    over = F.simulate(model, init, 3, n_paths=200, seed=4, statements=[S("gz", (2,), 25.0)], saturate=False)
+    assert np.allclose(over.levels["gz"][:, 1], cq.FACTOR_BOUNDS["gz"][1] - F._LEVEL_EPS, atol=1e-6)
+    st = [S("unrate", (2,), 14.0), S("d_unrate", (4,), -1.0), S("d_spread", (3,), 1.5)]
+    res = F.simulate(model, init, 5, n_paths=300, seed=4, statements=st, saturate=False)
+    assert np.max(np.abs(res.levels["unrate"][:, 1] - 14.0)) < 1e-8
+    assert np.max(np.abs(res.x["d_unrate"][:, 3] + 1.0)) < 1e-8 and np.max(np.abs(res.x["d_spread"][:, 2] - 1.5)) < 1e-8
+    assert res.info["projection"]["newton_err"] < 1e-8
+
+
+@needs_qpanel
 def test_policy_reaction_functions_and_shock_conventions(Q):
     from scenariolab.qmodel import policy
     for end in ("1994Q4", "2004Q4", "2014Q4", "2026Q3"):
@@ -433,11 +564,139 @@ def test_tf_and_tc_are_stored_with_pass_fail():
         assert isinstance(last[k]["pass"], bool)
     for end, r in tf["fits"].items():
         for k in ("F2_cpi_gt4", "F2_cpi_acf4", "F2_spell", "F3_per_15y", "F3_mean_q", "F3_gt6q", "F4_bounce",
-                  "F5_dff_on_du", "F5_okun", "F6_bounds"):
+                  "F5_dff_on_du", "F5_okun", "F6_bounds", "F6_tails", "F6_max13_unrate", "F6_max13_gz",
+                  "F6_max13_spread"):
             assert k in r["ppc"] and "pass" in r["ppc"][k], (end, k)
+        assert r["ppc"]["F6_tails"]["nonfinite"] == 0, end                      # P4b: no non-finite value
+    assert "ppc_alt_transform_log" in last                                      # §15 Q5: the log arm alongside
     assert isinstance(tf["F7"]["pass"], bool) and isinstance(tf["F8"]["pass"], bool)
     assert last["F1"]["hard_max_abs_error"] < 1e-8                      # F1 hard delivery holds by construction
     assert last["F9"]["same_quarter_E0_unchanged"] is True
     tc = fl["T_C"]
     assert set(tc["test"]) == {"a", "b", "c"} and isinstance(tc["gate"]["pass"], bool)
     assert tc["selection"]["completion_w"] in cq.COMPLETION_W_GRID
+
+
+# ================================================================ the fix round (statistics and engineering reviews)
+
+@needs_qpanel
+def test_the_bootstrap_pool_is_centred_so_the_simulated_mean_is_the_models(model, init):
+    """The pool's whitened rows have mean 0 (the residuals at the posterior-mean model do not: (I - A1 - A2)^-1 made
+    their small mean a long-run drift of CPI +1.0 and real oil +11 log% at the forward fit). The bootstrap's mean path
+    then equals the model's zero-shock path within Monte Carlo error at 40 quarters, and the posterior-mean system's
+    fixed point is the steady state mu."""
+    assert np.max(np.abs(model.pool.mean(axis=0))) < 1e-12
+    assert model.info["pool_winsorized"]["centred"] is True
+    H, n = 40, 4000
+    res = F.simulate(model, init, H, n_paths=n, seed=21, cycle=False, param_uncertainty=False, usd_hold=False,
+                     saturate=False)
+    mp = model.mean_path(init, H, model.system())[:, :F.NC]
+    Y = res.core                                                        # (n, H, NC)
+    z = (Y.mean(axis=0) - mp) / (Y.std(axis=0, ddof=1) / math.sqrt(n))
+    assert np.max(np.abs(z)) < 4.5, np.unravel_index(np.argmax(np.abs(z)), z.shape)
+    A1, A2 = model.A
+    fixed = np.linalg.solve(np.eye(F.NC) - A1 - A2, model.c)
+    assert np.allclose(fixed, model.mu, atol=1e-8)
+
+
+@needs_qpanel
+@pytest.mark.parametrize("var", ["d_unrate", "d_spread", "d_gz"])
+def test_sums_and_means_of_changes_on_the_bounded_variables_are_delivered(model, init, var):
+    """compile_statements passed no model to _urow for a mean, or a sum whose first quarter's previous level is not
+    pinned: every such statement raised TypeError. Delivered to 1e-8 on every path, from q1 and from q > 1; the
+    linear form (a sum from q1) also agrees with conditional_moments; the per-path forms are not linear and
+    conditional_moments refuses them in Chinese."""
+    v = {"d_unrate": 0.2, "d_spread": 0.3, "d_gz": 0.4}[var]
+    cases = [S(var, (1, 2, 3), v, agg="mean"), S(var, (2, 3), 2 * v, agg="sum"), S(var, (1, 2), 2 * v, agg="sum"),
+             S(var, (2, 3, 4), v, agg="mean")]
+    for st in cases:
+        res = F.simulate(model, init, 4, n_paths=300, seed=3, statements=[st], saturate=False)
+        hard = [d for d in res.delivery if d["kind"] == "hard"]
+        assert hard and hard[0]["max_abs_error"] < 1e-8, (st, hard)
+    lin = S(var, (1, 2), 2 * v, agg="sum")                               # previous level pinned: a linear row
+    mean, cov = F.conditional_moments(model, init, 2, [lin])
+    g = F.simulate(model, init, 2, n_paths=4000, seed=5, statements=[lin], cycle=False, gaussian=True,
+                   param_uncertainty=False, usd_hold=False, saturate=False)
+    k = F.IDX[{"d_unrate": "lu", "d_spread": "sp", "d_gz": "gz"}[var]]
+    se = np.sqrt(np.maximum(np.diag(cov).reshape(2, -1)[:, k], 0.0) / 4000)    # quarter 2 is pinned: se 0
+    assert np.all(np.abs(g.core[:, :, k].mean(axis=0) - mean[:, k]) < 4.5 * se + 1e-8)
+    with pytest.raises(F.FactorError, match="线性"):
+        F.conditional_moments(model, init, 3, [S(var, (2, 3), v, agg="sum")])
+
+
+@needs_qpanel
+def test_saturation_is_four_training_sd_from_the_conditional_mean(model, init):
+    """§3.5 as written: the gap between a stated value and its conditional mean saturates at ±4 training sd (the
+    field's sd over the training quarters), not ±4 sd of a 400-path Gaussian prior with the t-weighted Sigma (which
+    clipped 1-6% of the model's own draws). Deterministic; d_oil passes through; sums and levels use their own
+    training sd."""
+    mp = model.mean_path(init, 2, model.system())[None]
+    x, lv, sh = F.outputs(model, init, mp, np.zeros_like(mp), np.full(1, -1), 2, usd_hold=False)
+    for f in ("d_unrate", "d_ip", "d_epu", "d_profits"):
+        st = S(f, (1,), 0.0)
+        mu, sd = float(F.evaluate(st, x, lv, sh)[0]), F.statement_sd(model, st)
+        train = Q_train_sd(model, f)
+        assert sd == pytest.approx(train, rel=1e-12)
+        vals, notes = F.saturation(model, init, 1, [S(f, (1,), mu + 3.9 * sd), S(f, (1,), mu - 7.0 * sd)])
+        assert vals[0] == pytest.approx(mu + 3.9 * sd) and vals[1] == pytest.approx(mu - 4.0 * sd)
+        assert [n["statement"] for n in notes] == [1] and F.CLIP_TEXT in notes[0]["text"]
+    vals, notes = F.saturation(model, init, 1, [S("d_oil", (1,), 400.0)])
+    assert vals == [400.0] and notes == []
+    s2 = F.statement_sd(model, S("d_unrate", (1, 2), 0.0, agg="sum"))
+    assert s2 == pytest.approx(float(model.train_frame["d_unrate"].rolling(2).sum().std()), rel=1e-12)
+    lev = F.statement_sd(model, S("unrate", (3,), 5.0))
+    assert lev == pytest.approx(float((model.train_frame["unrate"].shift(-3) - model.train_frame["unrate"]).std()))
+    a, _ = F.saturation(model, init, 1, [S("d_unrate", (1,), 2.0)], seed=1)
+    b, _ = F.saturation(model, init, 1, [S("d_unrate", (1,), 2.0)], seed=2)
+    assert a == b                                                       # no Monte Carlo
+
+
+def Q_train_sd(model, f):
+    return float(model.train_frame[f].dropna().std())
+
+
+@needs_qpanel
+def test_the_initial_state_uses_only_data_published_by_the_origin(Q, P):
+    """§3.2: at a backtest origin the previous quarter's CPI, IP and unemployment (with them pi_trend, the real rates
+    and real oil) and the NIPA / Z.1 / profit satellites are not published yet. The initial state built from the
+    full panel ('auto' = 'published' at a past origin) equals the one built from a panel rebuilt from the inputs as
+    published at the end of the month before the origin (whose last row is that origin's 'today'), for a zero-bound
+    and an ordinary origin; the asset layer's start state too."""
+    from scenariolab.qmodel import assets as qa
+    from scenariolab.qmodel import panel as qpanel
+    m = F.fit(Q, "2014Q4", anchors="train_end", P=P, seed=0)
+    inputs = qpanel.load_inputs()
+    al = qa.AssetLayer.fit("2014Q4", panel=P.loc[:"2014-12"], Q=Q, n_boot=0)
+    for origin, asof in (("2015Q1", "2014-12"), ("2016Q3", "2016-06")):
+        Qt, _ = qpanel.build(qpanel.truncate_inputs(inputs, asof))
+        assert Qt.index[-1] == pd.Period(origin, "Q")
+        a, b = m.initial_state(Q, origin), m.initial_state(Qt, origin)
+        assert a.information == "published" and b.information == "available"
+        assert np.array_equal(a.z, b.z) and sorted(a.imputed) == sorted(b.imputed)
+        for k in ("pi0", "ff0", "u0", "lvl_cpi0"):
+            assert getattr(a, k) == getattr(b, k), k
+        assert np.allclose(a.pc_hist, b.pc_hist, equal_nan=True) and np.allclose(a.core_hist, b.core_hist,
+                                                                                 equal_nan=True)
+        real = m.initial_state(Q, origin, information="available")
+        assert len(a.imputed) > 30 and len(real.imputed) <= 4             # the realized values are not used
+        assert not np.allclose(a.z[1], real.z[1])
+        sa, sb = al.start_state(Q, origin), al.start_state(Qt, origin)
+        assert set(sa) == set(sb)
+        for k in sa:
+            assert np.allclose(np.ravel(sa[k]), np.ravel(sb[k]), rtol=0, atol=0, equal_nan=True), k
+    with pytest.raises(ValueError):
+        m.initial_state(Q, "2015Q1", information="realized")
+
+
+@needs_results
+def test_qmodel_json_names_the_code_and_data_it_was_computed_from():
+    """The stored T-F / T-C carry the content identity of the code and data they come from (qmodel.spec); a stale
+    file (code or data changed since) fails here instead of passing unnoticed."""
+    from scenariolab import jsonio
+    from scenariolab.qmodel import factor_checks as fc
+    fl = jsonio.load(cq.QMODEL_RESULTS_PATH).get("factor_layer") or {}
+    if fl.get("quick"):
+        pytest.skip("qmodel.json has no full factor-layer run")
+    assert fl.get("version") == F.VERSION
+    assert fl.get("identity") == fc.identity(), ("data/results/qmodel.json is stale: rebuild it (python -m "
+                                                "scenariolab.build --only qmodel)")

@@ -42,6 +42,7 @@ import pandas as pd
 from .. import config, jsonio
 from ..context import EngineContext
 from ..engine import regimes
+from ..engine.anchors import window_reversion
 from ..engine.ep import effective_number
 from ..engine.pooling import MIN_ENS, MIN_EPISODES, SHRINK_STEPS, episode_ens, month_frequency
 from . import forecast as F
@@ -157,9 +158,11 @@ class Origin:
         self.db, self.anchor, self.cma, self.vm, self.prior = eng["db"], eng["anchor"], eng["cma"], eng["vm"], eng["prior"]
         self.state = F.state_at(panel, t)
         self.n_avail = F.available_starts(self.db)
+        self.reversion = window_reversion(panel, t)   # the anchors knowable at t (§5.5, as forecast_origin)
 
     def simulate(self, probs: np.ndarray, n_paths: int, seed: int) -> dict:
-        return F.simulate_year(self.db, self.anchor, self.cma, probs, n_paths, seed, valuation=self.vm)
+        return F.simulate_year(self.db, self.anchor, self.cma, probs, n_paths, seed, valuation=self.vm,
+                               reversion=self.reversion)
 
 
 def start_labels(frame: pd.DataFrame, db, col: str, block: int = H) -> np.ndarray:

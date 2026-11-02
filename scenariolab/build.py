@@ -7,6 +7,8 @@
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~5 min, not run by default)
     python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
+    python -m scenariolab.build --only quarterly qmodel  # the quarterly stack: its panel (~10 s), T-F and T-C (~2 min)
+    python -m scenariolab.build --only evaluation        # pre-registration records: integrity and reproduction (opt-in)
     python -m scenariolab.build --all           # every step, the opt-in ones included
 
 Order matters: causality writes the structural shock series that later steps
@@ -24,7 +26,13 @@ windows and the forecast and checks itself against backtest.json,
 scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
 the scenario paths; llm writes what the translator would send the model (it
 never calls a model: its status runs only `claude --version` and `claude auth
-status`, which spend no usage; its regime section reads regimes.json).
+status`, which spend no usage; its regime section reads regimes.json). The quarterly stack (SIM_DESIGN §3.9,
+试运行): quarterly builds data/processed/panel_quarterly.csv from the monthly panel and the raw files the
+quarterly import cached (python -m scenariolab.qmodel.sources_q import ...; it never downloads), qmodel fits the
+factor layer and writes T-F and T-C to data/results/qmodel.json (it needs model_selection.json and the quarterly
+panel), and the opt-in evaluation checks the pre-registration records and reproduces those whose inputs are the
+frozen ones. A quarterly-stack step whose inputs are not on disk is skipped with the missing file named, not failed:
+a fresh clone builds the monthly app without them.
 """
 from __future__ import annotations
 
@@ -40,9 +48,10 @@ from .data.panel import load_meta, meta_sources, save_panel
 from .engine.factor_model import ModelSpec
 from .env import load_dotenv
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes", "forecast",
-         "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
-OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
+STEPS = ["panel", "quarterly", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes",
+         "forecast", "valuation", "portfolio", "llm", "qmodel", "meta", "ablation", "regime_forecast", "evaluation"]
+OPT_IN = {"ablation", "regime_forecast", "evaluation"}   # slow; run with --only <step> (or --all)
+SKIP_IF_MISSING = {"quarterly", "qmodel", "evaluation"}   # the quarterly stack: skipped when its inputs are not cached
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
 
@@ -131,6 +140,13 @@ def main(argv=None) -> int:
             traceback.print_exc()            # any other missing module is a broken install or a bug
             failures.append(name)
             print(f"[build] {name} FAILED", flush=True)
+        except FileNotFoundError as err:
+            if name in SKIP_IF_MISSING:      # the quarterly stack's raw files or panel are not cached here
+                print(f"[build] {name} skipped (missing input: {err})", flush=True)
+                return None
+            traceback.print_exc()
+            failures.append(name)
+            print(f"[build] {name} FAILED", flush=True)
         except Exception:  # noqa: BLE001 - report and keep building the rest
             traceback.print_exc()
             failures.append(name)
@@ -143,6 +159,7 @@ def main(argv=None) -> int:
         save_panel(refresh=args.refresh)
 
     ctx = EngineContext.load(selection=False)
+    step("quarterly", lambda: _run("qmodel.panel", ctx))
     step("causality", lambda: jsonio.dump(_run("analysis.causality", ctx, refresh=args.refresh),
                                           out / "causality.json"))
     ctx = EngineContext.load(selection=False)          # merge freshly written shocks
@@ -162,9 +179,11 @@ def main(argv=None) -> int:
     step("valuation", lambda: jsonio.dump(_run("analysis.valuation", ctx), out / "valuation.json"))
     step("portfolio", lambda: _run("portfolio.service", ctx))
     step("llm", lambda: _run("llm.translator", ctx))
+    step("qmodel", lambda: _run("qmodel.factor_checks", ctx))      # writes data/results/qmodel.json itself
     step("meta", lambda: jsonio.dump(build_meta(ctx), out / "meta.json"))
     step("ablation", lambda: jsonio.dump(_run("analysis.ablation", ctx), out / "ablation.json"))
     step("regime_forecast", lambda: jsonio.dump(_run("analysis.regime_forecast", ctx), out / "regime_forecast.json"))
+    step("evaluation", lambda: _run("evaluation.protocol", ctx))   # writes data/results/evaluation.json itself
 
     if "diagnostics" in steps and "eras" not in steps and eras_model_stale(out):
         print("[build] note: the selected model changed; run --only eras too (the eras attribution uses it)", flush=True)

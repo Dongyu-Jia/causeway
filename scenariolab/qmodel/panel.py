@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -115,7 +116,23 @@ def load_inputs(panel: pd.DataFrame | None = None) -> Inputs:
     series: dict[str, pd.Series] = {}
     freq: dict[str, str] = {}
     files: dict = {"panel_monthly.csv": _digest(config.PANEL_PATH) if panel is None else "in memory"}
+    sq.start_recording()
+    try:
+        _load_series(P, series, freq, files)
+    finally:
+        read = sq.stop_recording()
+    files["raw"] = {_rel(p): _digest(p) for p in read}
+    return Inputs(series=series, freq=freq, files=files)
 
+
+def _rel(p: Path) -> str:
+    try:
+        return str(Path(p).resolve().relative_to(config.ROOT.resolve()))
+    except ValueError:
+        return str(p)
+
+
+def _load_series(P: pd.DataFrame, series: dict, freq: dict, files: dict) -> None:
     def add(key, s, f="M"):
         series[key] = s.astype(float).sort_index()
         freq[key] = f
@@ -158,7 +175,6 @@ def load_inputs(panel: pd.DataFrame | None = None) -> Inputs:
     ex_div = sq.french_table("12_Industry_Portfolios_Wout_Div", "Average Value Weighted Returns -- Monthly") / 100.0
     for ind in sorted(set(cq.FRENCH_INDUSTRY.values())):
         add(f"french:p:{ind}", ex_div[ind].dropna())
-    return Inputs(series=series, freq=freq, files=files)
 
 
 def truncate_inputs(inputs: Inputs, asof: str | pd.Timestamp) -> Inputs:
@@ -171,7 +187,7 @@ def truncate_inputs(inputs: Inputs, asof: str | pd.Timestamp) -> Inputs:
         cut = asof - pd.DateOffset(months=series_lag(key))
         ref_end = s.index + pd.DateOffset(months=2) if inputs.freq[key] == "Q" else s.index
         out[key] = s[ref_end <= cut]
-    return Inputs(series=out, freq=dict(inputs.freq), files=dict(inputs.files))
+    return Inputs(series=out, freq=dict(inputs.freq), files={**inputs.files, "truncated_asof": asof.strftime("%Y-%m")})
 
 
 # ---------------------------------------------------------------- quarterly helpers (pandas Period "Q")
@@ -241,7 +257,25 @@ def _digest(path) -> str:
 
 
 def inputs_digest(inputs: Inputs) -> str:
-    """SHA-256 over every input series (name, dates, values): the data hash a frozen specification records."""
+    """SHA-256 of the inputs as files: the bytes of every raw file the build read (and the monthly panel's), the input
+    keys and the truncation cut, if any -- not the parsed floats, which pandas 2.x and 3.x read one ulp apart (the
+    digest is the panel's identity in the freshness test and the adapter version, so it must not depend on the
+    environment). An in-memory panel (load_inputs(panel=...)) falls back to values_digest."""
+    f = inputs.files
+    if f.get("panel_monthly.csv") == "in memory" or not f.get("raw"):
+        return values_digest(inputs)
+    h = hashlib.sha256()
+    h.update(f"panel_monthly.csv {f['panel_monthly.csv']}\n".encode())
+    for rel_p, sha in sorted(f["raw"].items()):
+        h.update(f"{rel_p} {sha}\n".encode())
+    h.update(("keys " + ",".join(sorted(inputs.series)) + "\n").encode())
+    h.update(f"truncated {f.get('truncated_asof', '')}".encode())
+    return h.hexdigest()
+
+
+def values_digest(inputs: Inputs) -> str:
+    """SHA-256 over every input series (name, dates, values): exact, so environment-dependent (pandas parses some files
+    one ulp differently); recorded for reference only."""
     h = hashlib.sha256()
     for key in sorted(inputs.series):
         s = inputs.series[key]
@@ -633,6 +667,7 @@ def build(inputs: Inputs) -> tuple[pd.DataFrame, dict]:
     info = {"version": VERSION, "first_quarter": cq.FIRST_QUARTER, "last_data_quarter": str(last_q),
             "today": str(today), "data_end_month": _month(data_end), "n_quarters": int(len(Q)),
             "groups": GROUPS, "inputs": inputs.files, "inputs_digest": inputs_digest(inputs),
+            "values_digest": values_digest(inputs),
             "card_digest": _digest(cq.CARD_PATH) if cq.CARD_PATH.exists() else None,
             "notes": [
                 "季度面板：每行一个日历季度；最后一行（今天）只有季初已知的状态。",

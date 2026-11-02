@@ -11,7 +11,9 @@ lie within the simulated [p05, p95] (non-overlapping history windows where the s
   F4  bounce-back: 4-quarter IP growth on the drawdown from the 8-quarter peak
   F5  co-movement: Δff on Δu, Okun (Δu on IP growth), corr(d_gz, us_equity), corr(d_spread, us_equity) (the
       instruments' T18), stock-bond correlation by s_core4 (us_equity through the asset layer L0)
-  F6  bounds: ff >= 0.1 always; u >= 2.5 always and < 3% in <= 5% of quarters; CPI y/y > 15% in <= 0.5%
+  F6  bounds: ff >= 0.1 always; u >= 2.5 always and < 3% in <= 5% of quarters; CPI y/y > 15% in <= 0.5%; P4b adds
+      the long-horizon tails (paths ever with u > 20, GZ > 12 or Baa - 10y > 10: each <= 0.5%; non-finite: none) and
+      the 13-year maximum of u, GZ and Baa - 10y (history's non-overlapping windows within the per-path [p05, p95])
   F7  fill-in skill with CPI, IP and oil stated (rolling 1990-2026, 4Q / 12Q): R² of the unstated factors against
       no change; >= the engine on unemployment and the Baa spread, >= -0.05 elsewhere, d_usd held at no change
   F8  80% coverage of 4-quarter factor changes, non-overlapping windows from 1985 (41): within [0.72, 0.88]
@@ -38,6 +40,7 @@ import time
 
 import numpy as np
 import pandas as pd
+from scipy.special import ndtr, ndtri
 from scipy.stats import ks_2samp
 
 from .. import jsonio
@@ -49,6 +52,7 @@ from . import policy
 
 S = F.Statement
 QP = {**RG.PARAMS, "u_smooth_months": 1}       # the classifier on quarter-end series (joint j02)
+TAIL_SHARE = 0.005                             # P4b: at most this share of paths ever beyond the tail thresholds
 
 
 # ================================================================ history
@@ -130,7 +134,15 @@ def history(Q: pd.DataFrame, P: pd.DataFrame, end: str = "2026Q3") -> dict:
     for k in (0, 1):
         s = Z2[Z2["s_core4"] == k]
         sb[str(k)] = float(s[["y_us_equity", "y_treasury_10y"]].corr().iloc[0, 1])
-    return {"cpi_gt4": float((x > 4).mean()), "n_quarters": int(len(x)),
+    lv = Q.loc["1973Q1":end, ["lvl_unrate", "lvl_gz", "lvl_spread"]]
+    max13 = {}
+    for col, key in (("lvl_unrate", "unrate"), ("lvl_gz", "gz"), ("lvl_spread", "spread")):
+        a = lv[col].to_numpy(float)
+        max13[key] = [float(np.nanmax(a[i:i + cq.TF_QUARTERS])) for i in range(0, len(a) - cq.TF_QUARTERS + 1,
+                                                                                cq.TF_QUARTERS)]
+    return {"max13": max13, "max13_window_starts": [str(lv.index[i]) for i in range(0, len(lv) - cq.TF_QUARTERS + 1,
+                                                                                         cq.TF_QUARTERS)],
+            "cpi_gt4": float((x > 4).mean()), "n_quarters": int(len(x)),
             "cpi_acf4_windows": [_pearson_lag(w - w.mean()) for w in win],
             "cpi_acf4_window_starts": [str(cpi.index[a]) for a in range(0, len(x) - cq.TF_QUARTERS + 1,
                                                                             cq.TF_QUARTERS)],
@@ -159,7 +171,7 @@ def _asset_paths(al, res: F.SimResult, init: F.InitState, Q: pd.DataFrame, origi
     s_core4 = np.concatenate([np.full((n, 1), core4_0), c4[:, :-1].astype(float)], axis=1) if c4 is not None \
         else np.full((n, H), core4_0)
     y10 = res.levels["y10"]
-    y10_0 = float(init.z[1][F.IDX["ry10"]] + init.pi0)
+    y10_0 = max(float(init.z[1][F.IDX["ry10"]] + init.pi0), cq.Y10_FLOOR)
     s_y10 = np.concatenate([np.full((n, 1), y10_0), y10[:, :-1]], axis=1)
     bill = float((Q["lvl_tb3"] - Q["lvl_ff"]).loc[:q0 - 1].mean())
     ff = res.levels["ff"]
@@ -229,10 +241,16 @@ def path_stats(res: F.SimResult, init: F.InitState, Q: pd.DataFrame, P: pd.DataF
                     m = st[i] == bool(kk)
                     vals.append(np.corrcoef(eq[i, m], tsy[i, m])[0, 1] if m.sum() >= 8 else np.nan)
                 out[f"stock_bond_core4_{kk}"] = np.array(vals)
+    gz, spread = res.levels["gz"], res.levels["spread"]
+    out["max13_unrate"], out["max13_gz"], out["max13_spread"] = u.max(axis=1), gz.max(axis=1), spread.max(axis=1)
+    fin = np.isfinite(u) & np.isfinite(gz) & np.isfinite(spread) & np.isfinite(cpi) & np.isfinite(ff)
     out["bounds"] = {"ff_min": float(ff.min()), "u_min": float(u.min()), "u_below3": float((u < 3).mean()),
                      "cpi_gt15": float((cpi > 15).mean()), "spread_below_floor": float(
-                         (res.levels["spread"] < cq.SPREAD_FLOOR).mean()),
-                     "gz_below_floor": float((res.levels["gz"] < cq.SPREAD_FLOOR).mean())}
+                         (spread < cq.SPREAD_FLOOR).mean()),
+                     "gz_below_floor": float((gz < cq.SPREAD_FLOOR).mean()),
+                     "u_gt20_paths": float((u > 20).any(axis=1).mean()), "gz_gt12_paths": float((gz > 12).any(axis=1).mean()),
+                     "spread_gt10_paths": float((spread > 10).any(axis=1).mean()), "nonfinite": int((~fin).sum()),
+                     "u_max": float(np.nanmax(u)), "gz_max": float(np.nanmax(gz)), "spread_max": float(np.nanmax(spread))}
     return out
 
 
@@ -288,6 +306,16 @@ def ppc(stats: dict, hist: dict) -> dict:
                                             and bd["u_below3"] <= 0.05 and bd["cpi_gt15"] <= 0.005),
                         "spread_floor_transform_due": bool(max(bd["spread_below_floor"], bd["gz_below_floor"])
                                                            > cq.SPREAD_FLOOR_SHARE)}
+    out["F6_tails"] = {k: bd[k] for k in ("u_gt20_paths", "gz_gt12_paths", "spread_gt10_paths", "nonfinite", "u_max",
+                                          "gz_max", "spread_max")}
+    out["F6_tails"]["pass"] = bool(bd["nonfinite"] == 0 and max(bd["u_gt20_paths"], bd["gz_gt12_paths"],
+                                                                bd["spread_gt10_paths"]) <= TAIL_SHARE)
+    for key in ("unrate", "gz", "spread"):
+        if f"max13_{key}" in stats and "max13" in hist:
+            b = _band(stats[f"max13_{key}"])
+            inside = [_within(h, b) for h in hist["max13"][key]]
+            out[f"F6_max13_{key}"] = {"history_windows": hist["max13"][key], **b, "windows_inside": inside,
+                                      "pass": all(bool(x) for x in inside)}
     return out
 
 
@@ -419,7 +447,7 @@ def _window_changes(model: F.FactorModel, init: F.InitState, mean: np.ndarray) -
     ffH = max(mean[-1, F.IDX["rff"]] + pi, cq.FF_FLOOR)
 
     def lvl(v, x):
-        return F.EXP_SHIFT[v] + math.exp(x) if v in F.EXP_SHIFT else x
+        return float(model.tf.level(v, x))
     return {"ps": float(np.mean(mean[:, F.IDX["ps"]])), "ff": ffH - init.ff0,
             "y10": mean[-1, F.IDX["ry10"]] + pi - (z1[F.IDX["ry10"]] + init.pi0),
             "sp": lvl("sp", mean[-1, F.IDX["sp"]]) - lvl("sp", z1[F.IDX["sp"]]),
@@ -530,7 +558,118 @@ def _crps(draws: np.ndarray, y: float) -> float:
     return float(np.mean(np.abs(x - y)) - (2.0 / (n * n)) * np.sum((2 * i - n - 1) * x) / 2.0)
 
 
+# T-C scores step-mode completion exactly (no Monte Carlo): under the Gaussian step model every x field is a monotone
+# transform of one linear combination a'z_q + b of the stacked quarter (factors.outputs at H = 1), so its predictive
+# mean, quantiles, CRPS and 80% interval follow from that combination's mean and sd. CRPS = 2 int_0^1 pinball_tau(y -
+# q(tau)) dtau on a fixed normal-quantile grid (exact for the Gaussian fields to about 1e-7).
+_U = np.linspace(-8.0, 8.0, 1601)
+_TAU = ndtr(_U)
+_W = np.exp(-0.5 * _U ** 2)
+_W = _W / _W.sum()
+Z10, Z90 = float(ndtri(0.1)), float(ndtri(0.9))
+
+
+def field_maps(model: F.FactorModel, init: F.InitState, usd_hold: bool) -> dict:
+    """{field: (a (n,), b, kind, param)}: the step-mode (H = 1) x field = g(a'z_q + b) as factors.outputs maps it.
+    kind 'lin' (g = identity), 'bounded' (level of the bounded core variable param[0] minus param[1]), 'floor'
+    (max(x, param[0]) - param[1]: the observed policy rate and 10-year), 'clip01' (x_oil_cause), 'hold' (d_usd under
+    the dollar hold: mean 0)."""
+    n, I = model.n, F.IDX
+    z1 = init.z[1]
+    e = lambda v: np.eye(n)[I[v]]                                              # noqa: E731
+    A = F.ALPHA
+    tf = model.tf
+    y10_prev = max(float(z1[I["ry10"]] + init.pi0), cq.Y10_FLOOR)
+    out = {"d_cpi": (e("pc"), 0.0, "lin", None), "d_cpi_serv": (e("ps"), 0.0, "lin", None),
+           "d_cpi_goods": ((e("pc") - model.ws * e("ps")) / model.wg, 0.0, "lin", None),
+           "d_ip": (0.25 * e("ip"), 0.0, "lin", None),
+           "d_oil": (e("ro") + 0.25 * e("pc"), -float(z1[I["ro"]]), "lin", None),
+           "d_ff": (e("rff") + A * e("pc"), (1 - A) * float(init.pi0), "floor", (cq.FF_FLOOR, float(init.ff0))),
+           "d_y10": (e("ry10") + A * e("pc"), (1 - A) * float(init.pi0), "floor", (cq.Y10_FLOOR, y10_prev)),
+           "d_usd": (e("usd"), -float(z1[I["usd"]]), "hold" if usd_hold else "lin", None)}
+    for f, v, lv0 in (("d_unrate", "lu", float(init.u0)), ("d_spread", "sp", None), ("d_gz", "gz", None)):
+        if v in tf.vars:
+            out[f] = (e(v), 0.0, "bounded", (v, lv0 if lv0 is not None else float(tf.level(v, z1[I[v]]))))
+        else:
+            out[f] = (e(v), -(lv0 if lv0 is not None else float(z1[I[v]])), "lin", None)
+    for j, f in enumerate(model.sats.fields):
+        a = np.zeros(n)
+        a[F.NC + j] = 1.0
+        out[f] = (a, 0.0, "clip01" if f == "x_oil_cause" else "lin", None)
+    return out
+
+
+def _quantiles(model: F.FactorModel, kind: str, mu: float, sd: float, par, u: np.ndarray) -> np.ndarray:
+    x = mu + sd * u
+    if kind == "bounded":
+        return model.tf.level(par[0], x) - par[1]
+    if kind == "floor":
+        return np.maximum(x, par[0]) - par[1]
+    if kind == "clip01":
+        return np.clip(x, 0.0, 1.0)
+    if kind == "hold":
+        return sd * u
+    return x
+
+
+def predictive(model: F.FactorModel, kind: str, mu: float, sd: float, par) -> float:
+    """The exact predictive mean of g(X), X ~ N(mu, sd^2)."""
+    if kind == "lin":
+        return mu
+    if kind == "hold":
+        return 0.0
+    if kind == "bounded":
+        m, _ = model.tf.vars[par[0]].moments(np.array([mu]), sd)
+        return float(m[0]) - par[1]
+    if kind == "floor":
+        c = par[0]
+        if sd <= 0:
+            return max(mu, c) - par[1]
+        a = (c - mu) / sd
+        return float(c * ndtr(a) + mu * (1.0 - ndtr(a)) + sd * math.exp(-0.5 * a * a) / math.sqrt(2 * math.pi)) - par[1]
+    # clip01: E[clip(X, 0, 1)] = E[max(X, 0)] - E[max(X - 1, 0)]
+    if sd <= 0:
+        return float(min(max(mu, 0.0), 1.0))
+    def pos(mm):
+        z = mm / sd
+        return mm * ndtr(z) + sd * math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    return float(pos(mu) - pos(mu - 1.0))
+
+
+def crps_exact(model: F.FactorModel, kind: str, mu: float, sd: float, par, y: float) -> float:
+    """CRPS of g(X), X ~ N(mu, sd^2), at y: closed form for the Gaussian fields, the quantile (pinball) integral on a
+    fixed grid otherwise."""
+    if kind == "lin" and sd > 0:
+        z = (y - mu) / sd
+        return float(sd * (z * (2 * ndtr(z) - 1) + 2 * math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+                           - 1 / math.sqrt(math.pi)))
+    q = _quantiles(model, kind, mu, sd, par, _U)
+    err = y - q
+    return float(2.0 * np.sum(_W * err * (_TAU - (err < 0))))
+
+
+def step_moments(model: F.FactorModel, init: F.InitState, stmts, w: float, regime) -> dict:
+    """{field: (kind, mu, sd, par)} of every x field's linear combination under the step-mode Gaussian conditional
+    (factors.conditional_moments at H = 1; the dollar hold where d_usd is not stated)."""
+    mean, cov = F.conditional_moments(model, init, 1, stmts, completion_w=w, regime=regime)
+    m = mean.reshape(-1)
+    hold = not any(s.var == "d_usd" for s in stmts)
+    out = {}
+    for f, (a, b, kind, par) in field_maps(model, init, hold).items():
+        out[f] = (kind, float(a @ m + b), float(math.sqrt(max(float(a @ cov @ a), 0.0))), par)
+    return out
+
+
+def _score(model: F.FactorModel, mom: tuple, y: float) -> dict:
+    kind, mu, sd, par = mom
+    lo, hi = _quantiles(model, kind, mu, sd, par, np.array([Z10, Z90]))
+    return {"mean": predictive(model, kind, mu, sd, par), "crps": crps_exact(model, kind, mu, sd, par, y),
+            "cov": bool(lo <= y <= hi)}
+
+
 def _step_draws(model: F.FactorModel, init: F.InitState, stmts, w: float, regime, rng, n: int) -> dict:
+    """Monte Carlo draws of the step-mode completion (P3-P5's T-C scoring; kept for comparison: the pre-registered
+    T-C of 2026-11-02 scored means of these draws, which put the gate at the mercy of one seed)."""
     mean, cov = F.conditional_moments(model, init, 1, stmts, completion_w=w, regime=regime)
     L = np.linalg.cholesky(cov + 1e-10 * np.eye(len(cov)))
     Z = mean.reshape(1, -1) + rng.standard_normal((n, len(cov))) @ L.T
@@ -554,9 +693,12 @@ def _stated_values(Q: pd.DataFrame, q, fields: list[str]) -> list:
 
 
 def tc_block(model: F.FactorModel, Q: pd.DataFrame, quarters, w_grid, regimes=(False, True), seed: int = 0,
-             n: int = cq.TC_DRAWS) -> list[dict]:
+             n: int = cq.TC_DRAWS, scoring: str = "exact") -> list[dict]:
     """Rows (origin, pattern, w, regime, field, y, mean, mean_uncond, crps, crps_uncond, covered) for step-mode
-    completion at the given origins."""
+    completion at the given origins, from the published-information initial state (factors.initial_state).
+    scoring 'exact' (the default since the fix round): the exact predictive means, CRPS and 80% intervals of the
+    Gaussian step model (step_moments: no Monte Carlo, so the conditional and unconditional sets share everything but
+    the statements); 'mc': P3-P5's means of n random draws from independent streams (the frozen 2026-11-02 record)."""
     rows = []
     cls = F.field_classes()
     for q in quarters:
@@ -571,29 +713,41 @@ def tc_block(model: F.FactorModel, Q: pd.DataFrame, quarters, w_grid, regimes=(F
         pstm = {}
         for pat, fields in pats.items():
             stmts = _stated_values(Q, q, fields)
-            vals, _ = F.saturation(model, init, 1, stmts, seed=seed)           # the model's +-4 sd saturation
+            vals, _ = F.saturation(model, init, 1, stmts, seed=seed)           # §3.5: +-4 training sd
             pstm[pat] = [F.Statement(s.var, s.quarters, v, agg=s.agg) for s, v in zip(stmts, vals)]
         for rc in regimes:
             reg = ("zlb" if zlb_now else ("core4" if core4 else None)) if rc else None
-            unc = _step_draws(model, init, [], 1.0, reg, np.random.default_rng([seed, q.year, q.quarter, 1]), n)
+            if scoring == "exact":
+                unc = step_moments(model, init, [], 1.0, reg)
+            else:
+                unc = _step_draws(model, init, [], 1.0, reg, np.random.default_rng([seed, q.year, q.quarter, 1]), n)
             for pat in pats:
                 stmts = pstm[pat]
                 stated = {s.var for s in stmts}
                 for w in (w_grid if pat == "b" else (1.0,)):
-                    dr = _step_draws(model, init, stmts, w, reg, np.random.default_rng([seed, q.year, q.quarter, 2]),
-                                     n)
+                    if scoring == "exact":
+                        dr = step_moments(model, init, stmts, w, reg)
+                    else:
+                        dr = _step_draws(model, init, stmts, w, reg,
+                                         np.random.default_rng([seed, q.year, q.quarter, 2]), n)
                     for f in masks["all"]:
                         if f in stated or f not in dr or f not in Q.columns:
                             continue
                         y = Q.at[q, f]
                         if not np.isfinite(y):
                             continue
-                        d, du = dr[f], unc[f]
-                        lo, hi = np.percentile(d, [10, 90])
+                        y = float(y)
+                        if scoring == "exact":
+                            sc, su = _score(model, dr[f], y), _score(model, unc[f], y)
+                            mean, mean_u, crps, crps_u, cov = sc["mean"], su["mean"], sc["crps"], su["crps"], sc["cov"]
+                        else:
+                            d, du = dr[f], unc[f]
+                            lo, hi = np.percentile(d, [10, 90])
+                            mean, mean_u = float(np.mean(d)), float(np.mean(du))
+                            crps, crps_u, cov = _crps(d, y), _crps(du, y), bool(lo <= y <= hi)
                         rows.append({"origin": str(q), "pattern": pat, "w": w, "regime_cov": rc, "zlb": zlb_now,
-                                     "field": f, "cls": cls.get(f), "y": float(y), "mean": float(np.mean(d)),
-                                     "mean_u": float(np.mean(du)), "crps": _crps(d, float(y)),
-                                     "crps_u": _crps(du, float(y)), "cov": bool(lo <= y <= hi)})
+                                     "field": f, "cls": cls.get(f), "y": y, "mean": mean, "mean_u": mean_u,
+                                     "crps": crps, "crps_u": crps_u, "cov": cov})
     return rows
 
 
@@ -603,10 +757,12 @@ def _r2(g: pd.DataFrame) -> float:
     return 1.0 - sse / sst if sst > 0 else float("nan")
 
 
-def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick: bool = False) -> dict:
+def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick: bool = False,
+       scoring: str = "exact") -> dict:
     """T-C: selection of w and the regime covariance on the rolling validation origins TC_VALIDATION (yearly refits
     each January on data to the previous December), one score on the test (fit at TC_TEST_END, 2015Q1 ..
-    TC_TEST_LAST)."""
+    TC_TEST_LAST). Initial states from published data only (factors.initial_state); scoring 'exact' (no Monte
+    Carlo: every gate cell's R² is the exact one, its MC standard error 0) or 'mc' (the frozen record's draws)."""
     grid = cq.COMPLETION_W_GRID
     val_rows = []
     first, last = (pd.Period(q, "Q") for q in cq.TC_VALIDATION)
@@ -614,7 +770,7 @@ def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick:
         end = f"{year - 1}Q4"                            # the January refit on data to the previous December
         m = F.fit(Q, end, anchors="train_end", P=P, seed=seed)
         qs = pd.period_range(f"{year}Q1", f"{year}Q4", freq="Q")
-        val_rows += tc_block(m, Q, qs[::2] if quick else qs, grid, seed=seed, n=n)
+        val_rows += tc_block(m, Q, qs[::2] if quick else qs, grid, seed=seed, n=n, scoring=scoring)
     V = pd.DataFrame(val_rows)
     V["rel"] = V["crps"] / V["crps_u"].where(V["crps_u"] > 0)
     e1 = V["cls"].isin(F.E1_CLASSES)
@@ -639,7 +795,7 @@ def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick:
     qs = pd.period_range(pd.Period(cq.TC_TEST_END, "Q") + 1, pd.Period(cq.TC_TEST_LAST, "Q"), freq="Q")
     if quick:
         qs = qs[::6]
-    T = pd.DataFrame(tc_block(m, Q, qs, (w_star,), regimes=(adopt,), seed=seed, n=n))
+    T = pd.DataFrame(tc_block(m, Q, qs, (w_star,), regimes=(adopt,), seed=seed, n=n, scoring=scoring))
     metrics = {}
     for pat, g in T.groupby("pattern"):
         per = {}
@@ -650,6 +806,7 @@ def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick:
         metrics[pat] = per
     gate_f = {f: v["r2_vs_uncond"] for f, v in metrics.get("b", {}).items() if v["cls"] == "E1"}
     gate = bool(all(v >= -0.02 for v in gate_f.values() if np.isfinite(v)))
+    mc_se = {f: (0.0 if scoring == "exact" else None) for f in gate_f}
     vsum = {f"w={w:g}": float(v) for w, v in sel.items()}
     return {"validation": "yearly refits (each Q4 to the previous year) scoring the next four quarters, "
                           f"{cq.TC_VALIDATION[0]}..{cq.TC_VALIDATION[1]}", "test_end": cq.TC_TEST_END,
@@ -658,8 +815,11 @@ def tc(Q: pd.DataFrame, P: pd.DataFrame, seed: int, n: int = cq.TC_DRAWS, quick:
                           "by_w": vsum, "completion_w": w_star,
                           "regime_cov": {"zlb_E1_rel_crps_off": z_off, "zlb_E1_rel_crps_on": z_on,
                                          "loss_elsewhere": loss, "adopted": adopt}},
+            "scoring": {"method": scoring, "zh": "精确高斯矩（无蒙特卡洛）" if scoring == "exact" else
+                        f"每个起点 {n} 次随机抽样的均值（条件与无条件用独立的随机流）",
+                        "information": "published (factors.initial_state: only data published by the origin's start)"},
             "test": metrics, "gate": {"rule": "pattern (b): every E1 field's completion R² >= -0.02",
-                                      "E1_r2": gate_f, "pass": gate},
+                                      "E1_r2": gate_f, "mc_se": mc_se, "pass": gate},
             "pass": gate}
 
 
@@ -719,6 +879,13 @@ def tf_fit(Q, P, end: str, seed: int, n: int, al_cls=None, alt: bool = True) -> 
         eqc = _asset_paths(al, rc, ic, Q, origin, n, seed) if al is not None else None
         out["ppc_alt_shadow_censored"] = ppc(path_stats(rc, ic, Q, P, origin, eqc), hist)
         out["fit_alt_shadow_censored"] = _fit_summary(mc)
+        # §15 Q5: the bounded (logit) scales against P3's log(level - lo), decided in T-F (F6); everything else equal
+        ml = F.fit(Q, end, anchors=mode, P=P, seed=seed, transform="log")
+        il = ml.initial_state(Q, origin)
+        rl = F.simulate(ml, il, cq.TF_QUARTERS, n_paths=n, seed=seed)
+        eql = _asset_paths(al, rl, il, Q, origin, n, seed) if al is not None else None
+        out["ppc_alt_transform_log"] = ppc(path_stats(rl, il, Q, P, origin, eql), hist)
+        out["fit_alt_transform_log"] = _fit_summary(ml)
         out["F1"] = f1(m, init, Q, n, seed)
         if al is not None:
             out["F9"] = f9(m, init, Q, al, n, seed)
@@ -732,8 +899,9 @@ HISTORY_CACHE: dict = {}
 
 def _fit_summary(m: F.FactorModel) -> dict:
     keep = ("sample", "T", "lambda", "nu", "logml", "rejected_draws", "rejection_rate", "max_root_mean",
-            "steady_state", "zlb_quarters", "cpi_weights", "satellites", "satellites_excluded", "sat_cov",
-            "smallest_weights", "anchors")
+            "cycle_root_mean", "root_limit", "draw_fallbacks", "transform", "cycle_center", "cycle_shift_mean",
+            "pool_winsorized", "steady_state", "zlb_quarters", "cpi_weights", "satellites", "satellites_excluded",
+            "sat_cov", "smallest_weights", "anchors")
     out = {k: m.info.get(k) for k in keep}
     sh = pd.Series(m.core.Y[:, F.IDX["rff"]] + 0.0, index=m.core.dates)
     miss = m.core.missing[:, F.IDX["rff"]]
@@ -774,6 +942,13 @@ def _cycle_choice(tf: dict) -> dict:
     return {"per_fit": per, "total": tot, "winner": "cprime" if tot["cprime"] >= tot["innov8"] else "innov8"}
 
 
+def identity() -> dict:
+    """The content identity of what T-F and T-C are computed from (qmodel.spec): the code closure of this module and
+    the stack's input files. qmodel.json stores it; the stored-results test compares it with today's."""
+    from . import spec
+    return spec.stack_identity(entries=("scenariolab.qmodel.factor_checks",))
+
+
 def run(ctx=None, quick: bool = False, seed: int = cq.TF_SEED, write: bool = True) -> dict:
     """T-F and T-C; writes the factor-layer section of data/results/qmodel.json (other sections are kept)."""
     from ..data import panel as monthly_panel
@@ -795,8 +970,8 @@ def run(ctx=None, quick: bool = False, seed: int = cq.TF_SEED, write: bool = Tru
         tf["F8"] = f8(Q, roll, 1000, seed)
     tf["summary"] = _summary_line(tf)
     tf["cycle_choice"] = _cycle_choice(tf)
-    out = {"version": F.VERSION, "created": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"), "quick": quick,
-           "seed": seed, "T_F": tf, "T_C": tc(Q, P, seed, n=200 if quick else cq.TC_DRAWS, quick=quick),
+    out = {"version": F.VERSION, "identity": identity(), "created": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M"),
+           "quick": quick, "seed": seed, "T_F": tf, "T_C": tc(Q, P, seed, n=200 if quick else cq.TC_DRAWS, quick=quick),
            "policy": {end: policy.summary(policy.fit(Q, end)) for end in cq.TF_ENDS},
            "notes": ["只给出通过/未通过，不作为关卡（§14 P3）；冻结的预注册记录在 P5。",
                      "历史值按设计与批评的定义重算；13 年统计用不重叠窗口。"]}
