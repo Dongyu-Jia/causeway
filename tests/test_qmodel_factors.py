@@ -366,6 +366,7 @@ def test_usd_is_held_at_no_change_when_unstated(model, init):
     assert np.max(np.abs(res2.x["d_usd"][:, 0] - 3.0)) < 1e-8
 
 
+@needs_qpanel
 def test_the_dollar_hold_ignores_non_finite_paths(model, init):
     """The hold subtracts the cross-path mean: a non-finite path must not turn every path's dollar into NaN."""
     res = F.simulate(model, init, 4, n_paths=200, seed=3, usd_hold=False)

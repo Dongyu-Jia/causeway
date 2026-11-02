@@ -467,6 +467,19 @@ def test_nothing_evaluated_lists_what_is_missing(env):
     assert any("已预注册（2026-11-05）" in r for r in st["reasons"]) and any("补全技能" in r for r in st["reasons"])
 
 
+def test_a_records_status_entries_are_not_evaluations(env):
+    """P5 appends a 'status' entry (and notes) to the T-S record while T-S is not evaluable: they are snapshots, not
+    results, so the gate stays not_evaluated instead of reading them as an invalid result."""
+    rec = json.loads(json.dumps(TS_RECORD))
+    rec["results"] = [{"n": 1, "kind": "status", "result": {"evaluable": False, "switch": False}},
+                      {"n": 2, "kind": "note", "result": {"text": "a disclosure"}}]
+    env["record"](rec)
+    env["tf"]()
+    SW.clear_cache()
+    st = SW.state(env["res"])
+    assert st["status"] == "not_evaluated" and st["quarterly"] is False
+
+
 # ================================================================ endpoint, CLI, build hook
 
 def test_the_endpoint_and_the_sets_list_show_the_switch(env):

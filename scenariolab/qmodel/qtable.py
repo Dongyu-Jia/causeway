@@ -84,6 +84,10 @@ CQ_KEYS = ("anchors", "announced", "constraints", "valuation", "regime")
 CONSTRAINT_KINDS = ("sum", "mean", "yoy", "level", "range")
 YOY_VARS = {"s_cpi_yoy": "cpi_yoy", "s_core_yoy": "core_yoy", "d_core": "core_yoy"}   # y/y has a CPI observable only
 LEVEL_VARS = {"s_ff": "ff", "s_unrate": "unrate", "s_cpi_yoy": "cpi_yoy", "s_core_yoy": "core_yoy"}
+# Appendix B: a 'level' constraint written on a change field means that field's level (kind level on d_ff = the policy
+# rate's level, not a change of that size); its range is checked against the level's own statistics row
+LEVEL_OF_CHANGE = {"d_ff": "ff", "d_unrate": "unrate", "d_y10": "y10", "d_spread": "spread", "d_gz": "gz", "d_usd": "usd"}
+LEVEL_STAT = {"d_ff": "s_ff", "d_unrate": "s_unrate", "d_y10": "s_y10", "d_spread": "s_spread", "d_gz": "s_gz"}
 EVENT_TEXT_MAX = 200
 NOTE_MAX = 200
 RANGE_WIDEN = 1.5                       # §7.3: beyond 1.5 x the historical range
@@ -210,6 +214,7 @@ MSG = {
     "values_len": "预告路径 {f}：quarters 与 values 的长度不同",
     "kind": "约束的 kind 必须是 sum / mean / yoy / level / range",
     "yoy": "同比约束只对 CPI 同比与核心 CPI 同比有观测（s_cpi_yoy、s_core_yoy、d_core）：{f} 不能写同比",
+    "level_change": "{zh}是变化量，没有对应的水平量：水平约束请写政策利率、失业率、10 年期收益率、信用利差或美元",
     "no_value": "约束必须写 value，或 min / max",
     "range_kind": "range 约束必须写 min 或 max",
     "regime_label": "体制请求的标签必须是 {labels} 之一（写的是 {v!r}）",
@@ -919,6 +924,9 @@ def _constraints(ctx: _Ctx, items, H: int) -> list:
         if kind == "yoy" and f not in YOY_VARS:
             ctx.refuse("R-FORM", MSG["yoy"].format(f=f), where, path, "form", field=f)
             continue
+        if kind == "level" and f.startswith("d_") and f not in LEVEL_OF_CHANGE:
+            ctx.refuse("R-FORM", MSG["level_change"].format(zh=ctx.name(f)), where, path, "form", field=f)
+            continue
         if not ctx.numbers and ctx.endo(f) in NUMBER_CLASSES:
             ctx.refuse("R-N3", MSG["n3"].format(zh=ctx.name(f)), where, path, field=f)
             continue
@@ -956,8 +964,11 @@ def _constraints(ctx: _Ctx, items, H: int) -> list:
         ok = True
         for k in ("value", "min", "max"):
             if k in item:
-                item[k], ok = ctx.ranged(f, item[k], where, path, scale=scale,
-                                         stat=YOY_RANGE.get(f) if kind == "yoy" else None)
+                stat = YOY_RANGE.get(f) if kind == "yoy" else (LEVEL_STAT.get(f, "-") if kind == "level" and f in
+                                                                    LEVEL_OF_CHANGE else None)
+                if stat == "-":                    # a level with no statistics row of its own: no range rule
+                    continue
+                item[k], ok = ctx.ranged(f, item[k], where, path, scale=scale, stat=stat)
                 if not ok:
                     break
         if ok:
@@ -1398,6 +1409,8 @@ def constraints(qt: dict, *, stack=None, Q=None, train_end: str | None = None, x
         kind, f, qs = c["kind"], c["field"], tuple(c["quarters"])
         if kind == "yoy":
             var, agg = YOY_VARS[f], "each"
+        elif kind == "level" and f in LEVEL_OF_CHANGE:
+            var, agg = LEVEL_OF_CHANGE[f], "each"
         elif f in LEVEL_VARS:
             var, agg = LEVEL_VARS[f], {"sum": "sum", "mean": "mean"}.get(kind, "each")
             if var == "ff" and agg != "each":

@@ -763,10 +763,12 @@ def test_core_view_labels_are_the_instruments_months():
 
 @needs_qpanel
 def test_the_qtable_reader_refuses_malformed_entries(stack):
-    """/api/q/run's reader: non-finite or non-numeric values, min > max, sd <= 0, unknown constraint kinds, duplicate
-    rows and non-integer quarters are refused (Chinese RolloutError -> 400), never run as NaN or degenerate jobs; a
-    'level' constraint on a change field means that field's level."""
-    row = {"q": 1, "x": {"d_ff": {"value": -0.25, "src": "stated", "quote": "降息"}}, "fc": {"stance": "未说明"}}
+    """/api/q/run's reader (P6's qtable.validate): non-finite or non-numeric values, min > max, sd <= 0, unknown
+    constraint kinds and duplicate rows are refused (Chinese RolloutError -> 400), never run as NaN or degenerate jobs;
+    a quarter written as a numeric string is read as that integer; a 'level' constraint on a change field means that
+    field's level."""
+    row = {"q": 1, "x": {"d_ff": {"value": -0.25, "src": "stated", "quote": "降息25个基点"}}, "fc": {"stance": "未说明"}}
+    nar = "央行降息25个基点，第二季政策利率回到4%。"
     base = {"schema": "qtable/1", "n_quarters": 2, "rows": [row]}
     bad = {
         "value NaN string": {**base, "rows": [{**row, "x": {"d_ff": {"value": "NaN"}}}]},
@@ -777,20 +779,23 @@ def test_the_qtable_reader_refuses_malformed_entries(stack):
         "kind median": {**base, "c_q": {"constraints": [{"kind": "median", "field": "d_unrate", "quarters": [1],
                                                          "value": 3}]}},
         "duplicate q": {**base, "rows": [row, {**row, "x": {"d_ff": {"value": 0.5}}}]},
-        "q string": {**base, "rows": [{**row, "q": "1"}]},
-        "n_quarters string": {**base, "n_quarters": "2"},
         "x not an object": {**base, "rows": [{**row, "x": [1, 2]}]},
         "level on a change without a level": {**base, "c_q": {"constraints": [{"kind": "level", "field": "d_epu",
                                                                                "quarters": [1], "value": 1.0}]}},
         "constraint field unknown": {**base, "c_q": {"constraints": [{"kind": "sum", "field": "d_nope",
                                                                       "quarters": [1], "value": 1.0}]}},
     }
+    assert R.from_qtable(base, stack, narrative=nar)["H"] == 2                 # the base itself is valid
     for name, qt in bad.items():
         with pytest.raises(R.RolloutError):
-            R.from_qtable(qt, stack)
+            R.from_qtable(qt, stack, narrative=nar)
             pytest.fail(name)
-    lv = R.from_qtable({**base, "c_q": {"constraints": [{"kind": "level", "field": "d_ff", "quarters": [2],
-                                                          "value": 4.0}]}}, stack)
+    for qt in ({**base, "rows": [{**row, "q": "1"}]}, {**base, "n_quarters": "2"}):   # numeric strings read as integers
+        rd = R.from_qtable(qt, stack, narrative=nar)
+        assert rd["H"] == 2 and [s.quarters for s in rd["statements"] if s.var == "d_ff"] == [(1,)]
+    lv = R.from_qtable({**base, "c_q": {"constraints": [{"kind": "level", "field": "d_ff", "quarters": [2], "value": 4.0,
+                                                          "src": "stated", "quote": "政策利率回到4%"}]}},
+                       stack, narrative=nar)
     assert [(s.var, s.quarters, s.value) for s in lv["statements"] if s.var == "ff"] == [("ff", (2,), 4.0)]
 
 

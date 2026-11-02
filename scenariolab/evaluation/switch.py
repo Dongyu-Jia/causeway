@@ -969,8 +969,12 @@ def _candidates(results_dir: Path) -> list[dict]:
         rec = ts_record()
     except Exception:  # noqa: BLE001 - an unreadable record shows in the evaluation tab's G section
         rec = None
-    if rec and rec.get("results"):
-        out.append({"kind": "record", "id": rec["id"], "result": rec["results"][-1], "record": rec})
+    # a record's status snapshots and disclosure notes (P5 appends a 'status' entry while T-S is not evaluable) are
+    # not evaluations: only the other entries can switch anything
+    evals = [x for x in ((rec or {}).get("results") or []) if not (isinstance(x, dict) and x.get("kind") in
+                                                                    ("status", "note"))]
+    if rec and evals:
+        out.append({"kind": "record", "id": rec["id"], "result": evals[-1], "record": rec})
     d = _load(Path(results_dir) / GATE_FILE)
     if isinstance(d, dict) and d:
         out.append({"kind": "file", "id": GATE_FILE, "result": d, "record": rec})

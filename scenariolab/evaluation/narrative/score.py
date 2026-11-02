@@ -195,7 +195,10 @@ def check_context(train_end: str, origin: str, *, Q: pd.DataFrame | None = None,
     out = {}
     rolls = []
     for q_, p_ in ((Q, P), (Qt, Pt)):
-        st = R.fit_stack(train_end, origin=origin, anchors="train_end", seed=0, n_boot=n_boot, Q=q_, P=p_)
+        # an episode's origin is in the past: both fits read only what was published by its start (the truncated
+        # panel ends at the origin, where 'auto' would read it as today's row and take every value it holds)
+        st = R.fit_stack(train_end, origin=origin, anchors="train_end", seed=0, n_boot=n_boot, Q=q_, P=p_,
+                         information="published")
         rolls.append(R.run_path(st, [], [], H=H, n_paths=n_paths, seed=seed, cma="historical", states=False,
                                 mode="test"))
     a, b = rolls
@@ -223,7 +226,8 @@ class Episode:
         self.seed, self.n_paths, self.cmas = int(seed), int(n_paths), tuple(cmas)
         self.quarters = window_quarters(self.origin, self.H)
         t0 = time.perf_counter()
-        self.stack = R.fit_stack(self.train_end, origin=self.origin, anchors="train_end", seed=0, n_boot=n_boot, Q=Q)
+        self.stack = R.fit_stack(self.train_end, origin=self.origin, anchors="train_end", seed=0, n_boot=n_boot, Q=Q,
+                                 information="published")
         self.fit_s = round(time.perf_counter() - t0, 2)
         if self.synth:
             self.realized = np.asarray(entry["truth"]["assets"], float)

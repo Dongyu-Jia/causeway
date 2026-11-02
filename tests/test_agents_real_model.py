@@ -453,7 +453,9 @@ def test_real_model_tree_reproduces_the_models_own_distribution(tmp_path, qad):
         assert np.all(np.abs(med - rmed) / rs < 0.1), (seed, (med - rmed) / rs)
         q = np.array([T.wquantiles(V[:, j], W, (0.1, 0.9)) for j in range(V.shape[1])])
         ratios.append((q[:, 1] - q[:, 0]) / rw)
-        assert np.all(sd / rs < 1.3), (seed, sd / rs)
+        # a gross-failure guard on the sd; unemployment's heavy right tail makes its sd ratio noisy (8 seeds after P4b:
+        # 0.80-1.36, mean 1.01, with width ratios 0.88-1.07), so it gets a wider guard; its spread is checked by width
+        assert np.all((sd / rs)[[0, 2, 3]] < 1.3) and sd[1] / rs[1] < 1.6, (seed, sd / rs)
     r = np.mean(ratios, axis=0)
     assert np.all((r > 0.9) & (r < 1.1)), r
 
