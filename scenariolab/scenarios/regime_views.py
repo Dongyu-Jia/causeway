@@ -21,8 +21,11 @@ studies), never typed into a warning.
 
 The readout (detail["regimes"]) labels each simulated path with the classifier (the panel history
 prepended), next to the historical months it was drawn from and the engine's own unconditional reference
-run over the same months, with notes generated from the numbers (N1-N4). It only reads SimOutput arrays,
-so no simulated number depends on it.
+run over the same months, with notes generated from the numbers (N1-N5). It only reads SimOutput arrays,
+so no simulated number depends on it. W7 and W11 count drawn contraction months; how long the simulated
+contractions run is only known after the simulation, so the readout measures it per phase
+(long_contraction) and N5 names a contraction request whose runs outlast history more often than the
+reference's.
 
 Does not import runner (runner imports this module; the reference run is passed in).
 """
@@ -69,6 +72,8 @@ NOTE_REQUEST_GAP = 0.10      # N1: requested - drawn
 NOTE_CATCH_UP_GAP = 0.20     # N2: drawn - simulated
 NOTE_TERM_SHARE = 0.5        # N3: the labels a name's term means hold less than this share of the phase
 CPI_DRIFT_FROM_MONTH = 25    # N4: the reference's CPI y/y from this simulated month on (past today's level)
+NOTE_LONG_RUN_GAP = 0.10     # N5: a contraction request's runs longer than the longest since 1948, above the
+                             # reference's share for the same months by more than this
 # words in scenario and phase names and the labels they mean (N3); a name's own terms apply to its phase,
 # otherwise the scenario name's terms apply to every phase with views
 NAME_TERMS = (("滞胀", ("stagflation",)), ("通缩", ("deflation",)), ("萧条", ("depression",)),
@@ -456,6 +461,29 @@ def episode_stats(contr: np.ndarray, decline: np.ndarray) -> dict:
             "share_severe": float(np.mean(severe)) if n else None}
 
 
+def run_table(contr: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """The contraction runs of (n, T) paths as arrays (path, first month, last month), plus n."""
+    c = np.asarray(contr, bool)
+    n = c.shape[0]
+    pad = np.zeros((n, 1), np.int8)
+    d = np.diff(np.concatenate([pad, c.astype(np.int8), pad], axis=1), axis=1)
+    path, first = np.nonzero(d == 1)           # row-major, so each row's k-th start pairs with its k-th end
+    _, end = np.nonzero(d == -1)
+    return path, first, end - 1, n
+
+
+def long_runs(table: tuple, sl: slice) -> dict:
+    """Of the contraction runs that overlap months `sl`: the share of paths with one longer than the longest
+    since 1948 (`paths`), the share of those runs that are (`runs`, None without a run) and their mean length."""
+    path, first, last, n = table
+    hit = (last >= sl.start) & (first < sl.stop)
+    lengths = (last - first + 1)[hit]
+    long = lengths > _longest()
+    return {"paths": float(np.unique(path[hit][long]).size / n) if n else 0.0,
+            "runs": float(long.mean()) if lengths.size else None,
+            "length_mean": float(lengths.mean()) if lengths.size else None}
+
+
 def history_episodes(frame: pd.DataFrame, horizon: int = config.HORIZON_MONTHS) -> dict:
     """The month database's contraction episodes on the same scale: per `horizon` months, mean length,
     how many were longer than the longest since 1948 and how many were deep."""
@@ -496,9 +524,11 @@ def readout(ctx, sim, spec: dict, reference: dict, clipped=()) -> dict:
     ref = reference["regimes"]
     ref_lab, ref_contr = ref["label"][:, 1:], ref["contraction"][:, 1:]
     T = lab.shape[1]
+    runs_sim, runs_ref = run_table(contr), run_table(ref_contr)
 
     def ref_block(sl: slice) -> dict:
-        return {"simulated": _shares(ref_lab[:, sl]), "paths_with_contraction": _any(ref_contr[:, sl])}
+        return {"simulated": _shares(ref_lab[:, sl]), "paths_with_contraction": _any(ref_contr[:, sl]),
+                "long_contraction": long_runs(runs_ref, sl)}
 
     phases, start = [], 0
     for k, ph in enumerate(spec["phases"], start=1):
@@ -511,13 +541,15 @@ def readout(ctx, sim, spec: dict, reference: dict, clipped=()) -> dict:
                        "simulated": sim_mix, "simulated_rt": _shares(lab_rt[:, sl]), "drawn": _shares(drawn[:, sl]),
                        "dominant": _dominant(sim_mix),
                        "paths_with_contraction": _any(contr[:, sl]), "contraction_share": float(contr[:, sl].mean()),
+                       "long_contraction": long_runs(runs_sim, sl),
                        "reference": ref_block(sl), "history_base_rate": history_base_rate(frame, m)})
         start += m
     windows = {}
     for name, sl in _window_slices(T).items():
         windows[name] = {"simulated": _shares(lab[:, sl]), "simulated_rt": _shares(lab_rt[:, sl]),
                          "drawn": _shares(drawn[:, sl]), "paths_with_contraction": _any(contr[:, sl]),
-                         "contraction_share": float(contr[:, sl].mean()), "reference": ref_block(sl)}
+                         "contraction_share": float(contr[:, sl].mean()), "long_contraction": long_runs(runs_sim, sl),
+                         "reference": ref_block(sl)}
     years = [{"year": y + 1, "simulated": _shares(lab[:, 12 * y:12 * y + 12]),
               "paths_with_contraction": _any(contr[:, 12 * y:12 * y + 12])} for y in range(math.ceil(T / 12))]
     episodes = {**episode_stats(contr, r["episode_ip_decline"][:, 1:]),
@@ -558,6 +590,18 @@ def readout(ctx, sim, spec: dict, reference: dict, clipped=()) -> dict:
             if share < NOTE_TERM_SHARE:
                 n3.append(f"阶段「{row['name']}」：{where}里有“{term}”，但模拟路径的这一阶段里"
                           f"{'、'.join(NAMES[i] for i in ids)}合计只占 {share:.0%}")
+    n5 = []
+    hist = episodes["history"]
+    for row in phases:
+        asked = [rid for rid, s in (row["requested"] or {}).items() if rid in CONTRACTION_IDS and s > 0]
+        lc, rc = row["long_contraction"], row["reference"]["long_contraction"]
+        if not asked or lc["runs"] is None or lc["runs"] - (rc["runs"] or 0.0) <= NOTE_LONG_RUN_GAP:
+            continue
+        n5.append(f"阶段「{row['name']}」要求多抽{'、'.join(NAMES[i] for i in asked)}月份：模拟路径里与这一阶段重叠的收缩有 "
+                  f"{lc['runs']:.0%} 长于 {_longest()} 个月（{lc['paths']:.0%} 的路径有这样一次），引擎无条件抽样同一时段是 "
+                  f"{rc['runs'] or 0.0:.0%}（{rc['paths']:.0%}），{_db_year(frame)} 年以来的 {hist['episodes']} 次收缩里长于 "
+                  f"{_longest()} 个月的有 {hist['longer_than_18m']} 次：收缩区块首尾相接，造出比历史上任何一次都更长的收缩。"
+                  "可以把收缩月份压到 12 个左右、再接一个复苏阶段，或降低要求")
     cpi = np.asarray(reference["sim"].macro["cpi_yoy"], float)
     tail = cpi[:, CPI_DRIFT_FROM_MONTH:] if cpi.shape[1] > CPI_DRIFT_FROM_MONTH else cpi[:, 1:]
     ref_hi = float((tail > regimes.PARAMS["high_inflation_pct"]).mean())
@@ -565,7 +609,7 @@ def readout(ctx, sim, spec: dict, reference: dict, clipped=()) -> dict:
     n4 = [f"引擎无条件抽样里 CPI 同比高于 {regimes.PARAMS['high_inflation_pct']:g}% 的月份占 {ref_hi:.0%}"
           f"（{_db_year(frame)} 年以来的历史为 {hist_hi:.0%}），所以模拟路径里“通胀”的占比系统性偏高；"
           "比较时请看同一时段的“引擎无条件”列"]
-    out["notes"] = n1 + n2 + n3 + n4
+    out["notes"] = n1 + n2 + n3 + n5 + n4
     return out
 
 

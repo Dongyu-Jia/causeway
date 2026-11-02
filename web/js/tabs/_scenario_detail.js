@@ -1528,13 +1528,19 @@ function calibrationSection(d, later) {
     ];
     const notes = c.override_notes || {};
     const ovDrift = asDict(c.overrides?.factor_drift, 'factor');
-    const mapCard = card({ title: '计算结果怎么进入引擎', sub: '需求效应变成熵池视图（决定抽哪些历史月份），没有历史先例的分配效应变成有上限的因子漂移；资产价格仍全部由引擎生成。' },
+    // the labour share is a drift only while the transmission holds it (calibrate.distribution_views); under
+    // today's model it is a view like the demand effects, and only the direct job losses are a drift
+    const lsDrift = Object.prototype.hasOwnProperty.call(ovDrift, 'labor_share');
+    const mapSub = lsDrift
+      ? '需求效应变成熵池视图（决定抽哪些历史月份），没有历史先例的分配效应（白领失业、劳动收入占比）变成有上限的因子漂移；资产价格仍全部由引擎生成。'
+      : '需求效应和劳动收入占比的变化变成熵池视图（决定抽哪些历史月份；劳动收入占比不在今天的传导模型里，给它加漂移不改变任何资产），只有没有历史先例的白领失业变成有上限的失业率漂移；资产价格仍全部由引擎生成。';
+    const mapCard = card({ title: '计算结果怎么进入引擎', sub: mapSub },
       h('ul', { class: 'list' }, (c.engine_mapping || []).map(t => h('li', {}, t))),
       (c.views || []).length ? h('div', {}, h('div', { class: 'scenarios-sub' }, '写入该阶段的视图'),
         viewsTable(c.views.map(v => ({ v })), null, { numbers: false })) : null,
       Object.keys(ovDrift).length ? h('div', {}, h('div', { class: 'scenarios-sub' }, '写入该阶段的因子漂移'),
         h('ul', { class: 'scenarios-ovr' }, Object.entries(ovDrift).map(([f, x]) => h('li', {}, `${factorLabel(f)} ${driftText(f, x)}${notes[f] ? `：${notes[f]}` : ''}`)))) : null);
-    const checkCard = card({ title: '计算器假设 vs 引擎模拟', sub: '同一阶段里引擎实际模拟出来的数值（含抽到的历史月份自带的背景波动）；两者接近说明视图和漂移把计算器的结论落实了。' },
+    const checkCard = card({ title: '计算器假设 vs 引擎模拟', sub: '同一阶段里引擎实际模拟出来的数值（含抽到的历史月份自带的背景波动）；两者接近说明视图和漂移把计算器的结论落实了。股票财富只是计算器的输入：引擎的股价来自抽中的历史月份，劳动收入、白领工资这类视图挑中的月份可能带着不同的股价路径，所以这一行的差距要单独看。' },
       fitTable(ui.table([
         { key: 'item', label: '指标', wrap: true },
         { key: 'assumed', label: '计算器假设' },
@@ -1662,8 +1668,17 @@ function regimeSection(d, later) {
     { value: (x) => x.p.drawn, label: '抽中月份', left: true, wrap: true, fmt: mixCell },
     { value: (x) => x.p.simulated, label: '模拟路径', left: true, wrap: true, fmt: mixCell },
     { value: (x) => x.p.paths_with_contraction, label: '出现收缩的路径', fmt: (v) => pct(v, 0) },
+    // contraction runs overlapping the phase that outlast the longest since 1948 (readout long_contraction):
+    // the share of paths with one, and of the overlapping runs the share that long (N5 compares the latter)
+    { value: (x) => x.p.long_contraction, label: '长于 18 个月的收缩', wrap: true,
+      fmt: (lc) => (lc && isNum(lc.paths)
+        ? h('div', { class: 'scenarios-rg-cell', title: '与这一阶段重叠、比 1948 年以来最长的一次收缩（18 个月）还长的收缩：上面是有这样一次收缩的路径占比，下面是与这一阶段重叠的收缩段里这么长的占比' },
+          `路径 ${pct(lc.paths, 0)}`, h('div', { class: 'scenarios-rg-sub' }, `收缩段的 ${isNum(lc.runs) ? pct(lc.runs, 0) : '—'}`))
+        : '—') },
     { value: (x) => x.p.reference, label: '引擎无条件（同一时段）', left: true, wrap: true,
-      fmt: (ref) => h('div', { class: 'scenarios-rg-cell' }, mixCell(ref?.simulated), h('div', { class: 'scenarios-rg-sub' }, `出现收缩的路径 ${pct(ref?.paths_with_contraction, 0)}`)) },
+      fmt: (ref) => h('div', { class: 'scenarios-rg-cell' }, mixCell(ref?.simulated), h('div', { class: 'scenarios-rg-sub' },
+        `出现收缩的路径 ${pct(ref?.paths_with_contraction, 0)}`
+        + (isNum(ref?.long_contraction?.runs) ? `；长于 18 个月：路径 ${pct(ref.long_contraction.paths, 0)}、收缩段的 ${pct(ref.long_contraction.runs, 0)}` : ''))) },
     { value: (x) => x.p.history_base_rate, label: '历史基准',
       fmt: (v, x) => h('span', { title: `1973 年以来的历史里，每个 ${x.p.months} 个月窗口中含收缩月份的窗口占比` }, pct(v, 0)) },
   ], phases.map((p, k) => ({ p, k }))), 'md');

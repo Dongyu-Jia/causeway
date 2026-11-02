@@ -496,7 +496,10 @@ def test_rg_columns_change_no_month_and_no_simulated_number(ctx, monkeypatch):
     specs = {s["id"]: s for s in library.resolved_specs(ctx)}
     # the regime readout switch, once run_spec has one, must not change a simulated number either
     switch = [True, False] if hasattr(runner, "REGIME_READOUT") else [None]
-    for sid in ("baseline", "stagflation", "financial_crisis"):
+    # specs without a regime request (stagflation and oil_war ask for regime months, which need the rg_ columns)
+    assert not any("regime" in p for sid in ("baseline", "japanification", "financial_crisis")
+                   for p in specs[sid]["phases"])
+    for sid in ("baseline", "japanification", "financial_crisis"):
         seed = library.seed_for(sid)
         _, ref = runner.run_spec(bare, specs[sid], n_paths=600, seed=seed, attribution=False)
         for on in switch:

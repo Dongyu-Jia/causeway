@@ -25,18 +25,22 @@ How the result enters the engine:
     blocks (+10.4 pp in April 2020) are by far the most extreme even at their
     0.25 prior weight (config.RARE_MONTHS), so without a bound on the drawn
     months' variance a few paths would replay the lockdown (UNRATE_VOL_MULT);
-  * the direct distribution effects (job losses from displacement, the
-    labour-share shift) have no historical analog, so they are added as
-    bounded factor drifts on top of the drawn months. A view of zero on the
-    drawn months' labour-share trend (f_labor_share) goes with the drift, for
-    the same reason as the Okun view: the months these views select (mostly the
-    2010s) bring a labour-share decline of their own (-0.2% to -0.65% a year in
-    the built-in specs), which on top of the drift would count the shift twice.
-    The labour share is a tracked macro path either way; it moves asset returns
-    directly only while it is a factor of today's transmission. The release-dated
-    labour share does not improve the out-of-sample fit and the walk-forward may
-    drop it (FACTORS_DESIGN C3); transmission_check() says which, the validation
-    warns (W13) and the explanation carries a caveat.
+  * the direct job losses from displacement have no historical analog, so they
+    are added as a bounded unemployment drift on top of the drawn months;
+  * the labour-share shift depends on the active transmission (model_spec):
+    - labour share in it (the base model): a bounded labour-share drift, with a
+      view of zero on the drawn months' labour-share trend (f_labor_share), for
+      the same reason as the Okun view: the months these views select (mostly the
+      2010s) bring a labour-share decline of their own (-0.2% to -0.65% a year in
+      the built-in specs), which on top of the drift would count the shift twice;
+    - labour share not in it (the release-dated labour share does not improve the
+      out-of-sample fit, FACTORS_DESIGN C3, and model F drops it): a drift would
+      move only the tracked labour-share path and no asset (validation warning
+      W13), so the shift becomes the f_labor_share view's mean_annual instead. The
+      phase then draws months whose labour share fell at that pace (history has
+      them: -1% to -1.6% a year is inside the support of a phase's block means),
+      and those months carry their own factors into the asset returns.
+    transmission_check() says which, and the explanation carries a caveat.
 """
 from __future__ import annotations
 
@@ -104,8 +108,9 @@ DEFAULT_BASE = {"ip_yoy": 1.8, "services_yoy": 3.2}
 UNRATE_VOL_MULT = 0.62
 
 
-LABOR_SHARE_CAVEAT = ("劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²）：这里的劳动收入占比漂移只改变模拟的"
-                      "劳动收入占比路径，不直接改变资产回报；资产受到的影响来自需求视图挑中的历史月份和失业率的变化。")
+LABOR_SHARE_CAVEAT = ("劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²）：给它加漂移只会改变模拟的劳动收入"
+                      "占比路径，不改变任何资产回报，所以这里不加漂移，而是把计算器的劳动收入占比变化写成劳动收入占比月度变化"
+                      "的视图，挑选劳动收入占比按这个速度下降的历史月份；资产受到的影响来自这些月份、需求视图挑中的月份和失业率的变化。")
 
 
 def labor_share_in_transmission(spec: ModelSpec | None) -> bool:
@@ -201,8 +206,10 @@ def distribution_views(params: dict | None = None, base: dict | None = None,
     in percent (library.py passes today's recent averages).
     explanation["overrides"]["factor_drift"] holds the direct distribution
     effects (annual, in factor units: pp for unrate, log for labor_share).
-    model_spec: the active transmission; when the labour share is not in it, the
-    caveats say that its drift moves only the labour-share path (None: no caveat).
+    model_spec: the active transmission. When the labour share is not in it, the
+    labour-share shift is the f_labor_share view's mean_annual instead of a drift
+    (a drift would move no asset, W13) and the caveats say so (None: the base
+    model's drift, no caveat).
     """
     imp = distribution_impact(params)
     b = {**DEFAULT_BASE, **{k: float(v) for k, v in (base or {}).items() if k in DEFAULT_BASE}}
@@ -213,6 +220,9 @@ def distribution_views(params: dict | None = None, base: dict | None = None,
     unrate_drift = imp["unemployment_direct_pp"] / years
     okun_rate = imp["unemployment_okun_pp"] / years
     ls_drift = imp["labor_share_log_change"] / years
+    ls_view = model_spec is not None and not labor_share_in_transmission(model_spec)
+    ls_note = (f"劳动收入 {_pct(imp['labor_income_change'])}、实际 GDP {_pct(imp['real_gdp_change'])}，"
+               f"劳动收入占比累计 {_pct(imp['labor_share_log_change'])}，分摊到 {years:.1f} 年")
     views = [
         {"var": "s_ip_yoy", "mean": round(ip_target, 3),
          "why": f"收入分配计算器：实际增长每年 {growth_pp:+.2f} 个百分点 × 工业产出弹性 {p['ip_beta']:.2f}，"
@@ -223,17 +233,19 @@ def distribution_views(params: dict | None = None, base: dict | None = None,
         {"var": "f_unrate", "mean_annual": round(okun_rate, 4), "vol_mult": UNRATE_VOL_MULT,
          "why": f"收入分配计算器：奥肯部分每年 {okun_rate:+.2f} 个百分点，让抽到的月份不带自己的复苏或衰退趋势；"
                 f"波动约束（{UNRATE_VOL_MULT} 倍历史标准差，即不含 2020 年时的月度波动）排除 2020 年 4 月这类单月 +10 个百分点的封锁月份"},
+        {"var": "f_labor_share", "mean_annual": round(ls_drift, 5), "why": f"收入分配计算器：{ls_note}；劳动收入占比不在"
+                "今天的传导模型里，所以不加漂移，而是挑选劳动收入占比按这个速度下降的历史月份"} if ls_view else
         {"var": "f_labor_share", "mean_annual": 0.0,
          "why": "收入分配计算器：劳动收入占比的变化全部由因子漂移给出，让抽到的月份不带自己的劳动收入占比趋势"
                 "（内置情景里这些月份每年自带约 −0.2% 到 −0.65%），以免重复计算"},
     ]
-    overrides = {"factor_drift": {"unrate": round(unrate_drift, 4), "labor_share": round(ls_drift, 5)}}
-    drift_notes = {
-        "unrate": f"直接失业 {imp['unemployment_direct_pp']:+.2f} 个百分点分摊到 {years:.1f} 年；"
-                  f"奥肯部分（{imp['unemployment_okun_pp']:+.2f}）由失业率月度变化视图约束抽到的历史月份",
-        "labor_share": f"劳动收入 {_pct(imp['labor_income_change'])}、实际 GDP {_pct(imp['real_gdp_change'])}，"
-                       f"劳动收入占比累计 {_pct(imp['labor_share_log_change'])}，分摊到 {years:.1f} 年",
-    }
+    drift = {"unrate": round(unrate_drift, 4)}
+    drift_notes = {"unrate": f"直接失业 {imp['unemployment_direct_pp']:+.2f} 个百分点分摊到 {years:.1f} 年；"
+                             f"奥肯部分（{imp['unemployment_okun_pp']:+.2f}）由失业率月度变化视图约束抽到的历史月份"}
+    if not ls_view:
+        drift["labor_share"] = round(ls_drift, 5)
+        drift_notes["labor_share"] = ls_note
+    overrides = {"factor_drift": drift}
     top = max(imp["groups"], key=lambda g: abs(g["contribution"]))
     text = (
         f"劳动收入冲击使消费变化 {_pct(imp['consumption_change_labor'])}，股票财富变化 "
@@ -259,14 +271,16 @@ def distribution_views(params: dict | None = None, base: dict | None = None,
         "engine_mapping": [
             "需求效应 → 熵池视图：工业产出同比、服务通胀（持续性强的状态变量，决定抽哪些历史月份）",
             "奥肯部分 → 失业率月度变化视图（带波动约束），使抽到的月份的失业率趋势与需求效应一致",
-            "分配的直接效应 → 有界因子漂移：白领失业、劳动收入占比（历史上没有对应月份，叠加在抽到的月份上）；"
-            "同时用劳动收入占比月度变化视图（均值为零）让抽到的月份不带自己的劳动收入占比趋势",
+            *(["白领失业 → 有界因子漂移（历史上没有对应月份，叠加在抽到的月份上）",
+               "劳动收入占比的变化 → 劳动收入占比月度变化视图（均值为计算器的年度变化）：劳动收入占比不在今天的传导模型里，"
+               "漂移只会改变它自己的路径，视图则挑选劳动收入占比按这个速度下降的历史月份"] if ls_view else
+              ["分配的直接效应 → 有界因子漂移：白领失业、劳动收入占比（历史上没有对应月份，叠加在抽到的月份上）；"
+               "同时用劳动收入占比月度变化视图（均值为零）让抽到的月份不带自己的劳动收入占比趋势"]),
         ],
         "caveats": [
             "这是一阶的会计推算，不含乘数、价格和政策反应；只用于设定情景的视图和漂移，所有资产数字仍由引擎从历史月份生成。",
             "财富效应只算股票，不含房产；高收入组的边际消费倾向和持股比例都有较大不确定性。",
+            *([LABOR_SHARE_CAVEAT] if ls_view else []),
         ],
     }
-    if model_spec is not None and not labor_share_in_transmission(model_spec):
-        explanation["caveats"].append(LABOR_SHARE_CAVEAT)
     return views, explanation

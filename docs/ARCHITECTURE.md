@@ -501,11 +501,12 @@ For a phase of n months, B = min(BLOCK_MONTHS, n, T):
    sentiment) carry a variance bound alone (0.62 and 1.0); the f_unrate mean
    views carry vol_mult 0.62 in calm phases (baseline 2, financial_crisis 3,
    the calibrated phases k_shaped 1-2 and agi_boom 2), 1.0 in recessions
-   (financial_crisis 2, oil_war 2) and 0.7 in japanification 1. Three mean
+   (financial_crisis 2, oil_war 2, stagflation 3) and 0.7 in japanification 1. Three mean
    views carry none (ai_bust 1, deglobalization 1, reacceleration 1). Phases
    without a bound still draw the 2020-03..05 blocks at up to about twice the
-   unconditional rate (about 2x in agi_boom 3 and stagflation 1, 1.4-1.8x in
-   ai_bust 1, energy_transition 2, fiscal_dominance 2 and stagflation 2).
+   unconditional rate (about 2x in agi_boom 3, stagflation 1 and oil_war 3, whose
+   f_ip view favours rebound months, 1.4-1.8x in ai_bust 1, energy_transition 2
+   and fiscal_dominance 2; stagflation 2, the tightening, draws them at 0.4x).
 7. **Shrink lambda.** The views as requested must converge and rest on at
    least MIN_ENS = 30 effective months (exp of the entropy of the drawn-month
    frequency) and MIN_EPISODES = 6 effective 12-month episodes (the effective
@@ -734,11 +735,11 @@ phases:                          # <= 8, in time order; the months are padded / 
     regime: {通胀: 0.5}          # optional: shares of macro-regime months among the drawn ones (see below)
     views:                       # <= 12 per phase: entropy-pooling views on MonthDB columns
       - {var: f_oil, mean_annual: 0.10, vol_mult: 1.3, why: "油价每年约 +10% 且波动更大"}
-      - {var: s_cpi_yoy, mean: 3.8}
+      - {var: s_cpi_yoy, mean: 5.0}
       - {var: e_oil_supply, shift_sd: 1.0}
       - {var: f_unrate, vol_mult: 0.62}       # a variance bound alone
     overrides:                   # optional, bounded
-      factor_drift: {unrate: 0.13}            # per year, in the factor's unit
+      factor_drift: {unrate: 0.11}            # per year, in the factor's unit
       asset_drift: {energy: -0.02}            # per year, added to the price return
       resid_scale: 1.2
       r_star: -1.0
@@ -757,7 +758,7 @@ fields and their bounds:
 | Field | Rule |
 |---|---|
 | view `var` | starts with `s_`, `f_`, `e_` or `rg_` and is a MonthDB column with history; anything else is dropped with a warning; a view on a real-time `rg_rt_*` column is dropped with W4 |
-| `regime` | `{id or Chinese alias: share}` (YAML) or `[{id, share, why}]` (LLM form). Ids: the six labels expansion, inflation, deflation, recession, depression, stagflation plus the flags contraction and high_infl; aliases 扩张 / 金发姑娘 / 软着陆, 通胀 / 过热, 通缩 / 物价负增长, 衰退, 萧条 / 深度衰退, 滞胀, 收缩, 高通胀. Each entry becomes a plain view `{var: rg_<id>, mean: share, why: 宏观体制：…}`, placed first, replacing a view on the same column and not counted in the 12-view cap; shares are clipped to 0..1 (listed in `clipped` as `regime.<id>`), and labels summing to more than 1 are rescaled (W3). The clean phase keeps `regime: {id: share}` only when one was asked, so re-validation is idempotent and the 13 built-ins (none uses it) are unchanged. The views are clipped to the block support like any view (衰退 1.0 -> 0.373) |
+| `regime` | `{id or Chinese alias: share}` (YAML) or `[{id, share, why}]` (LLM form). Ids: the six labels expansion, inflation, deflation, recession, depression, stagflation plus the flags contraction and high_infl; aliases 扩张 / 金发姑娘 / 软着陆, 通胀 / 过热, 通缩 / 物价负增长, 衰退, 萧条 / 深度衰退, 滞胀, 收缩, 高通胀. Each entry becomes a plain view `{var: rg_<id>, mean: share, why: 宏观体制：…}`, placed first, replacing a view on the same column and not counted in the 12-view cap; shares are clipped to 0..1 (listed in `clipped` as `regime.<id>`), and labels summing to more than 1 are rescaled (W3). The clean phase keeps `regime: {id: share}` only when one was asked, so re-validation is idempotent. Two built-ins use it (stagflation's 滞胀式衰退: 滞胀 0.65; oil_war's recession phase: 收缩 0.6 and 深度衰退 0, which keeps the 2008-09 and 2020 months out). The views are clipped to the block support like any view (衰退 1.0 -> 0.373) |
 | `mean`, `min`, `max` | clipped to the 2nd-98th percentile of what the phase can average (`pooling.view_support`: means of B-month runs, much narrower than single months) |
 | `mean_annual`, `min_annual`, `max_annual` | the same bounds x 12 (the value / 12 is the monthly target); `min_annual` / `max_annual` exist in YAML only |
 | `shift_sd` | -3..3 prior sds of the phase average |
@@ -867,10 +868,15 @@ that replace same-variable views there: s_ip_yoy (mean: today's 12-month
 average + ip_beta x growth), s_services_yoy (mean), f_unrate (mean_annual = the
 Okun part, vol_mult = UNRATE_VOL_MULT 0.62: the prior's monthly sd of f_unrate
 is 0.281 pp with 2020-03..08 at 0.25x, and 0.62 x 0.281 = 0.175 pp, the sd
-without 2020) and f_labor_share (mean_annual 0, so the labour-share shift comes
-only from the drift); plus the factor drifts unrate (direct job losses /
-years) and labor_share (log change / years), added to the phase's own drifts
-(k_shaped phase 2 adds its own unrate +0.13 on top). The detail JSON gets
+without 2020) and f_labor_share; plus the factor drift unrate (direct job
+losses / years), added to the phase's own drifts (k_shaped phase 2 adds its
+own unrate +0.11 on top). The labour-share shift (log change / years) depends
+on the model passed as `model_spec`: with the labour share in the transmission
+(the base model) it is a labor_share drift and the f_labor_share view has
+mean_annual 0 (the drawn months bring no trend of their own); with the labour
+share outside it (F) a drift would move no asset (W13), so it is the
+f_labor_share view's mean_annual instead, no labor_share drift is written, and
+the explanation carries `LABOR_SHARE_CAVEAT`. The detail JSON gets
 `calibration[]` (see "Results files"). validate_spec drops the key, so a spec
 POSTed to the API must carry the resolved views; the lab's templates come from
 `detail.spec`, which does. Calibrated built-ins: k_shaped, agi_boom.
@@ -1128,10 +1134,12 @@ Detail (`runner.run_spec` + library extras):
            phases: [{name, start_month, months, requested: {id: share} | null,
                      simulated, simulated_rt, drawn: {label: share}, dominant,
                      paths_with_contraction, contraction_share,
-                     reference: {simulated, paths_with_contraction},   # the same months of the reference run
+                     long_contraction: {paths, runs, length_mean},   # contraction runs overlapping the phase
+                     reference: {simulated, paths_with_contraction, long_contraction},   # the same months of the reference run
                      history_base_rate}],        # share of 1973-02.. windows of `months` months holding a contraction month
            windows: {year1 | years2_5 | years6_15 | whole: {simulated, simulated_rt, drawn, paths_with_contraction,
-                                                            contraction_share, reference: {simulated, paths_with_contraction}}},
+                                                            contraction_share, long_contraction,
+                                                            reference: {simulated, paths_with_contraction, long_contraction}}},
            years: [{year: 1..15, simulated, paths_with_contraction}],
            episodes: {per_path, length_mean, share_longer_than_18m, share_severe,
                       reference: {the same four}, history: {episodes, per_15y, length_mean, longer_than_18m, severe}},
@@ -1157,16 +1165,27 @@ N3 a name term (滞胀, 通缩, 萧条, 衰退, 通胀 / 过热; the phase name'
 scenario name's for every phase with views; the text says 名称里有 or 情景名称里有)
 whose labels hold less than half of that phase's simulated months; N4 always:
 the reference's share of months 25-180 with CPI y/y above 4% against history
-(41% against 33%). Today N3 fires 6 times (stagflation 工资-物价螺旋 26% and 沃尔克式紧缩
-44% 滞胀, japanification 去杠杆与降息 3% and 长期停滞 4% 物价负增长, oil_war 衰退与油价回落
-41% and energy_transition 绿色通胀 39%), never for baseline or financial_crisis.
-Probability-weighted year 1: simulated 扩张 51.0 / 通胀 32.3 / 物价负增长 0.3 / 衰退
-8.6 / 深度衰退 2.2 / 滞胀 5.6 %, P(a contraction month in year 1) 25.6%, against
+(41% against 33%); N5 a phase that asks for contraction months (收缩, 衰退, 深度衰退 or 滞胀
+above 0) whose overlapping contraction runs are longer than the longest since 1948 (18
+months) more often than the reference's runs over the same months, by more than 0.10
+(`NOTE_LONG_RUN_GAP`). `long_contraction` (phases and windows, and their `reference`) counts
+every contraction run that overlaps the months, also one that started before them or ends
+after them (a run chained across phases is what W7 and W11 cannot see): `paths` the share
+of paths with such a run longer than 18 months, `runs` the share of those runs that are
+(null without a run), `length_mean` their mean length; the `whole` window's `runs` equals
+`episodes.share_longer_than_18m`. Since the content review of the built-ins (see "The
+built-in content review") N1-N3 and N5 fire on none of them: the six phases whose names
+carry a term deliver it (stagflation 工资-物价螺旋（高通胀） 60% 通胀 + 26% 滞胀, 沃尔克式紧缩（通胀仍高）
+84% 通胀 + 滞胀, 滞胀式衰退 57% 滞胀 and 72% contraction labels, oil_war 衰退与油价回落 63%
+contraction labels, energy_transition 绿色通胀 56% 通胀 + 滞胀, financial_crisis 衰退见底 65%),
+and of the runs overlapping the two requests 37% (reference 35%) and 16% (20%) are longer
+than 18 months. Probability-weighted year 1: simulated 扩张 50.4 / 通胀 31.3 / 物价负增长 0.2 /
+衰退 8.8 / 深度衰退 1.8 / 滞胀 7.5 %, P(a contraction month in year 1) 28.2%, against
 the reference's 19.2% and history's 24.2%. A detail grows about 10 KB with it.
 
 `macro.pd` is the P/D each path implies with the valuation state tracked at
 kappa = 0 (index 0 = today's 97.4); `headline.pd_end_p50` is its last p50
-(baseline 82.6; 76.9 probability-weighted over the 13 built-ins). While the
+(baseline 82.6; 76.4 probability-weighted over the 13 built-ins). While the
 pull is off there is no `macro.pd_fair`; the scenario page's P/D card then
 says 仅记录，不做估值回归 and takes its historical percentiles from
 valuation.json `data.pd` (if a build ever writes `macro.pd_fair`, the older
@@ -1410,11 +1429,11 @@ absent; the 「按一年期预测校准」 choice of the portfolio and withdrawa
 then disabled with `calibration.reason`, and 模型后验 stays the default.
 
 Reconciliation (情景概率与一年期预测的对账). The mixture's first year is more
-bearish than the scored analog forecast (美股大盘 median +4.3% against +8.1%,
-P(loss) 40% against 28%; a probability is rounded a half up in the sentence, as
+bearish than the scored analog forecast (美股大盘 median +4.1% against +8.1%,
+P(loss) 41% against 28%; a probability is rounded a half up in the sentence, as
 the page rounds it, so a 0.265 reads 27% in both), because the shock scenarios put their shocks in the
 first year (7 scenarios with 48% combined probability; their first-year
-unemployment rises 0.60 pp on average, the analog's -0.01 pp). `contrib_mean` and `contrib_prob_loss` split the gap exactly by
+unemployment rises 0.63 pp on average, the analog's -0.01 pp). `contrib_mean` and `contrib_prob_loss` split the gap exactly by
 scenario (probability x the scenario's first-year value minus the analog
 value; each sums to its gap). Each built-in is re-run from its detail spec at
 its library seed to get the 12-month macro changes of the same paths
@@ -2220,7 +2239,7 @@ index.html and the README.
   adds 宏观体制：模拟路径处在什么状态 after 分阶段视图 (year-1 contraction
   probability against the reference and history, the anchor's real-time
   label, the 15 yearly mixes, the per-phase table 要求 / 抽中月份 / 模拟路径 /
-  出现收缩的路径 / 引擎无条件 / 历史基准, and the notes N1-N4); a detail without
+  出现收缩的路径 / 长于 18 个月的收缩 / 引擎无条件 / 历史基准, and the notes N1-N5); a detail without
   `regimes` (an older build) says how to get it. The scenario list adds
   各情景第 1 年的宏观体制 from the index fields; the lab's phase table shows a 体制
   column when a phase sets `regime` (ids or the Chinese aliases, the two flags as grey chips); the overview adds
@@ -2563,14 +2582,15 @@ series), which moves only iteration 2 (the decision and F are unchanged; F has n
   **W12** a view on a variable first observed more than 12 months after the MonthDB's first month:
   「阶段 {k}：{var} 从 {first} 才有数据，这一阶段只会抽 {first} 以后的历史月份（占 1973 年以来月份的 {share:.0%}）」
   (s_tips10 2003-01, 44%; s_mich1y 1978-01, 91%);
-  **W13** a labour-share drift while labour share is not in the transmission (kept, warned; k_shaped and agi_boom
-  under F): 「阶段 {k}：劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²），它的漂移只改变模拟的劳动收入占比路径，不直接改变资产回报」;
+  **W13** a labour-share drift while labour share is not in the transmission (kept, warned; since the built-in
+  content review the calculator writes the shift as an f_labor_share view under F, so no built-in carries it): 「阶段 {k}：劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²），它的漂移只改变模拟的劳动收入占比路径，不直接改变资产回报」;
   **W14** a view on an audit-only variable (`f_ebp`, `f_tp10_x_infl4`, the stage-B regressors `f_usd_em` and
   `f_mort_spread`, or any other `f_` column of the frame that is no config factor, `f_cpi` aside):
   「阶段 {k}：{var} 只用于审计对照，不能作为情景视图，已忽略」.
   `x_` columns are refused as unknown prefixes.
 * The calculator (`library.resolve_calibration(spec, base, model_spec)`) adds `calibrate.LABOR_SHARE_CAVEAT` to
-  the explanation and `engine_check.labor_share_in_transmission` (false under F).
+  the explanation and `engine_check.labor_share_in_transmission` (false under F); under F it also writes the
+  labour-share shift as the f_labor_share view instead of a drift ("The built-in content review").
 * Scenario details gain `transmission {describe, factors, notes, interactions: [{factor, name, state, lag, above,
   database_share, phases: [{name, drawn_share}]}]}` (`factor` is the rule's base factor, `tp10`, not the
   interaction's id: `runner.transmission_detail` spreads the config rule over it; `database_share` is the month
@@ -2580,11 +2600,11 @@ series), which moves only iteration 2 (the decision and F are unchanged; F has n
 * The 13 built-in specs' views and overrides are not edited in this round. Their narratives, summaries and
   causal chains quote simulated numbers (CONTRIBUTING: filled in after the run), and model F and the panel fixes
   moved them (agi_boom's P/D no longer passes the 2000 peak by year 7: about 92 at year 3, 98 at year 7 and 106
-  at the end), so after the merge they were updated to the rebuilt details; nothing simulated changes (the paths
+  at the end, the state before the content review; since its view changes 92, 102 and 104), so after the merge
+  they were updated to the rebuilt details; nothing simulated changes (the paths
   depend on the views, the seed `library.seed_for(id)` and the engine only). The one new clip: financial_crisis
-  phase 2 `s_spread mean 3.6` → 3.532 (the support's upper bound after the timing fix); `tests/test_scenarios.py`
-  whitelists it (`KNOWN_CLIPS`) until the post-merge content review, which also covers the views (FACTORS_DESIGN
-  §5.2, §12).
+  phase 2 `s_spread mean 3.6` → 3.532 (the support's upper bound after the timing fix); the post-merge content
+  review set the target to 3.5 and dropped the test whitelist ("The built-in content review").
 
 ### LLM translator
 
@@ -2707,3 +2727,169 @@ candidates, the incremental gate, stage B, the walk-forward on the panel: test 1
 the value of whichever structural shocks are on disk), test_scenarios / test_translator / test_eras (W12-W14,
 driftable factors, the root list, the new prompt section, eras by equation), test_server and test_build (the
 endpoint, the shared step order, `load_dotenv` before the panel).
+
+## The built-in content review (情景内容复核, 2026-11-01, fix round 2026-11-02)
+
+Self-contained like the round above. It records what the review of the 13 built-in specs changed, including the
+fix round that followed the review of the first pass (stagflation's and oil_war's requests, dollar_decline's
+override, the readout's run-length check). Numbers are from the rebuild `--only scenarios regimes forecast
+valuation portfolio llm meta` (`meta.json` `built_at` 2026-11-02T09:24:37Z, data through 2026-09, model F).
+
+### The rule (written before any spec edit)
+
+* **What counts as a claim.** A phase claims a regime when its name holds a term, using N3's vocabulary and scope
+  (a phase name's own term, else the scenario name's for every phase with views). It also claims one when its
+  narrative says the phase is, or is not, a 衰退 / 滞胀 / 通缩 / 过热.
+* **The test.** The claimed labels must hold at least half of the phase's simulated months. A negative claim
+  (「不衰退」) must instead give the share of paths with a contraction month, next to the engine's reference and
+  the history base rate for the same window length.
+* **The fix, in this order.**
+  1. Views the engine can honour, with no new warning: the regime key, rg_ flags, f_cpi and the factor round's
+     view variables.
+  2. A rename, when history cannot support the claim: the request is clipped, thin (W9 or a shrink λ < 1), or
+     longer than the longest contraction since 1948 (W7, W11). The narrative then states the simulated mix.
+* **What must not happen.** No clip, shrink, W7-W11 or N1-N3 on any built-in. No prior change without a reason
+  (none changed). Every story stays recognisable.
+* **Added by the fix round (2026-11-02): how long the simulated contractions run.** W7 and W11 count drawn
+  contraction months per phase, but the simulated contractions of a phase that asks for contraction months also
+  run on from the phase before and into the one after. The first pass's two requests (stagflation 滞胀 0.6 over 24
+  months, oil_war 收缩 0.55 over 18) passed W7 and W11 yet made 52% and 41% of the contraction runs overlapping the
+  phase longer than 18 months, against the reference's 29% and 20% over the same months (history since 1973: 0 of
+  7 contractions). The readout now measures it per phase (`long_contraction`), N5 names a contraction request whose
+  share is more than 10 points above the reference's, and no built-in may carry N5. The fix order is the same:
+  first shorten the contraction phase to about 12 months and follow it with a recovery or the 回归常态 phase (or
+  lower the request), and rename only if that fails.
+
+### Changes, per scenario (claimed share before → after)
+
+| scenario | change | result |
+|---|---|---|
+| stagflation | Phase 1 renamed 工资-物价螺旋（高通胀）, views unchanged. The 24-month tightening is split: 沃尔克式紧缩（通胀仍高） (6 months: f_ff +4/yr, s_cpi_yoy 6.5, r_star 3) and 滞胀式衰退 (12 months: `regime: {滞胀: 0.65}`, s_ip_yoy −3, s_real_ff 3.0 → 2.0, s_cpi_yoy 6, f_unrate +2/yr with vol_mult 1.0, r_star 3); 回归常态 108 → 114 months | Phase 1: 60% 通胀 + 26% 滞胀. A 48-month 滞胀 phase cannot stay within W7's 18 contraction months. The tightening: 84% 通胀 + 滞胀, the fed funds rate 6.0% → 8.2% in six months (the first pass replayed the easing end of 1982). The recession: 滞胀 44% → 57% (contraction labels 72%), its 滞胀 weight 55% 1981-82, 30% 1973-75, 15% 1990-91; contraction runs overlapping it longer than 18 months 37% (reference 35%; first pass 52%); unemployment peak 7.1% → 6.9% |
+| oil_war | 衰退与油价回落 18 → 12 months with `regime: {收缩: 0.6, 深度衰退: 0}` (the 2008-09 and 2020 months are no oil-shock recession), then a new 复苏 phase (6 months, f_ip +5%/yr); 回归常态 156 months | Contraction labels 41% → 63%, two-thirds of them 滞胀. Runs overlapping the recession longer than 18 months 16% (reference 20%; first pass 41%). Unemployment peak 5.7% → 5.6%. The contractions' median IP fall is 6.4%, between 1990-91 (4.2%) and 1974-75 (13.1%), so the narrative no longer calls the recession 温和 |
+| energy_transition | 绿色通胀: s_cpi_yoy 3.8 → 5.0, s_goods_yoy 4.0 → 5.0 | 通胀 + 滞胀 39% → 56% (54-56% over five seeds). Phase CPI averages 4.3% |
+| japanification | Renamed 日本化：低利率与长期停滞, with tags 低通胀 / 低利率. Views unchanged | Bit-identical paths. The narrative says why: since 1973 the US has had no sustained falling prices (see below) |
+| ai_bust | Narrative only | The 30-month bust is 30% 衰退 and 55% 扩张, and 60% of paths contract. The 2000-04..2002-10 analog holds 12 衰退 months of 31. A 收缩 request of 0.5 or more on the bust trips the shrink (λ 0.81-0.98) |
+| baseline | 「不触发衰退」 reworded | Bit-identical paths. Years 2-4: 34% of paths contract (reference 47%, history 45%). Year 1: 9% (19%, 24%) |
+| financial_crisis | Phase 2 s_spread 3.6 → 3.5 | Removes the clip (its support tops out at 3.532) |
+| k_shaped | Phases 1-2 add s_wc_real_wage_yoy (0.2, 0.3) and s_real_dpi_yoy (2.2, 2.2). Phase 2's unrate drift 0.13 → 0.11 | W13 gone. Unemployment peak 5.6% → 5.5%. The labour share falls 4.7% over phase 1. The pay and income views draw months with less valuation gain, so phase 1's equity price return is +19% against the calculator's wealth assumption +25% (+22% before) |
+| agi_boom | Phase 1 f_capex_share +0.35/yr → s_it_invest_share 4.0 | W13 gone. The drawn months' capex share still rises 0.34 pp/yr, and the fed funds rate reaches 5.5% by year 3 (was 5.7%). The labour-share view (−1.6%/yr) draws more of the 2002 and 2009-10 recoveries, so phase 2's equity price return is +34% against the calculator's +40% (+39.9% before); the narrative says so |
+| dollar_decline | `reversion` term_premium 1.75 / kappa_y10 0.03 → f_tp10 views (+0.3/yr phase 1, +0.1/yr phase 2) plus term_premium 1.25 (kappa_y10 default) | The 10-year is 5.7% at year 3 as before, stays above 5.5% and ends at 5.8% (was 6.3%; baseline 5.2%). Gold CAGR 6.1% → 6.3%. Treasuries lose while the dollar falls (3-year total return 14% against the baseline's 21%); over 15 years the higher yields pay more (CAGR 5.4% against 5.0%) |
+
+**Not edited:** fiscal_dominance, reacceleration and deglobalization. Their paths are bit-identical; only their
+posterior renormalises.
+
+**Why each view was chosen.**
+
+* **energy_transition.** f_cpi 0.045-0.048/yr gave 51-55%. The regime key (通胀 0.6, 高通胀 0.65) reached the 50% line
+  only at the margin, and swung the P/D at year 15 to 80 or 56, against 68.
+* **dollar_decline.** A level view on s_tp10 picks the 1980s months of high term premium and falling yields, so
+  the change f_tp10 is the view. The first pass dropped the override altogether, which made the rise temporary
+  (10-year 5.3% at year 15, below 5.4% from year 5) and contradicted the pre-registered plan (the override kept,
+  reduced, for the part history cannot carry). After the drawn months the engine pulls the 10-year back toward
+  r* + inflation + 0.75, so the lasting part stays an override: term_premium 1.25, half the old shift above the
+  default, with the phase-1 view lowered from +0.4 to +0.3/yr so that year 3 stays at 5.7% (+0.4 with 1.0 gives
+  5.75% at year 3 and 5.6% at the end; 1.1 gives 5.8% and 5.7%). Whether the lasting rise belongs to the story is
+  the user's call; the alternative (no override) says the rise is temporary and limits the Treasury loss to the
+  decline phase.
+* **stagflation, oil_war: the contraction phases are short and followed by a recovery.** The engine's labels end a
+  contraction only when IP rebounds 3% from its low, so a long phase of drawn contraction months (or IP falling on
+  average) plus the contractions the phase before started (the spiral simulates 28% contraction months, the oil
+  shock 36%) chain into runs longer than history's. Twelve months of 滞胀 0.65 after a 6-month tightening keeps
+  stagflation's runs at the reference's level (37% against 35%; a 14-month phase straight after the spiral gave 48%
+  against 31%). oil_war needs the recovery phase: 12 months of 收缩 0.55-0.6 without it gave 27-30% against 20%, 6-17
+  points above the reference over five seeds; with the 6-month f_ip phase the five seeds give −5 to −1 points.
+* **stagflation: s_real_ff 2.0 in the recession.** At 3.0 the 滞胀 weight rests 70% on 1981-82 (2.3 effective
+  episodes, under W9's 2.5 line though the support table says 2.7); at 2.0 it is 55% 1981-82, 30% 1973-75 and 15%
+  1990-91 (2.7 effective episodes).
+* **stagflation: the scenario name.** Every view phase now names its own regime (高通胀, 通胀仍高, 滞胀式衰退), so
+  N3 tests no phase against the scenario name's 滞胀, as the rule's scope says. Over the 66 view months 滞胀 is 31%
+  of the simulated months (first pass 37% of 72) and the contraction labels 36%; a scenario-level share check would
+  be a new rule, which is the user's call.
+* **k_shaped.** The view targets follow the calculator's own convention: a base, plus the shock.
+  * White-collar real hourly earnings: base 0.8% (the last 12 months), minus the pay half of the 50-90% group's
+    income loss (about 0.6 pp a year).
+  * Real disposable income: base 2.8% (the 1973+ mean, 2.79; today's 1.3% is depressed by the oil shock), minus the
+    labour-income change times compensation's share of disposable income (about 0.6 pp a year).
+* **japanification: the f_cpi deflation recipe failed every way.** Tried in phase 2: f_cpi -0.3 to -0.8%/yr plus
+  收缩 0, with or without f_unrate 0.
+  * Every variant replays oil-crash months: the oil price p50 is $3-4 at month 84 with or without the unemployment
+    view (measured by the review of the first pass).
+  * With the unemployment view: 物价负增长 only 26-31%. Contraction then dominated (50-54%).
+  * At the f_cpi floor: the thinness shrink (λ 0.97).
+  * Without it: 57%, and unemployment falls to 2.7% by year 7.
+
+### Code
+
+* **`calibrate.distribution_views(params, base, model_spec)`.** When `model_spec` is given and the labour share is
+  not in its transmission, the labour-share shift becomes the f_labor_share view's mean_annual. No labor_share
+  drift is written, so W13 cannot fire on a calibrated built-in.
+  * The explanation's `overrides`, `override_notes` and `engine_mapping` say so, and `LABOR_SHARE_CAVEAT` explains it.
+  * The calculator's numbers (`impact`) do not change.
+  * Under the base model (labour share in the transmission) the drift and the zero view stay as before.
+  * The engine delivers the shift: k_shaped's labour share falls 4.7% in phase 1 (calculator 4.3%) and 2.6% in
+    phase 2 (2.7%). agi_boom's falls 6.5% (6.5%).
+* **The run-length readout (fix round).** `regime_views.readout` adds `long_contraction` to every phase and window
+  and to their `reference` blocks (`run_table` lists each path's contraction runs once, `long_runs` counts those
+  overlapping the months), and N5 (see "Results files"). It only reads the label arrays, so no simulated number
+  changes. The scenario page's per-phase table gains a 长于 18 个月的收缩 column (share of paths, and of the runs)
+  and the reference column a matching line.
+* **The calculator cards.** 计算结果怎么进入引擎 says, from the written drifts, whether the labour share is a drift
+  (base model) or a view (F, only the white-collar job losses are a drift); 计算器假设 vs 引擎模拟 notes that the
+  equity row compares the calculator's input with prices the drawn months bring.
+* **Opt-in steps.**
+  * regime_forecast reads no scenario result (only forecast.json's analog share and origins) and was not rerun.
+  * ablation's `scenario_effects` re-run the library and compare it with scenarios.json; `--only ablation` was run
+    again after the fix round, so they describe today's specs (`engine_matches_results` and
+    `engine_reproduces_backtest` true). Adopting the selected decoupled variant would now move the probability-
+    weighted 美股 median by +0.43% a year (was +0.34%), most in financial_crisis (+3.1%).
+* **Docs.** The conflict example (regimes.json `engine.studies.conflict_example`: stagflation phase 1 plus 滞胀 0.8)
+  keeps its views, so λ 0.65, s_real_ff 0.97 and s_ip_yoy 0.88 are unchanged. Only its phase name is new.
+* **Probabilities.** No prior changed. The likelihood reads phase 1 only (the phase-1 means against today's
+  states), so edits after the first phase move no probability: oil_war's posterior is 0.0895 (renormalisation
+  only) although its year-1 contraction chance is now 0.73 (0.49 before the review), because its recession runs
+  through months 7-18. Whether its prior of 0.09 should be revisited now that the recession is delivered is the
+  user's call.
+
+### Numbers that moved with it
+
+* **Library.**
+  * Probability-weighted year-1 P(contraction): 25.6% → 28.2% (first pass 27.5%), against the reference's 19.2% and
+    history's 24.2%. Most of this is oil_war, 0.49 → 0.73: its recession phase runs months 7-18. stagflation's is
+    0.43 (0.42).
+  * Year-1 mix: 扩张 50.4 / 通胀 31.3 / 物价负增长 0.2 / 衰退 8.8 / 深度衰退 1.8 / 滞胀 7.5 %.
+  * P/D at year 15, probability-weighted: 76.9 → 76.4.
+* **Reconciliation.** Scenario-weighted year-1 美股大盘 median is +4.1% against the analog's +8.1% (was +4.3%), and
+  P(loss) 41% against 28% (was 40%). The 7 shock scenarios' first-year unemployment rise is 0.63 pp (was 0.60).
+* **Withdrawal** (60/40, 4%, model posterior). 30-year ruin by strategy: pro rata 37.6%, dividends then pro rata
+  38.8%, dividends then winners 38.3%. Safe rates: 2.69%, 2.55% and 2.54%. Per scenario at 30 years, the highest
+  ruin is ai_bust (61.8%) and the lowest agi_boom (21.0%).
+* **Unchanged:** the engine's reference run, the history and the regime support table.
+
+### Tests
+
+test_scenarios:
+
+* `KNOWN_CLIPS` and `_unexpected` are gone. Every built-in validates with no clip and no warning.
+* The regime-key test pins the two requests, and the built-ins' pooled phases may carry no shrink warning at all
+  (the first pass still let the engine's λ warnings through).
+* The readout has no N1-N3 or N5 note on any built-in, and the six old N3 check values are replaced by the six
+  claimed phases' shares; the two requests' long-run shares (and the reference's) are check values, and the shape
+  test covers `long_contraction` (the whole window equals the episode statistics).
+* N5 has its own test: the first pass's 24-month 滞胀 0.6 phase passes W7 and W11 and fires N5.
+* The library check values were regenerated.
+* The spiral example's W11 text: 26 contraction months, the spiral alone (the tightening after it draws few
+  contraction months, so the run stops there).
+* k_shaped and agi_boom are also run under F (the calculator's shipped path): no warning at all, and the drawn
+  months deliver the labour-share change within a point.
+* W13 is checked both ways: no warning when resolved under F, and the drift warned when resolved for the base
+  model.
+* A unit test covers the calculator's view form.
+
+Other test files:
+
+* test_regimes: the rg_-column invariance uses japanification in place of stagflation, which now asks for regime
+  months.
+* test_translator: oil_war's few-shot example carries the 收缩 0.6 and 深度衰退 0 request.
+
+CONTRIBUTING's spec checklist states the rule.
+

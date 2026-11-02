@@ -489,9 +489,15 @@ def test_prompt_has_the_regime_section_and_quotes_only_this_builds_studies(ctx, 
     rec = support["recession"]
     assert f"衰退（recession）{rec['max_delivered']:.0%}，{rec['runs']} 段" in section
     assert f"depression 最多约 {support['depression']['max_delivered']:.2f}" in section
+    asked = {}
     for block in plain.split("```json\n")[1:]:                       # the examples carry the key in every phase
         example = json.loads(block.split("\n```")[0])
-        assert all(p["regime"] == [] for p in example["phases"])
+        assert all(isinstance(p["regime"], list) for p in example["phases"])
+        asked.update({(example["id"], k): p["regime"] for k, p in enumerate(example["phases"]) if p["regime"]})
+    # oil_war's recession phase asks for contraction months and no deep-recession months; no other phase of the
+    # examples asks for a regime
+    assert asked == {("oil_war", 1): [{"id": "contraction", "share": 0.6, "why": "宏观体制：收缩占抽中月份的 60%"},
+                                      {"id": "depression", "share": 0.0, "why": "宏观体制：深度衰退占抽中月份的 0%"}]}
     studies = {"drawn_vs_simulated": [
         {"case": "a", "views": [{"var": "rg_stagflation", "mean": 0.8}], "months": 12, "simulated_share": 0.6},
         {"case": "b", "views": [{"var": "rg_stagflation", "mean": 0.8}], "months": 48, "simulated_share": 0.7},

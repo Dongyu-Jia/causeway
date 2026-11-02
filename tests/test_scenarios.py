@@ -33,20 +33,6 @@ def ctx():
     return EngineContext.load(selection=False)
 
 
-# The 13 built-in specs are not edited in the missing-factor round (FACTORS_DESIGN §5.2): after the spread timing
-# fix, financial_crisis phase 2's s_spread mean 3.6 lies above what a 6-month phase can average (3.532). The
-# content review after the merge removes this entry; no other clip is allowed.
-KNOWN_CLIPS = {("financial_crisis", 2, "s_spread", "mean")}
-
-
-def _unexpected(sid: str, report: dict) -> tuple[list, list]:
-    """(clipped entries, warnings) of a built-in's validation beyond KNOWN_CLIPS."""
-    known = [c for c in report["clipped"] if (sid, c["phase"], c["var"], c.get("key")) in KNOWN_CLIPS]
-    texts = {f"阶段 {c['phase']}：{c['var']} 的 {c['key']}=" for c in known}
-    return ([c for c in report["clipped"] if c not in known],
-            [w for w in report["warnings"] if not any(w.startswith(t) and "截断为" in w for t in texts)])
-
-
 # ---------------------------------------------------------------- specs
 
 def test_specs_load_with_required_ids_and_fields():
@@ -99,9 +85,8 @@ def test_every_spec_validates_without_errors_or_clipping(ctx):
         spec, _ = library.resolve_calibration(raw, base)
         clean, report = validate_spec(spec, ctx.db.frame)
         assert report["ok"] and not report["errors"], (raw["id"], report["errors"])
-        clipped, warnings = _unexpected(raw["id"], report)
-        assert not clipped, (raw["id"], clipped)
-        assert not warnings, (raw["id"], warnings)
+        assert not report["clipped"], (raw["id"], report["clipped"])
+        assert not report["warnings"], (raw["id"], report["warnings"])
         assert len(clean["phases"]) == len(raw["phases"])
 
 
@@ -205,6 +190,20 @@ def test_calculator_channels_and_units():
     # the labour-share shift is the drift alone: the drawn months carry no labour-share trend of their own
     share = next(v for v in views if v["var"] == "f_labor_share")
     assert share["mean_annual"] == 0.0 and "vol_mult" not in share
+
+
+def test_calculator_writes_the_labour_share_shift_as_a_view_when_the_transmission_has_no_labour_share():
+    """Under F a labour-share drift would move no asset (W13): the shift becomes the f_labor_share view's
+    mean_annual, the unemployment drift stays, and the explanation says so."""
+    params = {"labor_income_shock": {"mid40": -0.05}, "months": 48}
+    views, expl = calibrate.distribution_views(params, model_spec=_f_spec())
+    base_views, base_expl = calibrate.distribution_views(params)
+    share = next(v for v in views if v["var"] == "f_labor_share")
+    assert share["mean_annual"] == base_expl["overrides"]["factor_drift"]["labor_share"] < 0
+    assert expl["overrides"]["factor_drift"] == {"unrate": base_expl["overrides"]["factor_drift"]["unrate"]}
+    assert set(expl["override_notes"]) == {"unrate"} and calibrate.LABOR_SHARE_CAVEAT in expl["caveats"]
+    assert [v for v in views if v["var"] != "f_labor_share"] == [v for v in base_views if v["var"] != "f_labor_share"]
+    assert expl["impact"] == base_expl["impact"]                          # the calculator's numbers do not change
 
 
 # ---------------------------------------------------------------- probabilities
@@ -456,22 +455,28 @@ def test_regime_warnings_check_values(regime_examples):
             "区块首尾相接会造出比历史上任何一次都更深更长的收缩" in ex["depression"])
     assert ("阶段 1：所选体制单独可以满足（λ=1.00），和其他视图一起只能按 λ=0.65 满足；冲突最大的是 s_real_ff（去掉后 λ "
             "升到 0.97）、s_ip_yoy（去掉后 λ 升到 0.88）" in ex["spiral"])
-    assert _has(ex["spiral"], "阶段「工资-物价螺旋」「沃尔克式紧缩」合计约 38 个收缩月份")
+    # the tightening phase after the spiral draws few contraction months, so the run stops at the spiral
+    assert _has(ex["spiral"], "阶段「工资-物价螺旋（高通胀）」合计约 26 个收缩月份")
 
 
 @needs_panel
 def test_no_regime_check_fires_on_the_built_ins(ctx):
-    """The 13 built-ins have no regime key: validation warns about nothing, the database checks find nothing,
-    so their only warnings stay the engine's own shrink warnings."""
+    """Two built-ins ask for a regime (the content review: stagflation's 滞胀式衰退 draws 滞胀 months, oil_war's
+    recession phase 收缩 months and no 深度衰退 months) and both requests are deliverable: validation warns about
+    nothing, the pooled phases need no shrink (no λ < 1 warning) and the database checks find nothing."""
     from scenariolab.scenarios.runner import phase_pools
     base = library.calibration_base(ctx)
+    asked = {}
     for raw in library.load_specs():
         clean, report = validate_spec(library.resolve_calibration(raw, base)[0], ctx.db.frame)
-        assert not _unexpected(raw["id"], report)[1] and all("regime" not in p for p in clean["phases"]), raw["id"]
+        assert not report["warnings"] and not report["clipped"], raw["id"]
+        asked.update({(raw["id"], k): p["regime"] for k, p in enumerate(clean["phases"]) if "regime" in p})
         warnings: list[str] = []
         pools = phase_pools(ctx, clean, warnings)
-        assert all("λ=" in w for w in warnings), raw["id"]
+        assert not warnings, (raw["id"], warnings)
         assert rv.spec_checks(ctx.db, clean, pools, report["clipped"]) == [], raw["id"]
+    assert asked == {("stagflation", 2): {"stagflation": 0.65},
+                     ("oil_war", 1): {"contraction": 0.6, "depression": 0.0}}
 
 
 # ---------------------------------------------------------------- the readout (16) and the library index (17)
@@ -508,10 +513,19 @@ def test_regime_readout_shape_and_shares(library_build):
         assert [p["months"] for p in reg["phases"]] == [p["months"] for p in d["spec"]["phases"]]
         for mix in _mixes(reg):
             assert list(mix) == R.LABEL_IDS and abs(sum(mix.values()) - 1.0) < 1e-5, sid
-        for p in reg["phases"]:
-            assert p["requested"] is None and p["dominant"] == max(R.LABEL_IDS, key=lambda i: p["simulated"][i])
+        for p, ph in zip(reg["phases"], d["spec"]["phases"]):
+            assert p["requested"] == (ph.get("regime") or None)              # what the regime key asked for
+            assert p["dominant"] == max(R.LABEL_IDS, key=lambda i: p["simulated"][i])
             assert 0 <= p["contraction_share"] <= p["paths_with_contraction"] <= 1
             assert 0 < p["history_base_rate"] <= 1
+            for lc in (p["long_contraction"], p["reference"]["long_contraction"]):    # runs overlapping the phase
+                assert set(lc) == {"paths", "runs", "length_mean"} and 0 <= lc["paths"] <= 1
+                assert lc["runs"] is None or (0 <= lc["runs"] <= 1 and lc["length_mean"] >= 1)
+            assert p["long_contraction"]["paths"] <= p["paths_with_contraction"]
+        # the whole horizon's runs are the episodes: the same share longer than 18 months
+        whole = reg["windows"]["whole"]["long_contraction"]
+        assert whole["runs"] == pytest.approx(reg["episodes"]["share_longer_than_18m"], abs=1e-9)
+        assert whole["length_mean"] == pytest.approx(reg["episodes"]["length_mean"], abs=1e-9)
         assert reg["anchor"]["month"] == index["start"] and reg["anchor"]["label_rt"] in R.LABEL_IDS
         assert reg["notes"][-1].startswith("引擎无条件抽样里 CPI 同比高于 4% 的月份占 "), sid     # N4, always
         ep = reg["episodes"]
@@ -548,26 +562,82 @@ def test_regime_readout_reads_the_simulated_arrays(ctx, library_build):
 
 @needs_panel
 def test_regime_readout_notes(library_build):
+    """After the content review every phase name delivers the regime its terms claim (no N3), the two regime
+    requests are drawn and simulated as asked (no N1, N2), and their simulated contractions outlast history no
+    more often than the engine's reference over the same months (no N5): N4 is every built-in's only note."""
     _, details = library_build
-    notes = {sid: [n for n in d["regimes"]["notes"] if "里有“" in n] for sid, d in details.items()}
-    assert {sid for sid, n in notes.items() if n} == {"stagflation", "japanification", "oil_war", "energy_transition"}
-    assert [n.split("」")[0] for n in notes["stagflation"]] == ["阶段「工资-物价螺旋", "阶段「沃尔克式紧缩"]
-    assert [n.split("」")[0] for n in notes["japanification"]] == ["阶段「去杠杆与降息", "阶段「长期停滞"]
-    assert all(not d["regimes"]["notes"][:-1] for sid, d in details.items() if sid in ("baseline", "financial_crisis"))
+    for sid, d in details.items():
+        assert d["regimes"]["notes"][:-1] == [], (sid, d["regimes"]["notes"][:-1])
+    # the phases whose names carry a regime term, and what their simulated paths deliver (shares of months)
+    named = {(sid, p["name"]): p["simulated"] for sid, d in details.items() for p in d["regimes"]["phases"]
+             if any(term in p["name"] for term, _ in rv.NAME_TERMS)}
+    assert set(named) == {("stagflation", "工资-物价螺旋（高通胀）"), ("stagflation", "沃尔克式紧缩（通胀仍高）"),
+                          ("stagflation", "滞胀式衰退"), ("oil_war", "衰退与油价回落"), ("energy_transition", "绿色通胀"),
+                          ("financial_crisis", "衰退见底")}
+    contraction = ("recession", "depression", "stagflation")
+    assert named[("stagflation", "滞胀式衰退")]["stagflation"] >= 0.5
+    assert sum(named[("stagflation", "滞胀式衰退")][i] for i in contraction) >= 0.5          # 衰退 too
+    assert named[("stagflation", "工资-物价螺旋（高通胀）")]["inflation"] >= 0.5
+    assert sum(named[("stagflation", "沃尔克式紧缩（通胀仍高）")][i] for i in ("inflation", "stagflation")) >= 0.5
+    assert sum(named[("oil_war", "衰退与油价回落")][i] for i in contraction) >= 0.5
+    assert sum(named[("energy_transition", "绿色通胀")][i] for i in ("inflation", "stagflation")) >= 0.5
+    # N5's test on the two phases that ask for contraction months
+    asked = [(sid, p) for sid, d in details.items() for p in d["regimes"]["phases"]
+             if any(rid in rv.CONTRACTION_IDS and s > 0 for rid, s in (p["requested"] or {}).items())]
+    assert sorted((sid, p["name"]) for sid, p in asked) == [("oil_war", "衰退与油价回落"), ("stagflation", "滞胀式衰退")]
+    for sid, p in asked:
+        gap = p["long_contraction"]["runs"] - p["reference"]["long_contraction"]["runs"]
+        assert gap <= rv.NOTE_LONG_RUN_GAP, (sid, p["name"], gap)
+
+
+@needs_panel
+def test_n5_names_a_contraction_request_whose_runs_outlast_history(ctx):
+    """The stagflation spec as the first content-review pass wrote it (one 24-month tightening phase asking for
+    滞胀 0.6 right after the spiral): W7 and W11 count drawn months and pass it, but the simulated contractions that
+    overlap the phase are longer than any since 1948 far more often than the reference's, and N5 says so."""
+    from scenariolab.scenarios import runner
+    spec = next(s for s in library.resolved_specs(ctx) if s["id"] == "stagflation")
+    spiral, _, recession, normal = spec["phases"]
+    first_pass = {"s_real_ff": {"mean": 3.0}, "f_unrate": {"mean_annual": 1.0}}       # its two other targets
+    views = [{**v, **first_pass.get(v["var"], {})} for v in recession["views"]]
+    one = {**recession, "name": "沃尔克式紧缩（滞胀）", "months": 24, "regime": {"stagflation": 0.6}, "views": views}
+    spec = {**spec, "phases": [spiral, one, {**normal, "months": 108}]}
+    detail, _ = runner.run_spec(ctx, spec, n_paths=600, seed=library.seed_for("stagflation"), attribution=False)
+    assert not detail["validation"]["warnings"]                                      # no W7, no W11
+    p = detail["regimes"]["phases"][1]
+    lc, rc = p["long_contraction"], p["reference"]["long_contraction"]
+    assert lc["runs"] - rc["runs"] > rv.NOTE_LONG_RUN_GAP and lc["paths"] > 3 * rc["paths"]
+    (n5,) = [n for n in detail["regimes"]["notes"] if "收缩区块首尾相接" in n]
+    assert n5.startswith("阶段「沃尔克式紧缩（滞胀）」要求多抽滞胀月份：模拟路径里与这一阶段重叠的收缩有 ")
+    assert "1973 年以来的 7 次收缩里长于 18 个月的有 0 次" in n5 and n5.endswith("或降低要求")
+    assert detail["regimes"]["notes"][-1].startswith("引擎无条件抽样里 CPI 同比高于 4% 的月份占 ")     # N4 stays last
 
 
 @needs_panel
 @check_values
 def test_regime_readout_check_values(library_build):
     _, details = library_build
-    notes = [n for d in details.values() for n in d["regimes"]["notes"] if "里有“" in n]
-    assert sorted(notes) == sorted([
-        "阶段「工资-物价螺旋」：情景名称里有“滞胀”，但模拟路径的这一阶段里滞胀合计只占 26%",
-        "阶段「沃尔克式紧缩」：情景名称里有“滞胀”，但模拟路径的这一阶段里滞胀合计只占 44%",
-        "阶段「去杠杆与降息」：情景名称里有“通缩”，但模拟路径的这一阶段里物价负增长合计只占 3%",
-        "阶段「长期停滞」：情景名称里有“通缩”，但模拟路径的这一阶段里物价负增长合计只占 4%",
-        "阶段「衰退与油价回落」：名称里有“衰退”，但模拟路径的这一阶段里衰退、深度衰退、滞胀合计只占 41%",
-        "阶段「绿色通胀」：名称里有“通胀”，但模拟路径的这一阶段里通胀、滞胀合计只占 39%"])
+    # what the phases whose names claim a regime deliver: the claimed labels hold at least half of the phase's
+    # simulated months (stagflation's spiral: 通胀 and the 滞胀 inside it)
+    shares = {(sid, p["name"]): p["simulated"] for sid, d in details.items() for p in d["regimes"]["phases"]}
+    contraction = ("recession", "depression", "stagflation")
+    assert [round(100 * x) for x in (
+        shares[("stagflation", "工资-物价螺旋（高通胀）")]["inflation"],
+        shares[("stagflation", "工资-物价螺旋（高通胀）")]["stagflation"],
+        sum(shares[("stagflation", "沃尔克式紧缩（通胀仍高）")][i] for i in ("inflation", "stagflation")),
+        shares[("stagflation", "滞胀式衰退")]["stagflation"],
+        sum(shares[("stagflation", "滞胀式衰退")][i] for i in contraction),
+        sum(shares[("oil_war", "衰退与油价回落")][i] for i in contraction),
+        shares[("oil_war", "衰退与油价回落")]["stagflation"],
+        sum(shares[("energy_transition", "绿色通胀")][i] for i in ("inflation", "stagflation")),
+        sum(shares[("financial_crisis", "衰退见底")][i] for i in contraction))] == [60, 26, 84, 57, 72, 63, 42, 56, 65]
+    # the contraction runs that overlap the two requested phases: share longer than 18 months, against the
+    # reference's over the same months (N5), and the share of paths with such a run
+    long = {(sid, p["name"]): (p["long_contraction"], p["reference"]["long_contraction"])
+            for sid, d in details.items() for p in d["regimes"]["phases"] if p["requested"]}
+    assert {k: (round(a["runs"], 3), round(b["runs"], 3), round(a["paths"], 3), round(b["paths"], 4))
+            for k, (a, b) in long.items()} == {("stagflation", "滞胀式衰退"): (0.371, 0.354, 0.33, 0.091),
+                                               ("oil_war", "衰退与油价回落"): (0.163, 0.202, 0.127, 0.0465)}
     reg = details["baseline"]["regimes"]
     assert reg["notes"] == ["引擎无条件抽样里 CPI 同比高于 4% 的月份占 41%（1973 年以来的历史为 33%），所以模拟路径里“通胀”"
                             "的占比系统性偏高；比较时请看同一时段的“引擎无条件”列"]
@@ -618,24 +688,25 @@ def test_library_index_regime_check_values(library_build):
     """DESIGN §3.5: probability-weighted year 1 (simulated, real time, drawn) and P(contraction in year 1)."""
     index, details = library_build
     lib = index["regimes"]
-    # regenerated after the missing-factor round's panel fixes (FACTORS_DESIGN §7.1): views on s_spread,
-    # f_capex_share, f_profit_share, s_productivity_yoy and the sentiment select other months; the engine's
-    # reference run and the history are unchanged
-    want = {"expansion": 0.510, "inflation": 0.323, "deflation": 0.003, "recession": 0.087, "depression": 0.023,
-            "stagflation": 0.055}
+    # regenerated after the content review of the built-in specs: oil_war's recession phase (months 7-24) now
+    # draws contraction months, energy_transition's green inflation sits above the 4% line, and the k_shaped,
+    # agi_boom and dollar_decline views select other months; the engine's reference run and the history are
+    # unchanged
+    want = {"expansion": 0.502, "inflation": 0.314, "deflation": 0.002, "recession": 0.088, "depression": 0.018,
+            "stagflation": 0.076}
     assert lib["year1_weighted"] == pytest.approx(want, abs=0.002)
-    assert lib["p_contraction_year1_weighted"] == pytest.approx(0.256, abs=0.002)
+    assert lib["p_contraction_year1_weighted"] == pytest.approx(0.284, abs=0.002)
     w = {s["id"]: s["prob"] for s in index["scenarios"]}
 
     def weighted(key: str) -> dict:
         return {i: sum(w[sid] * d["regimes"]["windows"]["year1"][key][i] for sid, d in details.items())
                 for i in R.LABEL_IDS}
 
-    assert weighted("simulated_rt") == pytest.approx({"expansion": 0.558, "inflation": 0.355, "deflation": 0.001,
-                                                      "recession": 0.045, "depression": 0.001, "stagflation": 0.041},
+    assert weighted("simulated_rt") == pytest.approx({"expansion": 0.554, "inflation": 0.355, "deflation": 0.001,
+                                                      "recession": 0.041, "depression": 0.001, "stagflation": 0.048},
                                                      abs=0.002)
-    assert weighted("drawn") == pytest.approx({"expansion": 0.612, "inflation": 0.213, "deflation": 0.012,
-                                               "recession": 0.052, "depression": 0.055, "stagflation": 0.056},
+    assert weighted("drawn") == pytest.approx({"expansion": 0.602, "inflation": 0.208, "deflation": 0.011,
+                                               "recession": 0.064, "depression": 0.045, "stagflation": 0.07},
                                               abs=0.002)
     assert lib["reference"]["year1"] == pytest.approx({"expansion": 0.5441, "inflation": 0.3502, "deflation": 0.0019,
                                                        "recession": 0.0345, "depression": 0.0083,
@@ -647,9 +718,9 @@ def test_library_index_regime_check_values(library_build):
                                                           abs=1e-6)
     assert lib["history"]["p_contraction_12m_window"] == pytest.approx(0.2417, abs=5e-5)
     p_year1 = {s["id"]: round(s["regimes"]["p_contraction_year1"], 2) for s in index["scenarios"]}
-    assert p_year1 == {"baseline": 0.09, "k_shaped": 0.17, "oil_war": 0.49, "ai_bust": 0.41, "fiscal_dominance": 0.26,
+    assert p_year1 == {"baseline": 0.09, "k_shaped": 0.19, "oil_war": 0.73, "ai_bust": 0.41, "fiscal_dominance": 0.26,
                        "reacceleration": 0.02, "stagflation": 0.43, "deglobalization": 0.39, "agi_boom": 0.00,
-                       "energy_transition": 0.26, "dollar_decline": 0.15, "financial_crisis": 0.80,
+                       "energy_transition": 0.29, "dollar_decline": 0.20, "financial_crisis": 0.80,
                        "japanification": 0.33}
 
 
@@ -704,21 +775,31 @@ def test_audit_only_view_variables():
 
 
 @needs_panel
-def test_w13_on_the_calculator_specs_and_the_built_ins_under_the_final_model(ctx):
-    """With F the 13 built-ins validate with no warning beyond today's and W13, which fires on the two specs whose
-    income-distribution calculator drifts the labour share (k_shaped, agi_boom); the base model has no W13."""
+def test_w13_and_the_calculator_specs_under_the_final_model(ctx):
+    """Under F the labour share is outside the transmission, so the calculator writes its labour-share shift as
+    the f_labor_share view instead of a drift (k_shaped, agi_boom) and the 13 built-ins validate with no warning.
+    Resolved for the base model (labour share in the transmission) the calculator keeps the drift, and F warns
+    about it (W13): the drift is kept, and warned, on exactly those two specs; the base model has no W13."""
     from scenariolab.scenarios.schema import drift_factor_ids
     base = library.calibration_base(ctx)
     hits = {}
     for raw in library.load_specs():
+        under_f, cals = library.resolve_calibration(raw, base, _f_spec())
+        clean_f, report_f = validate_spec(under_f, ctx.db.frame, model_spec=_f_spec())
+        assert report_f["ok"] and not report_f["clipped"] and not report_f["warnings"], (raw["id"], report_f["warnings"])
+        assert not any("labor_share" in p["overrides"].get("factor_drift", {}) for p in clean_f["phases"])
+        for c in cals:                                                   # the shift is the view's mean_annual
+            view = next(v for v in clean_f["phases"][c["phase"]]["views"] if v["var"] == "f_labor_share")
+            assert view["mean_annual"] == pytest.approx(c["impact"]["labor_share_log_change"] / c["impact"]["years"],
+                                                        abs=1e-5)
+            assert calibrate.LABOR_SHARE_CAVEAT in c["caveats"] and "labor_share" not in c["overrides"]["factor_drift"]
         spec = library.resolve_calibration(raw, base)[0]
         clean, report = validate_spec(spec, ctx.db.frame, model_spec=_f_spec())
-        clipped, warnings = _unexpected(raw["id"], report)
-        assert report["ok"] and not clipped, raw["id"]
-        assert all(w.endswith(W13) for w in warnings), (raw["id"], warnings)
-        hits[raw["id"]] = len(warnings)
+        assert report["ok"] and not report["clipped"], raw["id"]
+        assert all(w.endswith(W13) for w in report["warnings"]), (raw["id"], report["warnings"])
+        hits[raw["id"]] = len(report["warnings"])
         drifts = [p["overrides"].get("factor_drift", {}) for p in clean["phases"]]
-        assert sum("labor_share" in d for d in drifts) == len(warnings)          # the drift is kept, and warned
+        assert sum("labor_share" in d for d in drifts) == len(report["warnings"])  # the drift is kept, and warned
         # an explicit list of driftable factors gives the same clean spec, without the warning
         again, rep2 = validate_spec(spec, ctx.db.frame, driftable=drift_factor_ids(_f_spec()))
         assert again == clean and not any(W13 in w for w in rep2["warnings"])
@@ -790,3 +871,23 @@ def test_a_scenario_under_the_final_model(f_ctx):
     assert [p["name"] for p in it["phases"]] == [p["name"] for p in detail["spec"]["phases"]]
     assert it["phases"][0]["drawn_share"] > it["database_share"] > 0.2         # a wage-price spiral draws them
     assert not any(W13 in w for w in detail["validation"]["warnings"])        # stagflation drifts no labour share
+
+
+@needs_panel
+def test_the_calculated_built_ins_simulate_under_the_final_model(f_ctx):
+    """The calculator's shipped path (F: the labour share is a view, not a drift), simulated as the library runs it:
+    k_shaped and agi_boom resolve, pool and run with no warning at all (no W13, no shrink, no regime check), and
+    the drawn months deliver the calculator's labour-share change within a percentage point."""
+    from scenariolab.scenarios import runner
+    base = library.calibration_base(f_ctx)
+    for sid in ("k_shaped", "agi_boom"):
+        raw = next(s for s in library.load_specs() if s["id"] == sid)
+        spec, cals = library.resolve_calibration(raw, base, f_ctx.model.spec)
+        assert cals and not any("labor_share" in p.get("overrides", {}).get("factor_drift", {}) for p in spec["phases"])
+        detail, sim = runner.run_spec(f_ctx, spec, n_paths=600, seed=library.seed_for(sid), attribution=False,
+                                      regimes=False)
+        assert not detail["validation"]["warnings"] and not detail["validation"]["clipped"], sid
+        for c in cals:
+            check = library._engine_check(c, sim)
+            assert check["labor_share_log_change_p50"] == pytest.approx(check["labor_share_log_change_assumed"],
+                                                                        abs=0.01), (sid, c["phase_name"])
