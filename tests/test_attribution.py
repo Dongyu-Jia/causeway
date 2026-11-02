@@ -98,6 +98,7 @@ def test_terms_add_up_to_the_mean_arithmetic_return(ctx, pair):
 
 
 def test_runner_summary_reconciles_to_the_median_cagr(ctx):
+    from scenariolab.engine import factor_model
     from scenariolab.scenarios.runner import run_spec
     detail, _ = run_spec(ctx, OIL_SHOCK, n_paths=300, seed=4)
     months = [p["months"] for p in detail["phases"]]
@@ -109,7 +110,8 @@ def test_runner_summary_reconciles_to_the_median_cagr(ctx):
             assert sum(blk["terms"].values()) == pytest.approx(blk["arithmetic"], abs=1e-12)
             assert blk["arithmetic"] + blk["reconciliation"] == pytest.approx(blk["cagr_p50"], abs=1e-12)
             if att["kind"] == "model":
-                fs = sum(blk["terms"][f] for f in ctx.model.features)
+                # an asset lists only its own equation's terms (a dedicated extra such as metals_oil is energy's)
+                fs = sum(blk["terms"][f] for f in factor_model.asset_feature_names(ctx.model.spec, a))
                 assert blk["factor_sum"] == pytest.approx(fs, abs=1e-12)
                 assert blk["factor_band"][0] <= blk["factor_band"][1]
         # the whole path is the months-weighted average of the phases
@@ -166,6 +168,8 @@ def test_factor_terms_use_the_simulated_factor_changes(ctx, pair):
     for a in ("us_equity", "energy"):
         j = sim.assets.index(a)
         for f, d in simulated.items():
+            if f not in ctx.model.features:              # e.g. the labor share, out of the selected transmission
+                continue
             beta = float(ctx.model.coef.loc[a, f])
             assert np.allclose(att.get(f)[:, :, j], beta * _phase_mean(d, months), atol=2e-6), (a, f)
             raw = ctx.db.factors[f"f_{f}"].to_numpy(float)[sim.idx]
@@ -211,6 +215,65 @@ def test_lagged_transmission_falls_back_to_an_unattributed_block(ctx):
     assert "unattributed" in att.terms and "intercept" not in att.terms
     assert np.abs(att.values.sum(axis=-1) - att.total).max() < 1e-12
     assert np.abs(att.get("unattributed")[:, :, sim.assets.index("us_equity")]).max() > 0
+
+
+def _equation_spec(ctx, which: str):
+    """(spec, the energy extra): the expected final model when the panel has its columns, else a stand-in with
+    the same structure from columns every panel has (an energy-only extra, gold fitted from 1982)."""
+    from scenariolab.engine.factor_model import ModelSpec, base_columns
+    if which == "final":
+        spec = ModelSpec(factors=("oil", "ip", "cpi_goods", "cpi_services", "ff", "y10", "spread", "usd", "unrate",
+                                  "gz", "tp10_x_core4"),
+                         asset_factors={"energy": ["metals_oil"]}, asset_start={"gold": "1982-01"}, name="final")
+        missing = [c for c in base_columns(spec) if c not in ctx.panel.columns]
+        if missing:
+            pytest.skip(f"the panel has no {', '.join(missing)} (built before the missing-factor round)")
+        return spec, "metals_oil"
+    spec = ModelSpec(asset_factors={"energy": ["profit_share"]}, asset_start={"gold": "1982-01"}, name="eq")
+    return spec, "profit_share"
+
+
+@pytest.mark.parametrize("which", ["stand_in", "final"])
+def test_attribution_stays_additive_with_asset_equations(ctx, which):
+    """Extras and per-asset fit windows: the split still adds up exactly, another asset's extra is 0 for an asset,
+    and gold's terms are its own (1982+) betas times the factor changes the transmission saw."""
+    from scenariolab.engine.simulate import MonthDB, make_anchor, simulate
+    spec, extra = _equation_spec(ctx, which)
+    model = ctx.fit(spec)
+    assert model.asset_train_start["gold"] == "1982-01" and model.coef.loc["us_equity", extra] == 0.0
+    db = MonthDB(ctx.panel, model)
+    months = [24, 36]
+    plain = simulate(db, make_anchor(ctx.panel, model), [db.prior()] * 2, months, n_paths=200, seed=6,
+                     overrides=[{"factor_drift": {extra: 0.5, "oil": 0.2}}, {}], **config.RESIDUALS)
+    sim = simulate(db, make_anchor(ctx.panel, model), [db.prior()] * 2, months, n_paths=200, seed=6,
+                   overrides=[{"factor_drift": {extra: 0.5, "oil": 0.2}}, {}], attribution=True, **config.RESIDUALS)
+    assert np.array_equal(plain.total, sim.total)
+    att = sim.attribution
+    assert att.method == "linear" and att.factor_terms == list(model.features) and extra in att.factor_terms
+    assert np.abs(att.values.sum(axis=-1) - att.total).max() < 1e-12
+    assert np.abs(att.values.sum(axis=-1) - _phase_mean(sim.total, months)).max() < 1e-6
+    en, eq, gold = (sim.assets.index(a) for a in ("energy", "us_equity", "gold"))
+    assert np.all(att.get(extra)[:, :, eq] == 0.0) and np.all(att.get(extra)[:, :, gold] == 0.0)
+    assert np.abs(att.get(extra)[:, :, en]).max() > 0
+    assert extra in att.asset_factor_terms["energy"] and extra not in att.asset_factor_terms["us_equity"]
+    assert set(att.asset_factor_terms) == {a for a, k in att.kinds.items() if k == "model"}
+    oil = np.diff(np.log(sim.macro["oil"].astype(float)), axis=1)
+    beta = float(model.coef.loc["gold", "oil"])
+    assert np.allclose(att.get("oil")[:, :, gold], beta * _phase_mean(oil, months), atol=2e-6)
+
+
+def test_runner_summary_adds_up_with_asset_equations(ctx):
+    from scenariolab.context import EngineContext
+    from scenariolab.scenarios.runner import run_spec
+    spec, extra = _equation_spec(ctx, "stand_in")
+    detail, _ = run_spec(EngineContext.load(spec=spec), OIL_SHOCK, n_paths=200, seed=4)
+    for a, x in detail["assets"].items():
+        att = x["attribution"]
+        assert att["total"]["cagr_p50"] == x["stats"]["cagr_p50"]
+        for blk in att["phases"] + [att["total"]]:
+            assert sum(blk["terms"].values()) == pytest.approx(blk["arithmetic"], abs=1e-12), a
+            assert blk["arithmetic"] + blk["reconciliation"] == pytest.approx(blk["cagr_p50"], abs=1e-12)
+    assert detail["assets"]["energy"]["attribution"]["total"]["terms"][extra] != 0.0
 
 
 def test_valuation_pull_gets_its_own_term_and_changes_nothing(ctx):

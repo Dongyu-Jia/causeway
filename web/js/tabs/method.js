@@ -14,6 +14,11 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
     '因果模型决定改哪些概率、改多少有上限，最后按今天的利率、估值和股息率把积木重新拼成 15 年的路径。',
     'LLM 只负责把文字情景翻译成这些概率约束，所有数字都由引擎计算。'));
 
+  // the missing-factor audit (optional) fills step 12 and one limitation with its numbers
+  const noAudit = Array.isArray(meta?.results) && !meta.results.includes('factor_audit');      // no request, no 404
+  const fa = api && !noAudit ? await api.get('factor_audit').catch(() => null) : null;
+  if (!alive()) return;
+
   // step 7 reads the CMA settings the build used (meta.cma), so it cannot drift from them
   const num = (x, dflt) => (typeof x === 'number' && Number.isFinite(x) ? x : dflt);
   const rev = num(cma.reversion, 0.3), horizon = num(cma.horizon_years, 15), shrink = num(cma.shrink_relative, 0.5);
@@ -22,19 +27,20 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
     + `行业相对大盘的超额漂移收缩 ${(shrink * 100).toFixed(0)}%。黄金没有现金流，它的“估值”就是实际金价：扣掉 1970 年代重新定价带来的历史实际涨幅，长期大致跟随通胀；`
     + (goldRev > 0 ? `并从今天的位置向历史中位数温和回归（${(goldRev * 100).toFixed(0)}%）。` : '今天的实际金价不再额外向历史中位数回归（这一项默认关闭）。');
   const steps = [
-    ['1. 历史月度库', '1947–至今的月度面板：宏观因子（油价、产出、商品/服务通胀、政策利率、10 年期收益率、信用利差、美元、失业率、劳动收入占比、利润占比、资本开支、家庭财富、白领就业、工资、信心、估值）和 13 类资产的总回报、价格回报与收入。模型从 1973 年（浮动汇率、黄金自由定价、OPEC 时代）开始估计。'],
+    ['1. 历史月度库', ...(panelStep(h, ui, meta, fa) || ['1947–至今的月度面板：宏观因子（油价、产出、商品/服务通胀、政策利率、10 年期收益率、信用利差、美元、失业率、劳动收入占比、利润占比、资本开支、家庭财富、白领就业、工资、信心、估值）和 13 类资产的总回报、价格回报与收入。模型从 1973 年（浮动汇率、黄金自由定价、OPEC 时代）开始估计。'])],
     ['2. 因果识别', '带符号约束的结构 VAR（Rubio-Ramírez–Waggoner–Zha 旋转算法）把每个月的变化拆成石油供给、总需求、货币政策、金融冲击；分时代估计脉冲响应，展示传导机制如何变化。劳动收入占比的冲击用季度局部投影（Jordà）估计它对消费、增长、利润和股价的影响。'],
     ['3. 情景 = 视图', '每个情景分阶段，每个阶段对少数“因”（结构冲击、油价、政策利率、利差、劳动收入占比……）和关键宏观结果给出均值约束，不直接对资产回报下判断。'],
     ['4. 熵池化（Entropy Pooling）', '在满足视图的前提下，找与历史分布 KL 距离最小的权重（Meucci 2008），解的形式是 q ∝ p·exp(λ·f)。视图约束的是“被抽中的 6 个月区块的平均值”，所以按区块起点求解：抽中月份的均值在期望上正好等于视图，不会被单月尖峰旁边的反弹抵消。有效月份数 ENS = exp(H(q)) 衡量“偏离历史多远”；视图组合找不到足够多同时满足的历史区块时，所有视图按同一比例 λ 向历史均值收缩并报告。'],
     ['5. 块状抽样 + 再锚定', '按权重抽连续 6 个月的块，保留通胀惯性和波动聚集；抽到的是变化量，按今天的水平重新拼接。利率变化按今天与当时的利率水平比例缩放（近零利率时期最多放大 1.5 倍；信用利差走阔时至少保留 85%），并向“中性利率 + 通胀”温和回归；实际油价扣掉 1973 年以来的长期上涨后向历史中位数回归（给了油价视图或油价漂移的阶段除外：那里油价按视图走，不做回归）。2020 年 3–8 月的封锁月份视为罕见事件，先验权重降为 1/4。'],
-    ['6. 今天的传导', '资产价格回报 = 因子模型（诊断与走步迭代选出的版本）× 模拟的因子变化 + 历史残差（因子解释不了的部分，保留资产之间的联动）。残差“部分耦合”：每个 6 个月区块有一半概率沿用抽中月份自己的残差，否则换成按历史先验独立抽取的残差，免得视图把少数历史片段的残差漂移一起带进来（引擎消融选出的设定）。10 年美债按收益率路径重定价，现金跟随政策利率，原油直接取油价变化。',
+    ['6. 今天的传导', `${transmissionText(ui, meta)}残差“部分耦合”：每个 6 个月区块有一半概率沿用抽中月份自己的残差，否则换成按历史先验独立抽取的残差，免得视图把少数历史片段的残差漂移一起带进来（之前一次引擎消融选出并采用的设定；之后的消融结果和是否改用别的设定，见“诊断与迭代”的引擎消融）。10 年美债按收益率路径重定价，现金跟随政策利率，原油直接取油价变化。`,
       h('a', { href: '#diagnostics?ablation' }, '残差设定的消融证据见“诊断与迭代” →')],
     ['7. 估值锚定（CMA）', step7],
     ['8. K 线与提取', '每个情景 600 条路径：扇形图给出分位数；K 线展示一条“代表路径”（终值和最大回撤都接近中位数），日内高低点用布朗桥补出。组合与提取在同一批路径上计算，提取额随路径自己的 CPI 上调。提取期限超过 15 年时（最长 40 年），第 16 年起没有情景主题：每条情景路径各接一条不加视图的无条件引擎路径（长期回报假设去掉只为前 15 年设定的估值回归项）。'],
     ['9. 怎么检验', '一年期：每年年底只用当时的数据预测下一年（相似起点法 vs 随机历史年份 vs 历史均值），看区间覆盖率、CRPS 和排序能力，外生冲击年份单独标出。多年期：只在给定情景主题时检验，回测窗口把真实宏观路径当作主题，检查引擎能否复现资产，并把误差拆成情景、引擎和传导三部分。'],
-    ['10. 估值是状态，不是因子', '市盈率（CAPE）和 P/D 的月度变化几乎就是当月的股价变化，放进因子模型等于用股价解释股价，所以只作对照；实际利率、利润增长、利润减资本开支这些外生候选在走步检验里也没有稳定提升样本外 R²，因子模型保持不变。估值改作“状态”：每条模拟路径都记录 P/D（κ=0，只记录、不改变回报），每个情景详情里都能看到它隐含的 15 年后估值。把 P/D 按 −κ·(ln P/D − ln 公允 P/D) 拉回公允值的设定在回测里比现行引擎差，所以拉力关闭，长期估值假设只通过第 7 步的常数调整进入。',
+    ['10. 估值是状态，不是因子', '市盈率（CAPE）和 P/D 的月度变化几乎就是当月的股价变化，放进因子模型等于用股价解释股价，所以只作对照；实际利率、利润增长、利润减资本开支这些外生候选在走步检验里也没有稳定提升样本外 R²，没有进入因子模型（因子模型这一轮的变化见第 12 步）。估值改作“状态”：每条模拟路径都记录 P/D（κ=0，只记录、不改变回报），每个情景详情里都能看到它隐含的 15 年后估值。把 P/D 按 −κ·(ln P/D − ln 公允 P/D) 拉回公允值的设定在回测里比现行引擎差，所以拉力关闭，长期估值假设只通过第 7 步的常数调整进入。',
       h('a', { href: '#valuation' }, '证据见“估值与盈利” →')],
   ];
+  steps.push(auditStep(h, fa));
   root.append(h('div', { class: 'grid cols-2 text' }, steps.map(([t, d, more]) => card({ title: t }, h('p', { style: { margin: 0 } }, d),
     more ? h('p', { style: { margin: '8px 0 0' } }, more) : null))));
 
@@ -65,7 +71,8 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
   const src = meta?.sources || {};
   root.append(card({ title: '公开数据（构建时下载，不随代码分发）' },
     h('ul', { class: 'list' }, Object.entries(src).map(([k, v]) => h('li', {}, h('a', { href: v, target: '_blank', rel: 'noopener' }, k)))),
-    h('ul', { class: 'list' }, (meta?.notes || []).map(n => h('li', { class: 'muted' }, n)))));
+    h('ul', { class: 'list' }, (meta?.notes || []).map(n => h('li', { class: 'muted' }, n))),
+    h('p', { class: 'muted', style: { margin: '10px 0 0', fontSize: '12px' } }, COPYRIGHT)));
 
   root.append(h('div', { class: 'section-title' }, '局限'));
   root.append(card({},
@@ -75,6 +82,7 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
       h('li', {}, '战争、地缘政治、AGI 在模型里都是外生冲击；超出历史支持的部分（如 AGI 生产率）通过有上限的覆盖参数注入，并在界面上标出。'),
       h('li', {}, '情景概率是透明的启发式：主观先验 × 与当前状态的相似度，不是统计意义上的预测概率。'),
       h('li', {}, '一年期的资产回报本来就很难预测：滚动检验显示“今天像哪段历史”只能轻微调整预测，方向判断不比“总是猜涨”更好；模型的价值在于区间是否可靠、跨资产排序和情景一致性。'),
+      h('li', {}, auditLimit(fa)),
       h('li', {}, '所有结果都是假设性的模拟，不构成投资建议。'))));
 }
 
@@ -94,4 +102,82 @@ function valuationRows(h, val) {
     h('dt', {}, '今天相对公允值'), h('dd', {}, `对数缺口 ${sg(val.today?.gap_log)}`,
       Array.isArray(range) ? `（换公式 ${sg(range[0])} ~ ${sg(range[1])}）` : ''),
   ];
+}
+
+// ---- the missing-factor round (factor_audit.json and the selected model in meta.json; both optional)
+
+const COPYRIGHT = '第三方版权：Moody\'s（Baa 公司债收益率，经 FRED）、Freddie Mac（30 年房贷利率 PMMS、房价指数 FMHPI）、'
+  + '密歇根大学（消费者调查与通胀预期）、Robert J. Shiller（CAPE 与美国房价）。数据只在本地构建时下载，不随代码分发。';
+const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
+
+// Step 1: the panel. The factor lists come from meta.json: the selected model's factors first, then the other
+// macro factors (candidates and simulated paths), then the scenario view variables grouped by concept.
+// Returns [text, details] or null (meta.json without a selected model: the fixed sentence is used).
+function panelStep(h, ui, meta, fa) {
+  const F = Object.fromEntries((meta?.factors || []).map(f => [f.id, f]));
+  const spec = meta?.model?.spec || {};
+  const inModel = (spec.factors || []).filter(id => F[id]);
+  if (!inModel.length) return null;
+  const nm = (id) => F[id]?.name || id;
+  const extra = Object.entries(spec.asset_factors || {}).filter(([, ids]) => Array.isArray(ids) && ids.length);
+  const extraIds = new Set(extra.flatMap(([, ids]) => ids));
+  const others = (meta.factors || []).filter(f => !inModel.includes(f.id) && !extraIds.has(f.id) && f.role !== 'audit').map(f => f.name);
+  const nAssets = (meta.assets || []).length;
+  const text = `1947–至今的月度面板。传导模型的因子（走步检验选出）：${inModel.map(nm).join('、')}`
+    + (extra.length ? `；${extra.map(([a, ids]) => `${ui.assetName(a)}另含${ids.map(nm).join('、')}`).join('；')}` : '')
+    + `。其他宏观因子（候选和模拟路径）：${others.join('、') || '—'}。${nAssets ? `${nAssets} 类` : '各类'}资产的总回报、价格回报与收入。`
+    + '季度数据按发布月对齐，不插值。模型从 1973 年（浮动汇率、黄金自由定价、OPEC 时代）开始估计。';
+  // scenario view variables by concept: concept names from meta.json (view_concepts) or the audit's concept table
+  const views = (meta.states || []).filter(s => s.concept);
+  if (!views.length) return [text];
+  const cname = { ...Object.fromEntries((fa?.concepts || []).filter(c => c.id && c.name).map(c => [c.id, c.name])), ...(meta.view_concepts || {}) };
+  const order = [...Object.keys(meta.view_concepts || {}), ...views.map(s => s.concept)].filter((c, i, a) => a.indexOf(c) === i);
+  const groups = order.map(c => [c, views.filter(s => s.concept === c)]).filter(([, ss]) => ss.length);
+  return [text, h('details', {},
+    h('summary', { style: { cursor: 'pointer', color: 'var(--accent)', fontSize: '13px' } }, `情景变量（不进传导模型，${views.length} 个，按概念）`),
+    h('ul', { class: 'list', style: { fontSize: '13px', marginTop: '6px' } }, groups.map(([c, ss]) => h('li', {},
+      cname[c] ? h('span', { class: 'muted' }, `${cname[c]}：`) : null, ss.map(s => `${s.name}${s.late ? '（晚开始）' : ''}`).join('、')))))];
+}
+
+// Step 6's first sentences from the selected model: inputs taken from the drawn months as they are, and
+// equations fitted on a shorter window.
+function transmissionText(ui, meta) {
+  const spec = meta?.model?.spec;
+  const desc = meta?.model?.describe;
+  const head = `资产价格回报 = 走步检验选出的线性因子模型${desc ? `（${desc}）` : '（诊断与走步迭代选出的版本）'} × 模拟的因子变化 + 历史残差（因子解释不了的部分，保留资产之间的联动）。`;
+  if (!spec || !Array.isArray(spec.factors)) return head;
+  const F = Object.fromEntries((meta.factors || []).map(f => [f.id, f]));
+  const own = [];
+  if (spec.factors.includes('gz')) own.push('GZ 信用利差');
+  if (spec.factors.some(id => F[id]?.interaction)) own.push('期限溢价项');
+  for (const [a, ids] of Object.entries(spec.asset_factors || {})) {
+    if (Array.isArray(ids) && ids.length) own.push(`${ui.assetName(a)}的${ids.map(id => (F[id]?.name || id).replace(/变动$/, '')).join('、')}`);
+  }
+  const starts = Object.entries(spec.asset_start || {}).filter(([, ym]) => typeof ym === 'string' && ym)
+    .map(([a, ym]) => `${ui.assetName(a)}方程用 ${ym.slice(0, 4)} 年以来的月份估计`);
+  // an interaction term switches on with the drawn month's own state (FACTORS_DESIGN §3.3): say what that means
+  const inter = spec.factors.map(id => F[id]?.interaction).find(Boolean);
+  const STATE = { core_yoy: '核心 CPI 同比', cpi_yoy: 'CPI 同比' };
+  const interText = inter && isNum(inter.above)
+    ? `期限溢价项只在抽中的历史月份本身处于高通胀时起作用（${inter.lag === 1 ? '上月' : `${inter.lag} 个月前`}${STATE[inter.state] || '通胀'}高于 ${inter.above}%：1973–92 年的大部分月份、2021–23 年）；`
+      + '模拟路径的通胀升高不会自动打开它，要让它起作用，阶段视图里要多抽这些月份（例如给核心 CPI 同比或宏观体制的高通胀标志设视图）。'
+    : '';
+  return head + (own.length ? `${own.join('、')}取自抽中的历史月份本身，不按今天的利差水平缩放` : '')
+    + (starts.length ? `${own.length ? '；' : ''}${starts.join('；')}` : '') + (own.length || starts.length ? '。' : '') + interText;
+}
+
+// Step 12 (the macro-regime layer's step is 11): the missing-factor audit.
+function auditStep(h, fa) {
+  const S = fa?.summary || {};
+  const counts = isNum(S.n_transmission) && isNum(S.n_predictive)
+    ? `研究轮的${isNum(S.families) ? ` ${S.families} 个` : ''}研究家族测试了 ${S.n_transmission} 个同月传导候选和 ${S.n_predictive} 个预测状态（研究轮存档的数字）`
+    : '研究轮按家族测试了同月传导候选和预测状态';
+  return ['12. 缺失因子审计', `${counts}；只有通过多重检验、反驳检验和走步验证的改动进入模型，其余的作为情景变量或只在审计里报告。`,
+    h('a', { href: '#diagnostics?audit' }, '缺失因子审计 →')];
+}
+
+function auditLimit(fa) {
+  const u = fa?.summary?.unexplained_share_2015_2026;
+  return `${isNum(u) ? `约 ${(u * 100).toFixed(0)}% ` : '大部分'}的月度价格波动在样本外解释不了（市场自身的估值与风险偏好、行业新闻、危机月份），`
+    + '引擎用抽中月份的残差承载这一部分；GZ 和期限溢价是今天的修订版和模型估计值。';
 }

@@ -1,9 +1,11 @@
 """Why is the prediction wrong? Statistical diagnostics of the transmission model.
 
-run(ctx) drives the walk-forward loop (walkforward.py) with `diagnose` as its
-first step, analyses the residuals of the final spec on the full sample,
-derives recommendations and writes results/model_selection.json, the spec
-EngineContext then refits on all data. It returns the diagnostics.json dict.
+run(ctx) drives the walk-forward loop (walkforward.py: stage A with `diagnose`
+as the first step of each iteration, then stage B, the changes to single
+assets' equations), analyses the residuals of the final spec on the full
+sample, derives recommendations and writes results/model_selection.json, the
+spec EngineContext then refits on all data. It returns the diagnostics.json
+dict.
 
 Tests, on monthly price returns of the non-structural assets (the nested
 F-tests use the linear OLS version of the spec):
@@ -16,8 +18,11 @@ F-tests use the linear OLS version of the spec):
   nonlinearity     RESET test (squared and cubed fitted values)
   drift bias       mean out-of-sample residual and its share of the MSE
   overfit          in-sample vs out-of-sample R^2
-t-statistics treat months as independent; quarterly-interpolated series are
-smooth, so their significance is overstated.
+These run on stage A's starting specs, which never have per-asset equations;
+the full-sample residual analysis of the final spec fits each asset's own
+equation (its extra regressors, its own first month). t-statistics treat
+months as independent; quarterly series are dated at publication, so they
+change in release months only.
 """
 from __future__ import annotations
 
@@ -30,7 +35,8 @@ from scipy import stats
 
 from .. import config, jsonio
 from ..context import EngineContext
-from ..engine.factor_model import MODEL_ASSETS, AssetFactorModel, ModelSpec, design_matrix
+from ..engine.factor_model import (HIGH_INFLATION, MODEL_ASSETS, SHORT_NAMES, AssetFactorModel, ModelSpec, asset_extras,
+                                   asset_feature_names, design_matrix)
 from . import walkforward as wf
 
 SCORE_ASSETS = wf.SCORE_ASSETS
@@ -44,17 +50,31 @@ BREAK_DATE = "2000-01"
 BETA_FACTORS = ("oil", "y10", "spread", "cpi_services")
 BETA_WINDOW = 120
 SELECTION_PATH = config.RESULTS_DIR / "model_selection.json"
+MAX_RECS = 12
+# Data fixes of the panel that belong with the factor answer (an audit column marks each one as applied).
+DATA_FIXES = {"x_spread_mixed": "信用利差的计时修正"}
+# short names of the mechanism candidates in the mechanism answer
+MECHANISM_SHORT = {"regime_inflation": "整体通胀状态交互", "lags1": "滞后", "lags3": "滞后", "shocks_add": "结构冲击",
+                   "shocks_replace_oil": "结构冲击"}
+# factors switched on by a lagged state (config.FACTORS "interaction"; the term-premium term)
+INTERACTION_FACTORS = {f["id"] for f in config.FACTORS if f.get("interaction")}
 UNITS = {
     "score": "非结构性资产（股票、REITs、黄金）月度价格收益样本外 R² 的平均值，用实际因子变化预测；"
              "R² = 1 − SSE/SST，SST 以训练期均值为基准，R² > 0 表示好过只用历史均值",
+    "asset_gain": "专门改动：这个资产月度价格收益样本外 R² 的变化（基准同样是整个训练期的平均收益）",
     "bias_annual": "验证期平均残差 × 12（小数，正数 = 模型低估）",
     "beta_per_sd": "因子变动 1 个标准差时资产当月价格收益（小数）",
     "p": "检验的 p 值（< 0.05 视为显著）",
 }
 NOTES = [
-    "所有 t 统计量把月份当作相互独立；季度数据插值成的月度序列很平滑，显著性会被高估。",
-    "F 检验（滞后、状态、Chow、RESET）用同一组特征的普通最小二乘线性模型；神经网络没有对应的检验。",
+    "所有 t 统计量把月份当作相互独立。季度数据按通常的发布滞后对齐，只在发布月变化（个别推迟发布的季度会早 1–2 个月出现）。",
+    "F 检验（滞后、状态、Chow、RESET）用同一组特征的普通最小二乘线性模型；神经网络没有对应的检验。"
+    "全样本残差分析里，有专门因子或自己起始月份的资产用它自己方程的特征和月份。",
     "Chow 检验假设两段样本的残差方差相同；金融收益的波动率随时代变化，检验会偏向拒绝。",
+    f"走步检验的门槛是递增的：每一轮新选中的改动要在未参与选择的测试期比本轮起始模型高出 {wf.MIN_GAIN} 以上才保留"
+    "（第 1 轮的起始模型就是基准），下一轮从保留的模型出发" + ("" if wf.MLP_ELIGIBLE else "；神经网络只作对照") + "。",
+    f"专门改动（只作用于单个资产的方程）在共同模型定下之后单独检验：最后一轮的验证期和测试期都要让这个资产的 R² 提高超过 "
+    f"{wf.MIN_GAIN_ASSET}；它和共同改动用的是同一批测试十年。",
 ]
 
 
@@ -196,23 +216,30 @@ def _missing_factor(panel, spec, resid, rows_tr, rows_va, candidates) -> dict:
         best = max(t_va, key=t_va.get) if t_va else None
         both = [a for a in SCORE_ASSETS if abs(per[a]["t_train"]) > 2 and abs(per[a]["t_validate"]) > 2
                 and np.sign(per[a]["corr_train"]) == np.sign(per[a]["corr_validate"])]
+        # a series that is constant over the validation months (the term-premium term is 0 throughout 1995-2014)
+        # has no correlation there
+        mac = [abs(per[a]["corr_validate"]) for a in SCORE_ASSETS if np.isfinite(per[a]["corr_validate"])]
         table.append({
             "column": col, "name": FACTOR_NAMES.get(col[2:] if col.startswith("f_") else col, col),
-            "candidate": cid, "eligible": eligible,
+            "candidate": cid, "eligible": eligible, "endogenous": cid.removeprefix("add_") in wf.ENDOGENOUS,
             "n_sig_train": int(sum(abs(per[a]["t_train"]) > 2 for a in SCORE_ASSETS)),
             "n_sig_validate": int(sum(abs(per[a]["t_validate"]) > 2 for a in SCORE_ASSETS)),
             "n_sig_both": len(both), "spanned_r2": spanned_r2(panel, spec, col, rows_tr),
-            "mean_abs_corr_validate": float(np.nanmean([abs(per[a]["corr_validate"]) for a in SCORE_ASSETS])),
+            "mean_abs_corr_validate": float(np.mean(mac)) if mac else float("nan"),
             "best": {"asset": best, "corr": per[best]["corr_validate"], "t": per[best]["t_validate"]} if best else None,
             "per_asset": per,
         })
-    table.sort(key=lambda r: (-r["n_sig_both"], -r["n_sig_validate"], -r["mean_abs_corr_validate"]))
+
+    def mac_key(r):
+        return -r["mean_abs_corr_validate"] if np.isfinite(r["mean_abs_corr_validate"]) else 0.0
+
+    table.sort(key=lambda r: (-r["n_sig_both"], -r["n_sig_validate"], mac_key(r)))
     good = [r for r in table if r["eligible"] and r["n_sig_both"] >= MIN_FLAG]
     late = [r for r in table if r["eligible"] and r["n_sig_validate"] >= MIN_FLAG and r["n_sig_train"] < MIN_FLAG]
     n = len(SCORE_ASSETS)
-    shown = sorted(table, key=lambda r: (-r["n_sig_validate"], -r["mean_abs_corr_validate"]))[:3]
-    parts = [f"「{r['name']}」{'' if r['eligible'] else '（内生，只作对照）'}：训练期 {r['n_sig_train']}/{n}、"
-             f"验证期 {r['n_sig_validate']}/{n}" for r in shown]
+    shown = sorted(table, key=lambda r: (-r["n_sig_validate"], mac_key(r)))[:3]
+    parts = [f"「{r['name']}」{'' if r['eligible'] else '（内生，只作对照）' if r['endogenous'] else '（只作对照）'}："
+             f"训练期 {r['n_sig_train']}/{n}、验证期 {r['n_sig_validate']}/{n}" for r in shown]
     text = "与残差显著相关（|t|>2）的资产数，最多的是 " + "；".join(parts) + "。"
     text += (f"在训练期和验证期都显著、方向一致的可用因子：{'、'.join(r['name'] for r in good)}，值得一试。" if good
              else f"没有一个可用的候选因子在训练期和验证期都对 {MIN_FLAG} 个以上资产显著，缺因子不是主要问题。")
@@ -342,14 +369,22 @@ def diagnose(panel: pd.DataFrame, spec: ModelSpec, train: tuple, validate: tuple
 # ---------------------------------------------------------------- full-sample residuals
 
 def rolling_betas(panel: pd.DataFrame, spec: ModelSpec, factors=BETA_FACTORS, window: int = BETA_WINDOW) -> dict:
-    """Trailing `window`-month OLS betas, one point per calendar year, per 1-sd factor move."""
-    lin = ModelSpec(factors=tuple(dict.fromkeys([*spec.factors, *factors])), shock_cols=spec.shock_cols)
+    """Trailing `window`-month OLS betas, one point per calendar year, per 1-sd factor move.
+
+    Each asset's regression holds its own equation's extra regressors (asset_factors). Its own later first
+    month (asset_start) never binds in a trailing window of at most MIN_ASSET_WINDOW months: the window
+    either lies after it or keeps fewer than MIN_ASSET_WINDOW of its months, where the engine falls back
+    to the common start."""
+    lin = ModelSpec(factors=tuple(dict.fromkeys([*spec.factors, *factors])), shock_cols=spec.shock_cols,
+                    asset_factors=spec.asset_factors)
     X = design_matrix(panel, lin).loc[config.MODEL_START:]
     Y = panel.loc[config.MODEL_START:, [f"p_{a}" for a in MODEL_ASSETS]]
     ok = X.notna().all(axis=1) & Y.notna().all(axis=1)
     X, Y = X[ok], Y[ok]
-    cols = [list(X.columns).index(f) + 1 for f in factors]          # +1 for the constant
     sd = X[list(factors)].std()
+    groups: dict[tuple, list[int]] = {}          # an equation's features -> the assets (columns of Y) using it
+    for j, a in enumerate(MODEL_ASSETS):
+        groups.setdefault(tuple(asset_feature_names(lin, a)), []).append(j)
     years = []
     beta = {a: {f: [] for f in factors} for a in MODEL_ASSETS}
     se = {a: {f: [] for f in factors} for a in MODEL_ASSETS}
@@ -357,49 +392,65 @@ def rolling_betas(panel: pd.DataFrame, spec: ModelSpec, factors=BETA_FACTORS, wi
         idx = X.index[X.index <= pd.Timestamp(f"{year}-12-01")][-window:]
         if len(idx) < window or idx[-1].year != year:
             continue
-        Z = np.column_stack([np.ones(window), X.loc[idx].to_numpy(float)])
-        y = Y.loc[idx].to_numpy(float)
-        b, *_ = np.linalg.lstsq(Z, y, rcond=None)
-        s2 = ((y - Z @ b) ** 2).sum(axis=0) / (window - Z.shape[1])
-        diag = np.diag(np.linalg.pinv(Z.T @ Z))
         years.append(str(year))
-        for j, a in enumerate(MODEL_ASSETS):
-            for f, c in zip(factors, cols):
-                beta[a][f].append(float(b[c, j] * sd[f]))
-                se[a][f].append(float(np.sqrt(diag[c] * s2[j]) * sd[f]))
+        for names, js in groups.items():
+            cols = [names.index(f) + 1 for f in factors]          # +1 for the constant
+            Z = np.column_stack([np.ones(window), X.loc[idx, list(names)].to_numpy(float)])
+            y = Y.loc[idx].to_numpy(float)[:, js]
+            b, *_ = np.linalg.lstsq(Z, y, rcond=None)
+            s2 = ((y - Z @ b) ** 2).sum(axis=0) / (window - Z.shape[1])
+            diag = np.diag(np.linalg.pinv(Z.T @ Z))
+            for jj, j in enumerate(js):
+                a = MODEL_ASSETS[j]
+                for f, c in zip(factors, cols):
+                    beta[a][f].append(float(b[c, jj] * sd[f]))
+                    se[a][f].append(float(np.sqrt(diag[c] * s2[jj]) * sd[f]))
     return {"years": years, "factors": list(factors), "window_months": window,
             "factor_sd": {f: float(sd[f]) for f in factors},
             "assets": {a: {"beta": beta[a], "se": se[a]} for a in MODEL_ASSETS}}
 
 
 def residual_analysis(panel: pd.DataFrame, spec: ModelSpec, candidates) -> dict:
+    """Full-sample residual diagnostics of the final spec, per asset on its own equation: the features it has
+    (the common ones and its extras) and the months it is fitted on (from its own first month when the
+    engine honours it), so gold's Chow and Ljung-Box tests do not include months its equation never saw."""
     model = AssetFactorModel(spec).fit(panel, config.MODEL_START, None)
     resid = model.residuals(panel).loc[model.train_start:model.train_end, MODEL_ASSETS]
     lin = replace(spec, kind="linear", ridge=0.0)
     brk = pd.Timestamp(BREAK_DATE)
-    y1, X1 = _xy(panel, lin, model.train_start, brk - pd.DateOffset(months=1), MODEL_ASSETS)
-    y2, X2 = _xy(panel, lin, brk, model.train_end, MODEL_ASSETS)
-    k = X1.shape[1] + 1
-    F, p = chow(y1, X1, y2, X2) if min(len(y1), len(y2)) > 3 * k else (np.full(len(MODEL_ASSETS), np.nan),) * 2
+    X_all = design_matrix(panel, lin).loc[model.train_start:model.train_end]
+    Y_all = panel.loc[model.train_start:model.train_end, [f"p_{a}" for a in MODEL_ASSETS]]
+    joint = X_all.notna().all(axis=1) & Y_all.notna().all(axis=1)          # the months of the joint fit
     cols = _candidate_columns(candidates)
     assets = {}
-    for j, a in enumerate(MODEL_ASSETS):
-        e = resid[a].dropna()
+    for a in MODEL_ASSETS:
+        first = pd.Timestamp(model.asset_train_start.get(a) or model.train_start)
+        rows = joint & (X_all.index >= first)
+        names = asset_feature_names(lin, a)
+        y, X = Y_all.loc[rows, [f"p_{a}"]].to_numpy(float), X_all.loc[rows, names].to_numpy(float)
+        before = np.asarray(X_all.index[rows] < brk)
+        k = X.shape[1] + 1
+        F, p = (chow(y[before], X[before], y[~before], X[~before]) if min(before.sum(), (~before).sum()) > 3 * k
+                else (np.full(1, np.nan),) * 2)
+        e = resid.loc[first:, a].dropna()
         q, pv = ljung_box(e)
         corr = {}
         for col, (cid, eligible) in cols.items():
             r, n = _corr(e, panel[col])
             corr[col] = {"corr": r, "t": corr_t(r, n) if np.isfinite(r) else None, "candidate": cid, "eligible": eligible}
         assets[a] = {"name": NAMES[a], "r2": model.stats.r2[a], "resid_sd": model.stats.resid_sd[a],
+                     "fit_start": _ym(first), "own_factors": list(asset_extras(spec).get(a, ())),
                      "acf": acf(e), "ljung_box_q": q, "ljung_box_p": pv, "factor_corr": corr,
-                     "chow_f": float(F[j]), "chow_p": float(p[j])}
+                     "chow_f": float(F[0]), "chow_p": float(p[0])}
     chow_rej = [a for a in SCORE_ASSETS if assets[a]["chow_p"] < ALPHA]
     lb_rej = [a for a in SCORE_ASSETS if assets[a]["ljung_box_p"] < ALPHA]
     sample = (model.train_start, model.train_end)
-    leakage = {f: wf.leakage_evidence(panel, f"f_{f}", sample) for f in wf.ENDOGENOUS if f"f_{f}" in panel}
+    leakage = {f: wf.leakage_evidence(panel, f"f_{f}", sample, wf.RELEASE_QUARTER_LAG.get(f))
+               for f in wf.ENDOGENOUS if f"f_{f}" in panel}
     return {
         "spec": spec.to_dict(), "describe": spec.describe(),
         "sample": [_ym(model.train_start), _ym(model.train_end)], "break_date": BREAK_DATE,
+        "asset_train_start": dict(model.asset_train_start), "asset_start_used": dict(model.asset_start_used),
         "acf_lags": list(range(1, ACF_LAGS + 1)), "assets": assets,
         "leakage": leakage,
         "rolling_betas": rolling_betas(panel, spec),
@@ -432,9 +483,40 @@ def _fmt(rows: list[dict]) -> str:
     return "、".join(f"{r['period']} {r['delta']:+.3f}" for r in rows)
 
 
-def recommendations(res: dict, resid: dict) -> list[dict]:
+def _stage_b_lines(sb: dict) -> list[str]:
+    """Per eligible stage-B candidate: its option chosen in the last iteration (else the best) and the asset's
+    validation / test gain of each iteration's chosen option."""
+    out = []
+    for c in sb["candidates"]:
+        if not c.get("eligible", True):
+            continue
+        picks = []
+        for it in sb["iterations"]:
+            rows = [r for r in it["rows"] if r["id"] == c["id"] and r["evaluated"]]
+            r = next((r for r in rows if r["chosen"]), None) or max(rows, key=lambda r: r["val_gain"], default=None)
+            if r is not None:
+                picks.append((it["iter"], r))
+        if not picks:
+            continue
+        head = picks[-1][1]["label"]
+        out.append(head + "（" + "；".join(
+            f"第 {k} 轮{'' if r['label'] == head else r['label']}验证期 {r['val_gain']:+.3f}、测试期 {r['test_gain']:+.3f}"
+            + ("" if r["chosen"] else "，没有过验证期的门槛") for k, r in picks) + "）")
+    return out
+
+
+def _name(cands: dict, cid: str) -> str:
+    """Chinese name of a candidate: its factor's name for an added factor, else its hypothesis."""
+    f = cid.removeprefix("add_")
+    return FACTOR_NAMES[f] if cid.startswith("add_") and f in FACTOR_NAMES else cands.get(cid, {}).get("hypothesis", cid)
+
+
+def recommendations(res: dict, resid: dict, fixes: list[str] | None = None) -> list[dict]:
+    """The answers to the four questions, from the walk-forward result and the residual analysis. `fixes` are
+    the panel's data fixes that belong with the factor answer (DATA_FIXES)."""
     its = res["iterations"]
     fin = res["final"]
+    cands = {c["id"]: c for c in res["candidates"]}
     recs = []
 
     def add(priority: str, group: str, title: str, detail: str, **evidence):
@@ -444,14 +526,40 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
     base_oos = ([{"period": _period(its[0]["validate"]), "r2": its[0]["baseline"]["val_score"]}]
                 + [{"period": _period(it["test"]), "r2": it["test_result"]["base_all_months"]["score"]} for it in its])
     base_txt = "、".join(f"{r['period']} {r['r2']:+.3f}" for r in base_oos)
+    common = fin.get("common") or {}
     if fin["is_base"]:
         add("高", "tuning", f"保留基准线性模型（{len(fin['spec']['factors'])} 个核心宏观因子，全样本估计）",
             fin["reason"] + f" 基准模型各样本外十年的平均 R²：{base_txt}。", base_oos_r2=base_oos,
             last_selected=fin["last_selected"])
     else:
+        rejected = {"last_selected": fin["last_selected"]} if common.get("kept", "selected") != "selected" else {}
         add("高", "tuning", f"采用 {fin['describe']}",
             fin["reason"] + f" 测试期平均 R² {fin['base_test_score']:.3f} → {fin['test_score']:.3f}；"
-            f"基准各样本外十年：{base_txt}。", changes=fin["changes"], base_oos_r2=base_oos)
+            f"基准各样本外十年：{base_txt}。", changes=fin["changes"], base_oos_r2=base_oos, **rejected)
+
+    factors = {cid: oos_deltas(its, cid) for cid, c in cands.items()
+               if c["eligible"] and (c["change"].get("add_factors") or c["change"].get("shock_cols"))}
+    factors = {c: d for c, d in factors.items() if d}
+    if factors:
+        robust = [c for c, d in factors.items() if all(r["delta"] > wf.MIN_GAIN for r in d)]
+        adopted = [c for c in robust if c in fin["changes"]]
+        label = {c: _name(cands, c) for c in factors}
+        body = "单独加入后样本外 R² 的变化：" + "；".join(f"{label[c]} {_fmt(d)}" for c, d in factors.items()) + "。"
+        if adopted:
+            drop = oos_deltas(its, "drop_labor_share") if "drop_labor_share" in fin["changes"] else []
+            add("高", "missing_factor", f"是：「{'、'.join(label[c] for c in adopted)}」在每个样本外十年都提高 R²，已采用",
+                body + "它们通过了走步检验，进入最终模型。"
+                + (f"{'、'.join(fixes)}属于同一类：问题出在因子本身（缺了，或者测量的时点不对），而不是模型形式。"
+                   if fixes else "")
+                + (f"走步检验还去掉了劳动收入占比：按发布月对齐后，单独去掉它的变化是 {_fmt(drop)}，保留与否差别很小。"
+                   if drop else ""),
+                robust=robust, changes=adopted, oos_delta=factors)
+        else:
+            add("低", "missing_factor",
+                f"「{'、'.join(label[c] for c in robust)}」在每个样本外十年都稳定提升" if robust
+                else "没有一个候选因子在每个样本外十年都稳定提升",
+                body + ("可以作为可选因子加入。" if robust else "缺一个因子不是预测误差的主要原因。"),
+                robust=robust, oos_delta=factors)
 
     endo = {c: oos_deltas(its, c) for c in ("add_valuation", "add_cape", "add_wealth")}
     endo = {c: d for c, d in endo.items() if d}
@@ -464,12 +572,28 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
         if "add_cape" in endo and "cape" in lk:
             why.append(f"席勒 CAPE 的变化同样几乎就是股价本身（与当月美股价格收益相关 {lk['cape']['same_month']:.2f}）")
         if "add_wealth" in endo and "wealth" in lk:
-            why.append(f"家庭净值包含股票市值，且季度插值会把之后几个月的股市涨跌提前带进当月（与下月美股价格收益相关 "
-                       f"{lk['wealth']['next_month']:.2f}，与当月 {lk['wealth']['same_month']:.2f}）")
+            q = lk["wealth"].get("quarter")
+            why.append("家庭净值包含股票市值，按发布月对齐后，它在发布月的变化主要就是它所描述那个季度的股市涨跌"
+                       + (f"（发布月与那个季度美股价格收益之和相关 {q:.2f}，与当月 {lk['wealth']['same_month']:.2f}）"
+                          if q is not None and np.isfinite(q) else ""))
         add("高", "missing_factor", "不要把估值变化（P/D、CAPE）、家庭净值当成传导因子",
             f"单独加入后样本外 R² 的变化：{parts}。" + ("但" + "；".join(why) + "。" if why else "")
             + "这是用资产价格解释资产价格，情景里也无法独立设定，所以只作对照、不参与选择。",
             oos_delta=endo, leakage=lk)
+
+    sb = res.get("stage_b") or {}
+    if sb.get("iterations") and any(c.get("eligible", True) for c in sb.get("candidates", [])):
+        acc = [r for r in sb["iterations"][-1]["rows"] if r["accepted"]]
+        caveats = [f"{SHORT_NAMES.get(c['asset'], c['asset'])}：{c['caveat']}" for c in sb["candidates"]
+                   if c.get("caveat") and c["id"] in sb.get("accepted", [])]
+        off = [c["hypothesis"] for c in sb["candidates"] if not c.get("eligible", True)]
+        add("中", "missing_factor",
+            ("只作用于单个资产的改动：采用" + "、".join(r["label"] for r in acc)) if acc
+            else "只作用于单个资产的改动：没有一项通过",
+            f"共同模型定下之后，单独检验只改一个资产方程的改动，按这个资产自己的样本外 R² 判断（门槛 {sb['min_gain_asset']}），"
+            "最后一轮的验证期和测试期都通过才采用：" + "；".join(_stage_b_lines(sb)) + "。" + "".join(caveats)
+            + (f"只作对照、不参与选择的：{'；'.join(off)}。" if off else ""),
+            dedicated=[r["label"] for r in acc])
 
     win = {c: oos_deltas(its, c) for c in ("window_15", "window_25")}
     win = {c: d for c, d in win.items() if d}
@@ -506,12 +630,26 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
         gains = {c: [r["period"] for r in d if r["delta"] > wf.MIN_GAIN] for c, d in nn.items()}
         gain_txt = "，".join(f"{c[3:]} 个隐藏单元" + (f"只在 {'、'.join(g)} 有增益" if g else "没有一个十年有增益")
                              for c, g in gains.items())
-        add("中", "neural_net", "小型神经网络有稳定增益，可以采用" if worth else "小型神经网络目前不值得",
-            "单独使用时样本外 R² 的变化：" + "；".join(f"{c[3:]} 个隐藏单元 {_fmt(d)}" for c, d in nn.items())
-            + "。RESET 检验显示非线性的资产数（各轮训练期）：" + "、".join(f"{r}/{len(SCORE_ASSETS)}" for r in reset) + "。"
-            + ("增益在每个样本外十年都成立。" if worth else
-               gain_txt + "，没有稳定重现；而且神经网络没有可解释的 β，情景页的因子归因和传导链条会失去依据。"),
-            oos_delta=nn, reset_reject=reset)
+        body = ("单独使用时样本外 R² 的变化：" + "；".join(f"{c[3:]} 个隐藏单元 {_fmt(d)}" for c, d in nn.items())
+                + "。RESET 检验显示非线性的资产数（各轮训练期）：" + "、".join(f"{r}/{len(SCORE_ASSETS)}" for r in reset) + "。")
+        if res.get("mlp_eligible", True):
+            add("中", "neural_net", "小型神经网络有稳定增益，可以采用" if worth else "小型神经网络目前不值得",
+                body + ("增益在每个样本外十年都成立。" if worth else
+                        gain_txt + "，没有稳定重现；而且神经网络没有可解释的 β，情景页的因子归因和传导链条会失去依据。"),
+                oos_delta=nn, reset_reject=reset)
+        else:
+            # what the networks add on top of a carried-over start (round 1 of a later iteration), reported only
+            on_start = []
+            for it in its:
+                tr = {t["candidate"]: t for t in it["trials"] if t.get("round") == 1 and "delta" in t}
+                if not it["start"]["is_base"] and any(c in tr for c in nn):
+                    on_start.append(f"加在第 {it['iter']} 轮起始模型上（验证期 {_period(it['validate'])}）："
+                                    + "、".join(f"{c[3:]} 个隐藏单元 {tr[c]['delta']:+.3f}" for c in nn if c in tr))
+            note = next((cands[c]["note"] for c in nn if cands.get(c, {}).get("note")), wf.MLP_NOTE)
+            add("中", "neural_net", "只作对照：小型神经网络不进入传导模型",
+                body + ("；".join(on_start) + "。" if on_start else "")
+                + ("增益在每个样本外十年都成立，但" if worth else gain_txt + "，没有稳定重现；而且") + note,
+                oos_delta=nn, reset_reject=reset)
 
     gold = resid["assets"]["gold"]
     others = float(np.mean([resid["assets"][a]["acf"][0] for a in SCORE_ASSETS if a != "gold"]))
@@ -525,7 +663,7 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
             + ("加滞后项后样本外 R² 的变化：" + "；".join(f"{c[4:]} 阶 {_fmt(d)}" for c, d in lags.items())
                + ("，滞后项只会去拟合这个数据伪影。" if not lag_helps else "，滞后项的增益里有一部分来自这个数据伪影。")
                if lags else "")
-            + "应在数据层改用月末金价。",
+            + "应在数据层改用月末金价（允许的数据源里目前还没有月末金价）。",
             gold_acf1=gold["acf"][0], others_acf1=others, oos_delta=lags)
 
     drift = [next(f for f in it["findings"] if f["id"] == "drift_bias") for it in its]
@@ -539,19 +677,24 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
         bias={it["iter"]: {"asset": d["worst"], "bias_annual": d["per_asset"][d["worst"]]["bias_annual"]}
               for it, d in zip(its, drift)})
 
-    cands = {c["id"]: c for c in res["candidates"]}
-    factors = {cid: oos_deltas(its, cid) for cid, c in cands.items()
-               if c["eligible"] and (c["change"].get("add_factors") or c["change"].get("shock_cols"))}
-    factors = {c: d for c, d in factors.items() if d}
-    if factors:
-        robust = [c for c, d in factors.items() if all(r["delta"] > wf.MIN_GAIN for r in d)]
-        label = {c: FACTOR_NAMES.get(c.removeprefix("add_"), cands[c]["hypothesis"]) for c in factors}
-        add("低", "missing_factor",
-            f"「{'、'.join(label[c] for c in robust)}」在每个样本外十年都稳定提升" if robust
-            else "没有一个候选因子在每个样本外十年都稳定提升",
-            "单独加入后样本外 R² 的变化：" + "；".join(f"{label[c]} {_fmt(d)}" for c, d in factors.items())
-            + "。" + ("可以作为可选因子加入。" if robust else "缺一个因子不是预测误差的主要原因。"),
-            robust=robust, oos_delta=factors)
+    # the mechanism question: every eligible mechanism candidate alone on the base, and what the walk-forward kept
+    mech = {cid: oos_deltas(its, cid) for cid, c in cands.items() if c["group"] == "missing_mechanism" and c["eligible"]}
+    mech = {c: d for c, d in mech.items() if d}
+    kept = [c for c in mech if c in fin["changes"]]
+    switched = [c for c in kept if any(f in INTERACTION_FACTORS for f in cands[c]["change"].get("add_factors", ()))]
+    if mech:
+        robust = [c for c, d in mech.items() if all(r["delta"] > wf.MIN_GAIN for r in d)]
+        failed = list(dict.fromkeys(MECHANISM_SHORT.get(c, _name(cands, c)) for c in dict.fromkeys([*MECHANISM_SHORT, *mech])
+                                    if c in mech and c not in robust + kept))
+        names = "、".join(_name(cands, c) for c in kept)
+        title = (f"部分：只有「{names}」通过" + (f"，{'、'.join(failed)}都没有" if failed else "") if kept else
+                 f"可能：「{'、'.join(_name(cands, c) for c in robust)}」在每个样本外十年都稳定提升，但没有被走步检验选中"
+                 if robust else "不缺：没有一个传导机制在每个样本外十年都稳定提升")
+        add("中", "missing_mechanism", title,
+            "单独加在基准上，样本外 R² 的变化：" + "；".join(f"{_name(cands, c)} {_fmt(d)}" for c, d in mech.items()) + "。"
+            + (f"期限溢价项看上月核心 CPI 同比，整体通胀状态交互看上月 CPI 同比，门槛都是 {HIGH_INFLATION:g}%。"
+               if switched else ""),
+            changes=kept, robust=robust, oos_delta=mech)
 
     reg_d = oos_deltas(its, "regime_inflation")
     if reg_d:
@@ -559,18 +702,46 @@ def recommendations(res: dict, resid: dict) -> list[dict]:
         n_rej = [r.get("n_reject", 0) for r in reg]
         stable = all(r["delta"] > wf.MIN_GAIN for r in reg_d)
         title = ("通胀状态依赖的传导在样本外稳定有效" if stable else
-                 "通胀状态依赖的传导：" + ("统计上存在，但样本外不稳定" if max(n_rej) >= MIN_FLAG
-                                           else "统计上不显著，样本外也不稳定"))
+                 "通胀状态依赖的传导：" + ("整体拆分" if switched else "")
+                 + ("统计上存在，但样本外不稳定" if max(n_rej) >= MIN_FLAG else "统计上不显著，样本外也不稳定")
+                 + (f"；只保留了「{'、'.join(_name(cands, c) for c in switched)}」" if switched else ""))
+        kept_txt = "".join(f"走步检验只保留了一项按通胀状态区分的传导：{cands[c]['hypothesis']}"
+                           f"（单独加在基准上：{_fmt(oos_deltas(its, c))}）。" for c in switched[:1])
         add("低", "missing_mechanism", title,
             "通胀状态交互项显著的资产数（各轮训练期）：" + "、".join(f"{r}/{len(SCORE_ASSETS)}" for r in n_rej)
-            + f"；单独加入后样本外 R² 的变化：{_fmt(reg_d)}。高通胀月份主要来自 1970 年代，交互项的估计误差很大；"
-              "更稳妥的做法是在情景里用熵池化把权重放到相应时代的月份上。",
-            n_reject=n_rej, oos_delta=reg_d)
+            + f"；全部系数按通胀状态拆分，单独加入后样本外 R² 的变化：{_fmt(reg_d)}。高通胀月份主要来自 1970 年代，"
+              "交互项的估计误差很大；" + kept_txt + "更稳妥的做法是在情景里用熵池化把权重放到相应时代的月份上。",
+            n_reject=n_rej, oos_delta=reg_d, **({"changes": switched} if switched else {}))
+
+    rob = res.get("common_robustness") or {}
+    ridge = {r["candidate"]: r["periods"] for r in rob.get("rows", []) if r["candidate"].startswith("ridge_")}
+    if "ridge_0.05" in ridge:
+        helps = all(r["delta"] > wf.MIN_GAIN for r in ridge["ridge_0.05"])
+        picked = "ridge_0.05" in fin["changes"]
+        last = its[-1]
+        r1 = {t["candidate"]: t for t in last["trials"] if t.get("round") == 1 and "delta" in t}
+        first = (last["selected"]["changes"] or [None])[0]
+        title = ("岭回归收缩已被走步检验采用" if picked else
+                 "岭回归 λ=0.05 在新核心上每个十年都有小幅增益，但没有被走步检验选中" if helps else
+                 "岭回归收缩在新核心上没有稳定增益")
+        detail = (f"加在最终的共同模型（{rob['describe']}）上，样本外 R² 的变化："
+                  + "；".join(f"岭回归 λ={c.split('_', 1)[1]} {_fmt(p)}" for c, p in ridge.items()) + "。")
+        if not picked and first not in (None, "ridge_0.05") and first in r1 and "ridge_0.05" in r1:
+            detail += (f"第 {last['iter']} 轮的逐步挑选先选了「{_name(cands, first)}」（验证期 {r1[first]['delta']:+.3f}，"
+                       f"岭回归 λ=0.05 {r1['ridge_0.05']['delta']:+.3f}）"
+                       + ("，那一轮的改动又没有通过测试期" if not last["test_result"]["improved"] else "")
+                       + "，所以它没有进入模型；留作下一轮预先登记的候选。")
+        add("低", "tuning", title, detail, oos_delta=ridge)
     order = {"高": 0, "中": 1, "低": 2}
-    return sorted(recs, key=lambda r: order[r["priority"]])[:8]
+    return sorted(recs, key=lambda r: order[r["priority"]])[:MAX_RECS]
 
 
 # ---------------------------------------------------------------- entry point
+
+def data_fixes(panel: pd.DataFrame) -> list[str]:
+    """Names of the DATA_FIXES this panel carries (each keeps its old series as an audit column)."""
+    return [name for col, name in DATA_FIXES.items() if col in panel]
+
 
 def run(ctx: EngineContext) -> dict:
     panel = ctx.panel
@@ -581,6 +752,7 @@ def run(ctx: EngineContext) -> dict:
     fin = {**res["final"], "trained_on": [config.MODEL_START, end]}
     selection = {
         "spec": final.to_dict(), "describe": final.describe(), "source": "walkforward", "changes": fin["changes"],
+        "dedicated": fin["dedicated"],
         "val_score": fin["val_score"], "test_score": fin["test_score"],
         "base_val_score": fin["base_val_score"], "base_test_score": fin["base_test_score"],
         "test_used_for_choice": fin["test_used_for_choice"], "r2_benchmark": res["r2_benchmark"],
@@ -591,9 +763,11 @@ def run(ctx: EngineContext) -> dict:
     return {
         "questions": wf.QUESTIONS, "candidates": res["candidates"], "score_assets": res["score_assets"],
         "min_gain": res["min_gain"], "max_accept": res["max_accept"], "require_test_gain": res["require_test_gain"],
+        "gate": res["gate"], "mlp_eligible": res["mlp_eligible"], "min_gain_asset": res["min_gain_asset"],
         "r2_benchmark": res["r2_benchmark"], "units": UNITS, "notes": NOTES,
-        "iterations": res["iterations"], "final": fin, "residual_analysis": resid,
-        "recommendations": recommendations(res, resid),
+        "iterations": res["iterations"], "stage_b": res["stage_b"], "common_robustness": res["common_robustness"],
+        "final": fin, "residual_analysis": resid,
+        "recommendations": recommendations(res, resid, data_fixes(panel)),
     }
 
 

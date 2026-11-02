@@ -12,13 +12,19 @@ Pipeline for one scenario (or one backtest window):
      level, so a 1980 +3pp month does not become +3pp at a 4% starting point
      (capped, so near-zero-rate months are not blown up either). Rates,
      spreads, unemployment and the real oil price revert slowly toward
-     anchors, which a block bootstrap would otherwise lose.
+     anchors, which a block bootstrap would otherwise lose. The GZ spread,
+     the term-premium term and metals relative to oil keep the drawn months'
+     own values (no scaling, no reversion); the term-premium term's switch is
+     the drawn month's own (its previous month's core CPI above 4%), so a
+     simulated rise in inflation does not turn it on.
   5. Assets = today's transmission (fitted factor model) applied to the
      simulated factor changes + the drawn month's own residual (which carries
      the cross-asset co-movement the factors do not explain) + an optional
-     capital-market-assumption drift adjustment + scenario overrides.
-     Treasury, crude oil and cash are built structurally from the yield, oil
-     and policy-rate paths.
+     capital-market-assumption drift adjustment + scenario overrides. An
+     asset with an equation of its own (extra factors, a later fit start)
+     reads only its own columns; gold's residuals before its fit start come
+     from that later fit. Treasury, crude oil and cash are built structurally
+     from the yield, oil and policy-rate paths.
   6. Optional valuation state (ValuationModel, off by default): the market's
      log P/D is tracked along every path (price log return minus the drawn
      month's dividend growth), its fair value moves with the simulated real
@@ -37,12 +43,16 @@ import pandas as pd
 
 from .. import config
 from . import regimes
-from .factor_model import STRUCTURAL_ASSETS, AssetFactorModel, base_columns, features_from_paths
+from .factor_model import (STRUCTURAL_ASSETS, AssetFactorModel, asset_feature_names, base_columns,
+                           features_from_paths)
 from .pooling import uncond_frequency
 from .sampler import sample_phases
 
-# Factor changes the simulator always tracks (beyond the model's own factors).
-SIM_FACTORS = sorted(set(config.FACTOR_IDS) | {"cpi"})
+# Factor changes the simulator always tracks (beyond the model's own factors): every config factor but the
+# audit-only comparison columns (role "audit"). The newer model inputs (GZ spread, term premium and its
+# high-core-inflation term, metals relative to oil) are tracked like any other: drawn months' values plus
+# an optional factor_drift.
+SIM_FACTORS = sorted((set(config.FACTOR_IDS) - config.AUDIT_FACTOR_IDS) | {"cpi"})
 # Factors whose source may be missing (a cached file that is not there): their months are not
 # required, and a missing value counts as no change.
 OPTIONAL_FACTORS = {f["id"] for f in config.FACTORS if f.get("optional")}
@@ -63,7 +73,8 @@ class MonthDB:
     def __init__(self, panel: pd.DataFrame, model: AssetFactorModel,
                  start: str = config.MODEL_START, end=None, extra_cols: list[str] | None = None):
         P = panel.loc[start:end]
-        # optional factors, and factors a panel built before they existed lacks, are not required
+        # optional factors, and factors a panel built before they existed lacks, are not required; every
+        # column of the model's equations is (base_columns: the common ones and every asset's extras)
         optional = {f for f in SIM_FACTORS if f in OPTIONAL_FACTORS or f"f_{f}" not in panel.columns}
         needed = [f"f_{f}" for f in SIM_FACTORS if f not in optional] + base_columns(model.spec)
         resid = model.residuals(panel).loc[P.index]
@@ -508,6 +519,8 @@ class Attribution:
     kinds: dict[str, str]             # asset -> "model" | "treasury" | "cash" | "crude_oil"
     method: str                       # "linear" | "unattributed"
     reason: str = ""
+    # model asset -> the factor terms of its own equation (linear only; another asset's extra is 0 for it)
+    asset_factor_terms: dict[str, list[str]] = field(default_factory=dict)
 
     def get(self, term: str) -> np.ndarray:
         """(n, P, A) values of one term (zeros where it does not apply)."""
@@ -530,6 +543,7 @@ def _attribute(model: AssetFactorModel, assets: list[str], phase_months: list[in
     """The exact split of simulate()'s returns (reads its arrays, changes none of them)."""
     method, reason = attribution_method(model.spec)
     factor_terms = list(base_ids) if method == "linear" else []
+    own_terms = {a: asset_feature_names(model.spec, a) for a in model.assets} if method == "linear" else {}
     terms = factor_terms + [t for t in STRUCTURAL_TERM.values() if t not in factor_terms]
     terms += [t for t in ATTRIBUTION_FIXED if (t != "intercept" or method == "linear")
               and (t != "unattributed" or method != "linear") and (t != "valuation_pull" or pull is not None)]
@@ -572,7 +586,8 @@ def _attribute(model: AssetFactorModel, assets: list[str], phase_months: list[in
             V[:, :, j, ti["valuation_pull"]] = pull_m[:, :, m]
     return Attribution(terms=terms, factor_terms=factor_terms, values=V, total=pm(total),
                        phase_months=[int(m) for m in phase_months], assets=list(assets), kinds=kinds,
-                       method=method, reason=reason)
+                       method=method, reason=reason,
+                       asset_factor_terms={a: t for a, t in own_terms.items() if kinds.get(a) == "model"})
 
 
 # ---------------------------------------------------------------- simulation
@@ -778,11 +793,14 @@ def simulate(db: MonthDB, anchor: Anchor, phase_weights: list, phase_months: lis
         "labor_share": level_path(anchor.labor_share, X[:, :, fi["labor_share"]]),
     }
 
-    # ---- factor-explained part of asset returns (today's transmission)
+    # ---- factor-explained part of asset returns (today's transmission). Every model input is the simulated
+    # factor change above; inputs without a path of their own (GZ, the term-premium term, metals vs oil,
+    # extras) are the drawn months' values plus any factor_drift, as the walk-forward scores them.
     spec = model.spec
-    base_ids = [c[2:] if c.startswith("f_") else c for c in base_columns(spec)]
-    base_paths = np.stack([X[:, :, fi[b]] if b in fi else db.frame[b].to_numpy(float)[idx]
-                           for b in base_ids], axis=2)
+    base_cols = base_columns(spec)
+    base_ids = [c[2:] if c.startswith("f_") else c for c in base_cols]
+    base_paths = np.stack([X[:, :, fi[b]] if b in fi else db.frame[c].to_numpy(float)[idx]
+                           for b, c in zip(base_ids, base_cols)], axis=2)
     hi = (yoy[:, :-1] > 4.0).astype(float) if spec.regime == "inflation" else None
     feats = features_from_paths(spec, base_paths, anchor.base_init[-max(spec.lags, 1):] if spec.lags else anchor.base_init[:0], hi)
     sys = model.predict_array(feats.reshape(-1, feats.shape[2])).reshape(n_paths, T, len(model.assets))

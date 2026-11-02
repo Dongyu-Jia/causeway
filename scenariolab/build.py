@@ -3,6 +3,7 @@
     python -m scenariolab.build                 # cached downloads
     python -m scenariolab.build --refresh       # re-download all data first
     python -m scenariolab.build --only scenarios meta
+    python -m scenariolab.build --only factor_audit   # the missing-factor audit (~30 s; needs diagnostics.json)
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~6 min, not run by default)
     python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
@@ -10,7 +11,9 @@
 
 Order matters: causality writes the structural shock series that later steps
 can use; diagnostics writes model_selection.json, which backtest, scenarios
-and the server then load as "today's transmission"; regimes reuses the engine's
+and the server then load as "today's transmission"; factor_audit replicates the
+research round's archive and evaluates the changes against that selected model
+(it reads diagnostics.json's walk-forward); regimes reuses the engine's
 unconditional reference run that the scenario readouts computed (rebuild it
 after --only scenarios); forecast scores rolling one-year-ahead forecasts and
 needs the scenario paths; valuation tests the valuation state on the backtest
@@ -30,9 +33,10 @@ import traceback
 from . import config, jsonio
 from .context import EngineContext
 from .data.panel import load_meta, meta_sources, save_panel
+from .env import load_dotenv
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "backtest", "scenarios", "regimes", "forecast", "valuation",
-         "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes", "forecast",
+         "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
 OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
@@ -61,6 +65,7 @@ def build_meta(ctx: EngineContext) -> dict:
         "data_start": panel_meta["start"], "data_end": panel_meta["end"],
         "model_start": config.MODEL_START, "horizon_months": config.HORIZON_MONTHS,
         "assets": config.ASSETS, "factors": config.FACTORS, "states": config.STATES, "eras": config.ERAS,
+        "view_concepts": config.VIEW_CONCEPTS,          # the view variables' concept names (the method tab groups them)
         "today": {"date": last.strftime("%Y-%m"),
                   "states": {s["id"]: row.get(f"s_{s['id']}") for s in config.STATES},
                   "income_yield": ctx.anchor.income_yield},
@@ -79,6 +84,7 @@ def main(argv=None) -> int:
                     help="run every step, the opt-in ones (ablation, regime_forecast) included")
     ap.add_argument("--paths", type=int, default=600, help="simulated paths per scenario")
     args = ap.parse_args(argv)
+    load_dotenv()                 # the optional FRED_API_KEY (data/sources.py) lives in the git-ignored .env
     default = STEPS if args.all else [s for s in STEPS if s not in OPT_IN]
     steps = [s for s in (args.only or default) if s not in args.skip]
     out = config.RESULTS_DIR
@@ -119,6 +125,7 @@ def main(argv=None) -> int:
     step("eras", lambda: jsonio.dump(_run("analysis.eras", ctx), out / "eras.json"))
     step("diagnostics", lambda: jsonio.dump(_run("analysis.diagnostics", ctx), out / "diagnostics.json"))
     ctx = EngineContext.load(selection=True)           # today's transmission = selected model
+    step("factor_audit", lambda: jsonio.dump(_run("analysis.factor_audit", ctx), out / "factor_audit.json"))
     step("backtest", lambda: jsonio.dump(_run("analysis.backtest", ctx), out / "backtest.json"))
     step("scenarios", lambda: _run("scenarios.library", ctx, n_paths=args.paths))
     step("regimes", lambda: jsonio.dump(_run("analysis.regimes", ctx), out / "regimes.json"))

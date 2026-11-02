@@ -179,12 +179,13 @@ def test_era_attribution_on_the_real_panel(real):
     ga = recs["golden_age"]["attribution"]                 # no trade-weighted dollar before 1973
     assert ga["assets"] == {} and "usd" in ga["missing"] and "1973" in ga["reason"]
     for rec in recs.values():
-        for x in rec["attribution"]["assets"].values():
+        for a, x in rec["attribution"]["assets"].items():
             assert sum(x["terms"].values()) == pytest.approx(x["total_mean"], abs=1e-9)
             assert x["total_mean"] - x["terms"]["income"] == pytest.approx(x["price_mean"], abs=1e-9)
             assert x["cagr"] == pytest.approx(x["total_mean"] + x["reconciliation"], abs=1e-12)
-            if x["kind"] == "model":
-                assert x["factor_sum"] == pytest.approx(sum(x["terms"][f] for f in info["factor_terms"]), abs=1e-12)
+            if x["kind"] == "model":                     # an asset's own equation (the union unless it differs)
+                own = info["asset_factor_terms"].get(a, info["factor_terms"])
+                assert x["factor_sum"] == pytest.approx(sum(x["terms"][f] for f in own), abs=1e-12)
     gi = recs["great_inflation"]["attribution"]
     assert gi["coverage"] > 0.99 and gi["months"][0] == "1973-02"
     assert gi["assets"]["us_equity"]["own_beta"] is not None
@@ -214,3 +215,49 @@ def test_era_attribution_covers_its_own_months(real):
         for a, x in rec["attribution"]["assets"].items():
             if x["n_months"] == rec["n_months"] and a in rec["assets"]:
                 assert x["cagr"] == pytest.approx(rec["assets"][a]["cagr"], abs=1e-12), (rec["id"], a)
+
+
+# ---------------------------------------------------------------- missing-factor round
+
+F_SPEC = dict(factors=("oil", "ip", "cpi_goods", "cpi_services", "ff", "y10", "spread", "usd", "unrate", "gz",
+                       "tp10_x_core4"), asset_factors={"energy": ["metals_oil"]}, asset_start={"gold": "1982-01"})
+
+
+def test_view_variables_stay_out_of_the_signatures_and_audit_factors_out_of_the_factor_block(real):
+    view = {s["id"] for s in config.STATES if s.get("concept")}
+    for rec in real["eras"]:
+        assert not {s["state"] for s in rec["signature"]} & view, rec["id"]
+        assert not set(rec["factors"]) & config.AUDIT_FACTOR_IDS, rec["id"]
+    assert any(n.startswith("劳动收入占比、利润、投资、净值等季度数据按通常的发布滞后对齐") for n in real["notes"])
+    ai = {r["id"]: r for r in real["eras"]}["ai_capex"]       # the same series twice: the plain id is kept
+    if ai["states"]["profit_share"]["mean"] == ai["states"]["profit_share_rt"]["mean"]:
+        assert "profit_share_rt" not in {s["state"] for r in real["eras"] for s in r["signature"]}
+    assert not any("插值" in n for n in real["notes"])
+
+
+def test_era_attribution_follows_each_assets_own_equation(monkeypatch):
+    """With per-asset equations (F), an asset's terms are its own equation's features: energy's metals-vs-oil
+    factor is no term of the other assets, and gold's betas are its 1982+ fit, also in the earlier eras."""
+    if not config.PANEL_PATH.exists():
+        pytest.skip("panel not built")
+    from scenariolab import context
+    from scenariolab.data.panel import load_panel
+    from scenariolab.engine.factor_model import ModelSpec, asset_feature_names
+    panel = load_panel()
+    if any(f"f_{f}" not in panel for f in ("gz", "tp10_x_core4", "metals_oil")):
+        pytest.skip("panel without the missing-factor columns")
+    spec = ModelSpec(**F_SPEC)
+    monkeypatch.setattr(context, "selected_spec", lambda: spec)
+    out = eras.run(SimpleNamespace(panel=panel))
+    info = out["attribution_info"]
+    assert info["model"]["spec"] == spec.to_dict() and info["model"]["asset_train_start"]["gold"] == "1982-01"
+    assert "metals_oil" in info["factor_terms"] and "energy" not in info["asset_factor_terms"]
+    assert info["asset_factor_terms"]["gold"] == asset_feature_names(spec, "gold")
+    assert info["own_beta_min_months"] == eras.OWN_BETA_MONTHS_PER_PARAM * (len(asset_feature_names(spec, "gold")) + 1)
+    assert any(n.startswith("传导模型里黄金从 1982 年起估计") for n in out["notes"])
+    gi = {r["id"]: r for r in out["eras"]}["great_inflation"]["attribution"]["assets"]
+    assert "metals_oil" in gi["energy"]["terms"] and "metals_oil" not in gi["gold"]["terms"]
+    assert "labor_share" not in gi["us_equity"]["terms"] and "gz" in gi["us_equity"]["terms"]
+    for rec in out["eras"]:
+        for a, x in rec["attribution"]["assets"].items():
+            assert sum(x["terms"].values()) == pytest.approx(x["total_mean"], abs=1e-9), (rec["id"], a)

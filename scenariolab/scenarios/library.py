@@ -59,8 +59,11 @@ def calibration_base(ctx: EngineContext, window: int = BASE_WINDOW) -> dict:
     return {"ip_yoy": float(tail["s_ip_yoy"].mean()), "services_yoy": float(tail["s_services_yoy"].mean())}
 
 
-def resolve_calibration(spec: dict, base: dict | None = None) -> tuple[dict, list[dict]]:
-    """Spec with calibration views merged into their phases, plus the explanations."""
+def resolve_calibration(spec: dict, base: dict | None = None, model_spec=None) -> tuple[dict, list[dict]]:
+    """Spec with calibration views merged into their phases, plus the explanations.
+
+    model_spec: the active transmission; when the labour share is not in it, each explanation carries
+    the calculator's labour-share caveat (calibrate.LABOR_SHARE_CAVEAT)."""
     s = copy.deepcopy(spec)
     cal = s.pop("calibration", None)
     cals = cal if isinstance(cal, list) else [cal] if cal else []
@@ -74,7 +77,7 @@ def resolve_calibration(spec: dict, base: dict | None = None) -> tuple[dict, lis
             continue
         ph = phases[k]
         params = {**(c.get("params") or {}), "months": int(ph.get("months", 12))}
-        views, expl = calibrate.distribution_views(params, base)
+        views, expl = calibrate.distribution_views(params, base, model_spec=model_spec)
         new_vars = {v["var"] for v in views}
         kept = [v for v in ph.get("views") or [] if v.get("var") not in new_vars]
         ph["views"] = (kept + views)[:MAX_VIEWS_PER_PHASE]
@@ -94,7 +97,8 @@ def resolve_calibration(spec: dict, base: dict | None = None) -> tuple[dict, lis
 def resolved_specs(ctx: EngineContext | None = None, spec_dir: Path | None = None) -> list[dict]:
     """Built-in specs with calibrations applied (what the engine actually runs)."""
     base = calibration_base(ctx) if ctx is not None else None
-    return [resolve_calibration(s, base)[0] for s in load_specs(spec_dir)]
+    model_spec = ctx.model.spec if ctx is not None else None
+    return [resolve_calibration(s, base, model_spec)[0] for s in load_specs(spec_dir)]
 
 
 def schema_example(spec: dict) -> dict:
@@ -224,12 +228,12 @@ def run(ctx: EngineContext, n_paths: int = 600, out_dir: Path | None = None,
     for raw in load_specs(spec_dir):
         if ids and raw.get("id") not in ids:
             continue
-        spec, cals = resolve_calibration(raw, base)
+        spec, cals = resolve_calibration(raw, base, ctx.model.spec)
         detail, sim = run_spec(ctx, spec, n_paths=n_paths, seed=seed_for(str(spec.get("id")), base_seed),
                                source="builtin", regimes=regimes)
         if cals:
             for c in cals:
-                c["engine_check"] = _engine_check(c, sim)
+                c["engine_check"] = {**_engine_check(c, sim), **calibrate.transmission_check(ctx.model.spec)}
             detail["calibration"] = cals
         details.append(detail)
         sims.append(sim)

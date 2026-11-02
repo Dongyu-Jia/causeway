@@ -27,6 +27,9 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     if (n) for (const el of root.querySelectorAll('.ov-nscen')) el.textContent = String(n);
   };
   paintCount();
+  // the missing-factor audit (optional; skipped when /api/meta's `results` says it is absent): one line below
+  const faP = Array.isArray(meta?.results) && !meta.results.includes('factor_audit') ? Promise.resolve(null)
+    : api.get('factor_audit').catch(() => null);
 
   // ---- today's state
   const today = meta?.today?.states || {};
@@ -52,6 +55,20 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
       typeof pdMed === 'number' && Number.isFinite(pdMed) ? `，1973 年以来中位数 ${pdMed.toFixed(0)} 倍` : '',
       '。市盈率、ROIC、自由现金流要不要当宏观因子、估值怎样进入模型：',
       h('a', { href: '#valuation' }, '估值与盈利 →')));
+  }
+  // credit and term: today's GZ spread and term premium (factor_audit.json), and whether the term-premium term is on
+  const fa = await faP;
+  if (!alive()) return;
+  const ft = fa?.today;
+  if (ft?.gz && ft?.tp10 && typeof ft.tp_term_on === 'boolean') {
+    const ok = (x) => typeof x === 'number' && Number.isFinite(x);
+    const rank = (p) => (ok(p) ? `第 ${Math.round(p * 100)} 百分位` : '分位未知');
+    root.append(h('p', { style: { margin: '6px 0 0', fontSize: '13px' } },
+      h('a', { href: '#diagnostics?audit', style: { color: 'inherit' } }, h('b', {}, '信用与期限：'),
+        `GZ 信用利差 ${ok(ft.gz.value) ? ft.gz.value.toFixed(2) : '—'}（1973 年以来${rank(ft.gz.pct_since_1973)}）· `,
+        `ACM 期限溢价 ${ok(ft.tp10.value) ? ft.tp10.value.toFixed(2) : '—'}（${rank(ft.tp10.pct_since_1973)}）· `,
+        `期限溢价项${ft.tp_term_on ? '打开' : '关闭'}`,
+        ok(ft.core_yoy) ? `（核心 CPI 同比 ${ft.core_yoy.toFixed(2)}%，${ft.core_yoy_month || ''}；上月高于 4% 时打开）` : '', ' →')));
   }
 
   // ---- resemblance to eras (the full matching is on 历史时代画像, #eras?today)

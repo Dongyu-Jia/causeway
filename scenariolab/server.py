@@ -31,16 +31,17 @@ RESULTS = config.RESULTS_DIR
 CUSTOM = RESULTS / "custom"
 ID_RE = re.compile(r"^[a-z0-9_]{1,60}$")
 RESULT_NAMES = {"eras", "causality", "backtest", "diagnostics", "scenarios", "forecast", "ablation",
-                "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast"}
+                "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast", "factor_audit"}
 # Which command writes each result file (a 404 names it). Default-build steps can also be rebuilt alone.
 BUILD = "python -m scenariolab.build"
 BUILD_STEP = {"meta": "meta", "eras": "eras", "causality": "causality", "backtest": "backtest",
               "diagnostics": "diagnostics", "scenarios": "scenarios", "forecast": "forecast",
               "valuation": "valuation", "portfolio_default": "portfolio", "llm_translator": "llm",
-              "regimes": "regimes"}
+              "regimes": "regimes", "factor_audit": "factor_audit"}
 BUILD_HINT = {
     "ablation": f"{BUILD} --only ablation（引擎消融约需 6 分钟，默认构建不包含这一步）",
     "regime_forecast": f"{BUILD} --only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）",
+    "factor_audit": f"{BUILD}（或只补这一步：{BUILD} --only factor_audit，缺失因子审计约需 30 秒，要先有 diagnostics.json）",
 }
 NO_CACHE_PREFIXES = ("/js/", "/css/")
 
@@ -333,7 +334,8 @@ def custom_run(body: dict = Body(...)):
         raise HTTPException(400, "spec 必须是对象")
     spec = _custom_id(spec)
     from .scenarios.schema import validate_spec
-    _, report = validate_spec(spec, get_context().db.frame, config.HORIZON_MONTHS)
+    ctx = get_context()
+    _, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     if report["errors"]:                                  # nothing usable would be simulated or saved
         raise HTTPException(400, "情景规格有错误：" + "；".join(report["errors"]))
     try:

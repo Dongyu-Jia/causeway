@@ -109,6 +109,26 @@ def test_the_startup_thread_also_runs_the_reference_simulation(monkeypatch):
     assert done == [("reference", "ctx"), ("paths", None)]
 
 
+def test_factor_audit_is_served_and_a_missing_file_names_its_step(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "RESULTS", tmp_path)
+    r = client.get("/api/factor_audit")
+    assert r.status_code == 404
+    detail = r.json()["detail"]
+    assert "factor_audit.json" in detail and "--only factor_audit" in detail and "30 秒" in detail
+    (tmp_path / "factor_audit.json").write_text('{"version": 1, "summary": {"n_transmission": 476}}', encoding="utf-8")
+    r = client.get("/api/factor_audit")
+    assert r.status_code == 200 and r.json() == {"version": 1, "summary": {"n_transmission": 476}}
+    assert server.BUILD_STEP["factor_audit"] == "factor_audit" and "factor_audit" in server.RESULT_NAMES
+
+
+@pytest.mark.skipif(not (config.RESULTS_DIR / "factor_audit.json").exists(), reason="factor_audit not built")
+def test_built_factor_audit_is_served():
+    r = client.get("/api/factor_audit")
+    assert r.status_code == 200, r.text[:200]
+    body = r.json()
+    assert body["version"] == 1 and {"summary", "changes", "archive", "replication"} <= set(body)
+
+
 @pytest.mark.skipif(not (config.RESULTS_DIR / "regimes.json").exists(), reason="regimes not built")
 def test_built_regimes_are_served():
     r = client.get("/api/regimes")

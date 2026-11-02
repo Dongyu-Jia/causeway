@@ -993,6 +993,27 @@ function attributionCard(d, state, later, bus) {
     h('details', { class: 'scenarios-more' }, h('summary', {}, '各阶段明细表（%/年）'), tableBox));
 }
 
+// The transmission's interaction term (detail.transmission, FACTORS_DESIGN §3.3): it switches on only in drawn
+// months that were themselves in high core inflation; the simulated inflation path does not switch it on.
+const INTERACTION_STATE = { core_yoy: '核心 CPI 同比', cpi_yoy: 'CPI 同比' };
+function transmissionCard(d) {
+  const tr = d.transmission && typeof d.transmission === 'object' ? d.transmission : null;
+  const its = (Array.isArray(tr?.interactions) ? tr.interactions : []).filter(it => it && Array.isArray(it.phases));
+  if (!its.length) return null;
+  return card({ title: '传导模型里的期限溢价项：这个情景抽到了多少高通胀月份',
+    sub: `传导模型${tr.describe ? `（${tr.describe}）` : ''}里的${its.map(it => it.name || '交互项').join('、')}只在抽中的历史月份本身处于高通胀时起作用（1973–92 年的大部分月份、2021–23 年）；模拟路径的通胀升高不会自动打开它。要让它起作用，阶段视图里要多抽这些月份（例如给核心 CPI 同比或宏观体制的高通胀标志设视图）。` },
+  ...its.map(it => {
+    const when = `${it.lag === 1 ? '上月' : `${it.lag ?? '—'} 个月前`}${INTERACTION_STATE[it.state] || '通胀'}高于 ${isNum(it.above) ? it.above : '—'}%`;
+    return h('div', {},
+      h('p', { class: 'scenarios-note', style: { margin: '0 0 6px' } }, `${it.name || '交互项'}打开的条件：${when}。历史月份库整体有 ${pct(it.database_share, 0)} 的月份打开。`),
+      table([
+        { key: 'name', label: '阶段', left: true, wrap: true, fmt: (v, r) => `${r.k + 1}. ${shortName(v)}` },
+        { key: 'drawn_share', label: '抽到的月份里打开的比例', fmt: (v) => pct(v, 0) },
+        { key: 'drawn_share', label: '相对历史月份库', fmt: (v) => (isNum(v) && isNum(it.database_share) ? `${sfx((v - it.database_share) * 100, 0)} 个百分点` : '—') },
+      ], it.phases.map((p, k) => ({ ...p, k })), { stack: true }));
+  }));
+}
+
 function phaseSection(d, labels, later) {
   const phases = Array.isArray(d.phases) ? d.phases : [];
   if (!phases.length) return [ui.notice('这个情景没有阶段信息。', 'info')];
@@ -1430,7 +1451,8 @@ export function renderScenarioDetail(root, d, ctx = {}, opts = {}) {
     h('div', { style: { height: '16px' } }),
     validationCard(d.validation),
     section('叙事与因果传导'),
-    h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus)),
+    h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus),
+      transmissionCard(d)),
     section('分阶段视图：每一阶段像历史上的哪些月份'),
     h('div', { class: 'scenarios-stack' }, phaseSection(d, labels, later)),
     section('资产：K 线与分布（全部由引擎从真实历史月份生成）'),

@@ -1368,7 +1368,11 @@ def eras_section(P: pd.DataFrame, lab: pd.DataFrame) -> list[dict]:
 
 def transmission_section(ctx, lab: pd.DataFrame) -> dict:
     """The selected transmission's betas in high- vs low-inflation months (the engine's previous-month
-    dummy) and in contraction months, by HAC Wald tests: a description; the model itself has no regime term."""
+    dummy) and in contraction months, by HAC Wald tests: a description; the model itself has no regime term.
+
+    Each asset is tested on its own equation: its features (asset_feature_names: a dedicated extra enters
+    only its own asset) and its own fit months (asset_train_start: gold may start later), so the
+    full-sample check reproduces the engine's coefficients."""
     P = ctx.panel
     eng = ctx.model
     spec = eng.spec
@@ -1380,46 +1384,63 @@ def transmission_section(ctx, lab: pd.DataFrame) -> dict:
     ok = X_all.loc[rows].notna().all(axis=1) & Yall.notna().all(axis=1)
     rows = rows[ok.to_numpy()]
     X = X_all.loc[rows].to_numpy(float)
-    n, k = X.shape
+    n = len(rows)
     D_hi = FM.design_matrix(P, replace(spec, regime="inflation")).loc[rows, "hi_infl"].to_numpy(float)
-    sd_f = X.std(axis=0)
     con = (lab.loc[rows, "contraction"] == 1).to_numpy(float)
-    labor = np.array([nm.split("_l")[0] == "labor_share" for nm in names])
+    own = {}
+    for a in assets:
+        nm_a = FM.asset_feature_names(spec, a)
+        first = (eng.asset_train_start or {}).get(a)
+        r_a = np.asarray(rows >= pd.Timestamp(first)) if first else np.ones(n, bool)
+        cols = [names.index(f) for f in nm_a]
+        own[a] = {"names": nm_a, "cols": cols, "rows": r_a, "sd": X[r_a][:, cols].std(axis=0),
+                  "labor": np.array([f.split("_l")[0] == "labor_share" for f in nm_a])}
     check = 0.0
     for a in assets:
-        b, _, _ = _nw(P.loc[rows, f"{spec.target}_{a}"].to_numpy(float), np.column_stack([np.ones(n), X]), HAC_MONTHLY)
-        check = max(check, float(np.max(np.abs(b[1:] - eng.coef.loc[a, names].to_numpy(float)))))
+        o = own[a]
+        Xa = X[o["rows"]][:, o["cols"]]
+        b, _, _ = _nw(P.loc[rows[o["rows"]], f"{spec.target}_{a}"].to_numpy(float),
+                      np.column_stack([np.ones(len(Xa)), Xa]), HAC_MONTHLY)
+        check = max(check, float(np.max(np.abs(b[1:] - eng.coef.loc[a, o["names"]].to_numpy(float)))))
 
     def split(D, mask, sid, desc):
         m = mask.astype(bool)
-        Xm, Dm = X[m], D[m]
         nm = int(m.sum())
-        res = {"id": sid, "desc": desc, "months": nm, "months_high": int(Dm.sum()), "months_low": int(nm - Dm.sum()),
+        res = {"id": sid, "desc": desc, "months": nm, "months_high": int(D[m].sum()), "months_low": int(nm - D[m].sum()),
                "first": _ym(rows[m][0]), "last": _ym(rows[m][-1]), "assets": {}}
-        if Dm.sum() < 3 * (k + 2) or (nm - Dm.sum()) < 3 * (k + 2):
-            res["skipped"] = f"高、低两组里有一组的月份太少，估不出 {k + 1} 个系数"
-            return res
-        Z = np.column_stack([np.ones(nm), Xm, Dm, Xm * Dm[:, None]])
-        n_sig = n_sig_x = 0
+        n_sig = n_sig_x = n_tests = n_tests_x = 0
         for a in assets:
-            y = P.loc[rows, f"{spec.target}_{a}"].to_numpy(float)[m]
+            o = own[a]
+            ma = m & o["rows"]
+            Xm, Dm = X[ma][:, o["cols"]], D[ma]
+            k, nma = Xm.shape[1], int(ma.sum())
+            if Dm.sum() < 3 * (k + 2) or (nma - Dm.sum()) < 3 * (k + 2):
+                res["skipped"] = f"高、低两组里有一组的月份太少，估不出 {k + 1} 个系数"
+                res["assets"] = {}
+                return res
+            Z = np.column_stack([np.ones(nma), Xm, Dm, Xm * Dm[:, None]])
+            y = P.loc[rows, f"{spec.target}_{a}"].to_numpy(float)[ma]
             b, V, _ = _nw(y, Z, HAC_MONTHLY)
             bl, dd = b[1: k + 1], b[k + 2:]
             tt = dd / np.sqrt(np.diag(V)[k + 2:])
             w10 = float(dd @ np.linalg.pinv(V[k + 2:, k + 2:]) @ dd)
+            sd_f = o["sd"]
             per = {f: {"beta_low": float(bl[j]), "beta_high": float(bl[j] + dd[j]), "diff": float(dd[j]),
                        "t_hac": float(tt[j]), "p": float(2 * sps.norm.sf(abs(tt[j]))),
                        "beta_low_1sd_pct": float(100 * bl[j] * sd_f[j]),
-                       "beta_high_1sd_pct": float(100 * (bl[j] + dd[j]) * sd_f[j])} for j, f in enumerate(names)}
+                       "beta_high_1sd_pct": float(100 * (bl[j] + dd[j]) * sd_f[j])} for j, f in enumerate(o["names"])}
             n_sig += int((np.abs(tt) >= 1.96).sum())
-            n_sig_x += int((np.abs(tt[~labor]) >= 1.96).sum())
+            n_sig_x += int((np.abs(tt[~o["labor"]]) >= 1.96).sum())
+            n_tests += k
+            n_tests_x += int((~o["labor"]).sum())
             res["assets"][a] = {"factors": per, "wald_slopes": {"chi2": w10, "df": k, "p": float(sps.chi2.sf(w10, k))},
-                                "n_sig_5pct": int((np.abs(tt) >= 1.96).sum())}
+                                "n_sig_5pct": int((np.abs(tt) >= 1.96).sum()), "months": nma,
+                                "first": _ym(rows[ma][0])}
         res.update({"wald_p": {a: res["assets"][a]["wald_slopes"]["p"] for a in assets},
-                    "n_sig_5pct": n_sig, "n_tests": k * len(assets), "expected_5pct": 0.05 * k * len(assets),
-                    "n_sig_excl_labor_share": n_sig_x, "n_tests_excl_labor_share": int((~labor).sum()) * len(assets),
-                    "expected_5pct_excl_labor_share": 0.05 * int((~labor).sum()) * len(assets)})
-        if "y10" in names:
+                    "n_sig_5pct": n_sig, "n_tests": n_tests, "expected_5pct": 0.05 * n_tests,
+                    "n_sig_excl_labor_share": n_sig_x, "n_tests_excl_labor_share": n_tests_x,
+                    "expected_5pct_excl_labor_share": 0.05 * n_tests_x})
+        if "y10" in own["us_equity"]["names"]:
             f = res["assets"]["us_equity"]["factors"]["y10"]
             res["equity_y10"] = {"low": f["beta_low_1sd_pct"], "high": f["beta_high_1sd_pct"], "t": f["t_hac"]}
         return res
@@ -1430,9 +1451,13 @@ def transmission_section(ctx, lab: pd.DataFrame) -> dict:
               split(D_hi, yrs <= 1999, "inflation_prev_month_1973_1999", "同上，只用 1999 年及以前的月份"),
               split(D_hi, yrs >= 2000, "inflation_prev_month_2000_end", "同上，只用 2000 年以后的月份"),
               split(con, np.ones(n, bool), "contraction_expost", "收缩月份（事后）对非收缩月份，全样本")]
+    labor_in = any(o["labor"].any() for o in own.values())
     return {"fit_rows": [_ym(rows[0]), _ym(rows[-1])], "months": int(n), "assets": assets, "features": names,
+            "asset_features": {a: own[a]["names"] for a in assets},
+            "asset_fit_start": {a: _ym(rows[own[a]["rows"]][0]) for a in assets},
             "target": spec.target, "hac_lags": HAC_MONTHLY, "engine_coef_check_max_abs_diff": check,
-            "labor_share_note": "劳动收入占比是季度数据插值成的月度序列（前后两个季度之间线性），单列计数",
+            "labor_share_in_model": bool(labor_in),
+            "labor_share_note": "劳动收入占比按发布月对齐，只在发布月变化" + ("，单列计数" if labor_in else "；它不在今天的传导模型里"),
             "splits": splits, "walk_forward_verdict": _diagnostics_verdict()}
 
 
@@ -1445,7 +1470,7 @@ def _diagnostics_verdict() -> dict | None:
         return None
     ev = rec.get("evidence") or {}
     return {"title": rec.get("title"), "detail": rec.get("detail"), "oos_r2_delta": ev.get("oos_delta"),
-            "n_reject": ev.get("n_reject")}
+            "n_reject": ev.get("n_reject"), "changes": ev.get("changes") or []}
 
 
 # ============================================================================ the engine side
@@ -1670,7 +1695,7 @@ def conflict_example(ctx) -> dict:
     db = ctx.db
     prior = db.prior()
     spec = next(s for s in library.resolved_specs(ctx) if s.get("id") == CONFLICT["spec"])
-    clean, _ = validate_spec(spec, db.frame, config.HORIZON_MONTHS)
+    clean, _ = validate_spec(spec, db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     ph = clean["phases"][CONFLICT["phase"]]
     rviews = [{"var": f"rg_{i}", "mean": float(s)} for i, s in CONFLICT["regime"].items()]
     others = [v for v in ph["views"] if v["var"] not in {r["var"] for r in rviews}]
@@ -1868,11 +1893,20 @@ def model_use_section(parts: dict) -> dict:
     deltas = verdict.get("oos_r2_delta") or []
     dtxt = "、".join(f"{d['period']} {d['delta']:+.3f}" for d in deltas if isinstance(d, dict) and "delta" in d)
     split = parts["transmission"]["splits"][0]
-    trans_reason = "传导模型不加通胀状态交互项：诊断的走步检验里样本外 R² 变化" + (f" {dtxt}" if dtxt else "不稳定") + "，不显著也不稳定。"
+    if "add_tp10_x_core4" in (verdict.get("changes") or []):
+        # the walk-forward kept one inflation-state term (the term premium in high core inflation, FACTORS_DESIGN §7.4)
+        dd = " / ".join(f"{d['delta']:+.3f}".replace("-", "−") for d in deltas if isinstance(d, dict) and "delta" in d)
+        trans_reason = ("传导模型不按通胀状态拆分全部系数" + (f"（整体交互的样本外 R² 变化 {dd}）" if dd else "")
+                        + "；走步检验只保留了一项：上月核心 CPI 同比高于 4% 时，期限溢价变化单独进入（见诊断页“缺失因子审计”）。")
+    else:
+        trans_reason = "传导模型不加通胀状态交互项：诊断的走步检验里样本外 R² 变化" + (f" {dtxt}" if dtxt else "不稳定") + "，不显著也不稳定。"
     if "n_sig_5pct" in split:
-        trans_reason += (f"样本内按上月高通胀拆分，{split['n_tests']} 个斜率差异里 {split['n_sig_5pct']} 个 |t| ≥ 1.96，"
-                         f"去掉插值的劳动收入占比后是 {split['n_tests_excl_labor_share']} 个里 {split['n_sig_excl_labor_share']} 个"
-                         f"（偶然约 {split['expected_5pct_excl_labor_share']:.1f} 个）。")
+        trans_reason += (f"样本内按上月高通胀拆分，{split['n_tests']} 个斜率差异里 {split['n_sig_5pct']} 个 |t| ≥ 1.96"
+                         f"（偶然约 {split['expected_5pct']:.1f} 个）")
+        if parts["transmission"].get("labor_share_in_model", True):
+            trans_reason += (f"，去掉劳动收入占比（只在发布月变化）后是 {split['n_tests_excl_labor_share']} 个里 "
+                             f"{split['n_sig_excl_labor_share']} 个（偶然约 {split['expected_5pct_excl_labor_share']:.1f} 个）")
+        trans_reason += "。"
     # the forecast test is its own opt-in step that runs after this one; its result lives in its own file
     fc_reason = "一年期预测按现行设定运行，不使用宏观体制；体制特征的样本外检验是可选构建步骤，结果单独给出。"
     return {"transmission": {"used": False, "reason": trans_reason, "oos_r2_delta": deltas or None},

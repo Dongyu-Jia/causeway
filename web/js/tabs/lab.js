@@ -633,7 +633,10 @@ export async function render(root, ctx) {
         { value: (v) => (v.kind === 'state' ? v.today : v.last12_mean), label: '近期值',
           fmt: (x, v) => (isNum(x) ? h('div', { class: v.outside_support ? 'scenarios-changed' : '' },
             fmtVar(v.var, x), v.outside_support ? h('div', { style: { fontSize: '11px' } }, '超出历史区间') : null) : '—') },
-        { key: 'asset_driver', label: '资产模型', fmt: (x) => (x ? '是' : '—') },
+        { key: 'asset_driver', label: '资产模型', fmt: (x, v) => (!x ? '—' : Array.isArray(v.asset_driver_assets) && v.asset_driver_assets.length
+          ? `是（仅${v.asset_driver_assets.map(a => ui.assetName(a)).join('、')}）` : '是') },
+        { key: 'late_from', label: '数据起点', fmt: (x, v) => (x ? h('div', { class: 'scenarios-changed' }, `${x} 起`,
+          h('div', { style: { fontSize: '11px' } }, `只能抽到 ${isNum(v.late_share) ? `${Math.round(v.late_share * 100)}%` : '一部分'}的历史月份`)) : '—') },
       ], rows);
       el.querySelector('table')?.classList.add('scenarios-vtable');   // names and ranges wrap
       fill(tableBox, el);
@@ -652,7 +655,8 @@ export async function render(root, ctx) {
     fill(refBox,
       h('p', { class: 'lab-note', style: { marginTop: '10px' } }, '视图约束的是一个阶段里抽到的月份的平均值，所以可设范围是 6 个月平均值的 2%–98% 分位（比单月窄得多），超出会被截断。',
         'f_ 因子是月度变化：对数变化换算成年化涨跌幅（%）显示，百分点变化按年化百分点显示；写进规格时用下面那行 mean_annual 的数值（年化对数变化或年化百分点）。',
-        'e_ 冲击以标准差为单位，常用 shift_sd。近期值：状态取今天的值，因子和冲击取近 12 个月均值；“资产模型”列为“是”表示资产回报模型直接用这个变量传导到资产。'),
+        'e_ 冲击以标准差为单位，常用 shift_sd。近期值：状态取今天的值，因子和冲击取近 12 个月均值；“资产模型”列为“是”表示资产回报模型直接用这个变量传导到资产（“仅某资产”表示只进那一个资产的方程）；'
+        + '“数据起点”标出很晚才有数据的变量：对它设视图的阶段只会抽它有数据以后的历史月份。'),
       h('div', { class: 'lab-filter' },
         ui.seg([{ value: 'all', label: '全部' }, { value: 'state', label: '状态 s_' }, { value: 'factor', label: '因子 f_' }, { value: 'shock', label: '冲击 e_' }],
           kind, (v) => { kind = v; draw(); }),

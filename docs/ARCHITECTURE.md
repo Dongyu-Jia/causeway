@@ -20,8 +20,10 @@ scenariolab/
   build.py                 CLI: python -m scenariolab.build (see "The build")
   server.py                FastAPI app + static UI: python -m scenariolab.server (see "HTTP API")
   data/sources.py          cached downloaders: FRED graph CSV, Ken French zips, Nareit workbook, gold CSV,
-                           Shiller ie_data.xls (optional: a failed download leaves CAPE empty)
-  data/panel.py            builds data/processed/panel_monthly.csv + panel_meta.json
+                           Shiller ie_data.xls (optional: a failed download leaves CAPE empty); the FRED API
+                           client and the publisher downloaders (see "The missing-factor round")
+  data/import_raw.py       one-off import of the research round's downloads -> data/raw/ + SOURCES.json
+  data/panel.py            builds data/processed/panel_monthly.csv + panel_meta.json (incl. column_info)
   engine/factor_model.py   ModelSpec + AssetFactorModel (linear / lags / inflation regime / ridge / window / MLP)
   engine/ep.py             entropy pooling: entropy_pool(), apply_views(), blend(), support(), weighted_corr()
   engine/pooling.py        phase weights: views solved on block starts; MIN_ENS / MIN_EPISODES; shrink lambda
@@ -47,6 +49,9 @@ scenariolab/
                            its reconciliation with the scenario mixture) + data/ledger/ (the live record)
   analysis/valuation.py    -> results/valuation.json (P/E, ROIC, FCF as factors? valuation-state variants)
   analysis/ablation.py     -> results/ablation.json (engine ablation; opt-in build step)
+  analysis/factor_tests.py the research harness's validated core (same-sample tests, BH, placebos, residuals)
+  analysis/factor_audit.py -> results/factor_audit.json (缺失因子审计: replication of the archive + current model)
+  analysis/audit_archive/  research_2026_11_01.json: the frozen research archive (package data)
   portfolio/metrics.py     portfolio wealth (rebalance monthly / annual / none), path metrics, weighted stats
   portfolio/withdrawal.py  three withdrawal strategies, ruin, critical (safe) withdrawal rates
   portfolio/service.py     evaluate_portfolio(), evaluate_withdrawal() for the API; build step ->
@@ -63,13 +68,16 @@ web/
   js/charts.js             ECharts helpers and their lifecycle, K-line colours
   js/tabs/<id>.js          one module per tab (12, see "Web app")
   js/tabs/_scenario_detail.js, js/tabs/_weights.js   shared helpers (a leading underscore = not a tab)
-tests/                     pytest suite (15 files, see "Testing")
+  js/tabs/_factor_audit.js the diagnostics tab's 「缺失因子审计」 section (factor_audit.json; deep links
+                           #diagnostics?audit, ?audit-families, ?audit-assets, ?audit-concepts)
+tests/                     pytest suite (21 files, see "Testing")
 data/                      raw/, processed/, results/, ledger/ (git-ignored, built locally; ledger/ is the
                            append-only record of live one-year forecasts, see "Forecast ledger")
-docs/                      ARCHITECTURE.md (this file), screenshots/ (the README's four PNGs)
+docs/                      ARCHITECTURE.md (this file), screenshots/ (the README's four PNGs),
+                           research/2026-11-01-factor-audit/ (the research round's reports, statistics only)
 .github/workflows/ci.yml   CI on every push and pull request (see "Testing")
 CONTRIBUTING.md            setup, build, tests, adding a scenario or a data source (Chinese + English summary)
-.env.example               template for .env: ANTHROPIC_API_KEY, MSL_LLM_MODEL, MSL_PORT
+.env.example               template for .env: ANTHROPIC_API_KEY, FRED_API_KEY (optional), MSL_LLM_MODEL, MSL_PORT
 ```
 
 ## Conventions
@@ -88,7 +96,9 @@ CONTRIBUTING.md            setup, build, tests, adding a scenario or a data sour
   `dy_<asset>` (trailing 12-month income yield, %), `lvl_<name>` (raw levels
   for re-anchoring), `e_<shock>` (structural shocks, merged from
   processed/structural_shocks.csv by `context.load_panel_with_shocks()` when
-  present).
+  present), `x_<name>` (stored, audit-only old definitions; never views or
+  model inputs; see "The missing-factor round" for them, release dating and
+  `column_info`).
 * Models are estimated from `config.MODEL_START` (1973-01). The MonthDB holds
   the months from 1973-02 to the last panel month that have every required
   column: 644 months in the current build.
@@ -124,9 +134,10 @@ python -m scenariolab.build --only ablation     # the opt-in engine ablation (~5
 python -m scenariolab.build --all               # every step, ablation included
 ```
 
-`STEPS = [panel, causality, eras, diagnostics, backtest, scenarios, forecast,
-valuation, portfolio, llm, meta, ablation]` always run in this order, whatever
-order `--only` lists them in. `OPT_IN = {"ablation"}` is left out of the
+`STEPS = [panel, causality, eras, diagnostics, factor_audit, backtest,
+scenarios, regimes, forecast, valuation, portfolio, llm, meta, ablation,
+regime_forecast]` always run in this order, whatever order `--only` lists
+them in. `OPT_IN = {"ablation", "regime_forecast"}` is left out of the
 default set: `--all` adds it, `--only` picks any steps (opt-in ones included),
 `--skip` removes steps from either. `--paths N` changes only the scenarios step
 (the backtest's 400, the forecast's 1000, and the studies' 400 per window and
@@ -147,6 +158,7 @@ data downloaded) anyway.
 | causality | `analysis.causality.run` | panel; FRED PRS85006173, GDPC1, PCECC96, CP, GDP (cached in data/raw/fred) | results/causality.json, processed/structural_shocks.csv |
 | eras | `analysis.eras.run` | panel, model_selection.json (the model its attribution splits by) | results/eras.json |
 | diagnostics | `analysis.diagnostics.run` | panel + shocks | results/diagnostics.json, results/model_selection.json |
+| factor_audit | `analysis.factor_audit.run` (selection context) | panel + shocks, diagnostics.json, model_selection.json, the frozen archive | results/factor_audit.json |
 | backtest | `analysis.backtest.run` | panel, model_selection.json | results/backtest.json |
 | scenarios | `scenarios.library.run` | specs/*.yaml, model_selection.json | results/scenarios.json, results/scenarios/<id>.json, results/scenario_paths.npz |
 | forecast | `analysis.forecast.run` | panel, model_selection.json, scenario_paths.npz (live scenario mixture), results/scenarios/<id>.json (each built-in's validated spec, re-run with runner.run_spec at library.seed_for(id) and the npz path count for its year-one macro paths; this reproduces the npz exactly, `live.reconciliation.paths_reproduced`), data/ledger/*.json | results/forecast.json; appends data/ledger/forecast_<origin>.json |
@@ -213,11 +225,11 @@ continuation_paths.npz and portfolio_default.json.
 | `HORIZON_MONTHS` | 180 | months per scenario path (15 years); validate_spec pads or trims the phases to it |
 | `BLOCK_MONTHS` | 6 | sampler block length; each phase's views are solved on block starts of length `min(6, phase months)` |
 | `RARE_MONTHS` | 2020-03..2020-08, weight 0.25 | prior weight of the 2020 lockdown months; a block start that would draw any of them gets the factor in full |
-| `RESIDUALS` | `{"resid_mode": "partial", "resid_coupling": 0.5}` | the residual draw of every simulation (scenarios, backtest, forecast, the valuation study's baseline); chosen by analysis/ablation.py, whose own baseline is the pre-adoption coupled draw (its `partial_50` variant is the engine) |
+| `RESIDUALS` | `{"resid_mode": "partial", "resid_coupling": 0.5}` | the residual draw of every simulation (scenarios, backtest, forecast, the valuation study's baseline); chosen by analysis/ablation.py on the 2026-11-01 build, whose own baseline is the pre-adoption coupled draw (its `partial_50` variant is the engine); on the missing-factor round's build the same rule picks `decoupled` (validation MAE 2.80% vs 3.47%, test 4.81% vs 4.99%): the engine is not switched until that is reviewed (a switch needs a full rebuild) |
 | `EXOGENOUS_SHOCKS` | 7 events, 1973-10 (war and oil embargo) .. 2026-03 (oil supply shock, WTI +54% in a month) | one-year forecast years that overlap one are flagged, every forecast score is also reported without them, and a large miss in such a year is attributed to the shock |
 | `VALUATION` | see below | the valuation state |
-| `FACTORS` | 21 ids | `core` (10): the default transmission and the factors a factor_drift can move; `endogenous` (wealth, valuation, cape): built partly from asset prices, never accepted by the walk-forward, a view on them warns; `optional` (cape): its source may be missing, and a missing month counts as no change |
-| `STATES` | 30 ids | level variables (era fingerprints, views, today's state); `endogenous` (cape) warns as a view |
+| `FACTORS` | 27 ids (roles: see "The missing-factor round") | `core` (10): the fixed comparator `ModelSpec()` of the walk-forward (the selected model and the driftable factors come from model_selection.json); `endogenous` (wealth, valuation, cape): built partly from asset prices, never accepted by the walk-forward, a view on them warns; `optional` (cape): its source may be missing, and a missing month counts as no change |
+| `STATES` | 60 ids | level variables (era fingerprints, views, today's state); `endogenous` (cape) warns as a view; 30 of them are the scenario view variables of the missing-factor round (`VIEW_STATE_IDS`) |
 | `ERAS` | 9 eras, 1955-01 .. today | the era of a month (`simulate.era_of`), fingerprints, a phase's era mix; the simulator draws only months from 1973 on |
 | `ASSETS` | 13 ids | ids, names, data proxies, `group`, and the `income` source (dividend / coupon / interest / none) |
 
@@ -300,8 +312,11 @@ month's price return on the same month's factor changes. `regime="inflation"`
 adds interactions with a dummy for CPI YoY > 4% in the previous month; `mlp`
 is a 3-seed ensemble of one tanh hidden layer. Treasury, crude oil and cash
 are fitted for the transmission charts only; simulations build them
-structurally. The walk-forward (analysis/walkforward.py) kept the base spec:
-10 core factors, linear, no lags, full sample (model_selection.json).
+structurally. The walk-forward (analysis/walkforward.py) selected F:
+11 factors (the core without labor share, plus GZ and the term-premium x
+high-core-inflation term), linear, no lags, full sample, with per-asset
+equations for energy (+ metals/oil) and gold (fitted from 1982-01)
+(model_selection.json; see "The missing-factor round").
 
 ### MonthDB (engine/simulate.py)
 
@@ -623,7 +638,7 @@ fields and their bounds:
 | a view with no target | dropped with a warning |
 | endogenous variables | a view on f_valuation, f_wealth, f_cape or s_cape warns that it dictates equity prices |
 | IDENTITIES | s_real_ff = s_ff - s_cpi_yoy and s_term_spread = s_y10 - s_ff: when a phase gives a mean-type target (mean, mean_annual or shift_sd) for all three, the derived one is dropped |
-| `factor_drift` | only `drift_factor_ids()`: the 10 core factors and cpi (plus profit_share while VALUATION is enabled). Other FACTORS ids are dropped with a warning (they only pick months; a drift on them changes no path), unknown ids too. Bound: +-2 x the factor's annualized monthly-change sd on the MonthDB (llm_translator.json `factor_drift_bounds`; currently unrate +-3.24 pp/yr, oil +-0.71 and labor_share +-0.024 log/yr) |
+| `factor_drift` | only `drift_factor_ids(model_spec)`: the active model's factors and extras, cpi and labor_share (plus profit_share while VALUATION is enabled; without a model spec the 10 core factors and cpi; see "The missing-factor round" for W12-W14). Other FACTORS ids are dropped with a warning (they only pick months; a drift on them changes no path), unknown ids too. Bound: +-2 x the factor's annualized monthly-change sd on the MonthDB (llm_translator.json `factor_drift_bounds`; currently unrate +-3.24 pp/yr, oil +-0.71 and labor_share +-0.024 log/yr) |
 | `asset_drift` | equity, REIT and gold assets, +-0.08 per year; cash, treasury_10y and crude_oil are structural and dropped |
 | `resid_scale` | 0.5..2.0 |
 | `r_star` | -3..3 |
@@ -820,9 +835,9 @@ Scores are mean out-of-sample monthly R^2 of price returns over the 10
 non-structural assets, with SST around the training mean (> 0 beats the
 historical mean). Iterations: train 1973-1994 / validate 1995-2004 / test
 2005-2014, then train 1973-2004 / validate 2005-2014 / test 2015-today. The
-current final spec is the base (10 core factors): the last selection (12
-factors, 4 shocks, ridge 0.05, 15-year window) lost on the untouched test
-(0.115 vs 0.188 on the same 131 months). model_selection.json is read by
+current final spec is F (「11 个因子、能源股 +1 个专门因子、黄金从 1982 年起估计」); the
+candidates, the incremental gate, stage B and the new keys are in "The
+missing-factor round". model_selection.json is read by
 EngineContext only; the UI sees the model through `meta.model` and
 `diagnostics.final`.
 
@@ -1417,7 +1432,7 @@ startup so the first requests are fast.
 |---|---|---|
 | GET | `/`, `/js/…`, `/css/…`, `/vendor/…` | the static UI from web/ (`Cache-Control: no-cache` on `/`, `/index.html`, `/js/*`, `/css/*`, so edited tab modules are revalidated; `/vendor/echarts/*` gets ETag and Last-Modified, a conditional GET a 304, and no Cache-Control; a directory such as `/vendor/` is a 404, no listing) |
 | GET | `/api/meta` | meta.json |
-| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, scenarios, forecast, ablation, portfolio_default, llm_translator, valuation |
+| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, scenarios, forecast, ablation, portfolio_default, llm_translator, valuation, regimes, regime_forecast, factor_audit |
 | GET | `/api/scenarios/{id}` | results/scenarios/{id}.json, else results/custom/{id}.json (built-ins win) |
 | GET | `/api/scenarios/custom` | `{scenarios: [{id, name, summary, source, created, prior_prob, prob}]}`, newest first |
 | POST | `/api/scenarios/custom/run` | `{spec, save = true, n_paths = 600 (clamped 100..2000), seed = 7, source = "custom"}` -> the detail JSON + `created`; with `save`, also custom/{id}.json + .npz |
@@ -1670,9 +1685,9 @@ index.html and the README.
 
 ## Testing
 
-`.venv/bin/python -m pytest -q` runs the whole suite: 309 tests in 15 files
-at the time of writing, about 80 s (309 passed in 82 s after the full build of
-2026-11-01, none skipped). Tests that need local data skip themselves until
+`.venv/bin/python -m pytest -q` runs the whole suite: 494 tests in 21 files
+at the time of writing, about 4 minutes (494 passed in about 240 s after the full
+build of 2026-11-02, none skipped). Tests that need local data skip themselves until
 it exists: `needs_panel` / an inline check skip without
 data/processed/panel_monthly.csv; test_server.py's `needs_build` skips
 without data/results/meta.json; others check the specific result file they
@@ -1682,9 +1697,9 @@ needs the `anthropic` package (the llm extra) and never calls the API: it
 injects fake clients and checks that the system prompt is deterministic.
 test_build.py covers the build steps and the sources with the network mocked.
 The server tests that run a custom scenario write into data/results/custom (and
-delete it) or into a temporary directory. A fresh clone (no data/) runs 202
-passed / 107 skipped with the llm extra and 199 passed / 91 skipped without it
-(about 30 s).
+delete it) or into a temporary directory. A fresh clone (no data/) without the
+llm extra, as CI installs it (`.[dev]`), runs 294 passed / 172 skipped (about
+50 s; test_translator.py is skipped as a whole).
 
 Files: test_ablation, test_attribution (bit-identity of simulate and run_spec
 with and without the attribution, additivity, the reconciliation, a pure oil
@@ -1705,3 +1720,355 @@ compileall -q scenariolab`, `ruff check scenariolab tests` (pyproject
 `[tool.ruff.lint] select = ["E9", "F"]`; the dev extra pins
 `ruff>=0.16,<0.17`) and `pytest -q`. It never downloads data or runs the
 build: on a fresh clone the data-dependent tests skip.
+
+## The missing-factor round (缺失因子审计, 2026-11-01)
+
+This section is self-contained: it records everything the missing-factor round changed or added, and where an
+earlier section of this file says something else, this section wins. The research behind it (six families, a
+verifier and a critique) is archived as statistics in `docs/research/2026-11-01-factor-audit/` and as data in
+`scenariolab/analysis/audit_archive/research_2026_11_01.json`; both are frozen once the round lands. Example
+numbers are from the full build of 2026-11-02 (01:53 UTC, data through 2026-09); panel_meta, eras,
+diagnostics, factor_audit and meta were rebuilt at 03:26 UTC for text and audit-field fixes (the panel, the
+selected model and every number quoted here unchanged).
+
+### Conventions: column families and timing
+
+* Panel column families gain `x_<name>`: stored audit-only columns (`x_spread_mixed`, today's old spread
+  timing; `x_labor_share_interp`, the old interpolated labor share), with which the audit rebuilds the research
+  round's base model. An `x_` column is never a view, a drift or a model input (`schema.ALLOWED_PREFIXES =
+  ("s_", "f_", "e_", "rg_")`). Two `f_` columns are audit-only as well: the walk-forward's report-only stage-B
+  regressors `f_usd_em` (Δlog of the EM dollar: TWEXOMTH monthly average to 2005-12, DTWEXEMEGS month-end from
+  2006-01, chained) and `f_mort_spread` (Δ `s_mort_spread`). They are not `config.FACTORS` ids
+  (`panel.STAGE_B_AUDIT`, role `audit` in `column_info`): `validate_spec` refuses a view on them with W14 (as on
+  any `f_` column of the frame that is no config factor, `f_cpi` aside: `schema.audit_only`), they cannot be
+  drifted and the variable table leaves them out.
+* **Reference month vs release dated.** Monthly macro data sit at the month they describe. Every quarterly
+  series is *release dated*: `release_dated(q, index, lag)` puts the quarter labelled at its first month m0 in
+  month m0 + lag and holds it until the next release, at most `QUARTER_HOLD` = 3 months (Z.1 wealth before 1952 is
+  annual, so a few 1947-52 months stay empty). Ratios (profit share, capex share, wealth / income, IT investment
+  share, tariff rate, deficit / GDP) are formed quarterly first. Nothing is interpolated any more except single
+  missing months of monthly series (the 2025-10 CPI); market prices (month-end, last week) carry at most one
+  month. `f_labor_share` and the other release-dated `f_` columns are therefore non-zero only in release
+  months (labor share: Feb / May / Aug / Nov). `s_profit_share` is now the same series as `s_profit_share_rt`.
+* **Spread timing.** `s_spread = lvl_baa − lvl_y10s` with both legs at the same time of month: monthly averages
+  to 1961-12, the last weekly WBAA and WGS10YR of the month 1962-01..1985-12, DBAA and DGS10 month-end from
+  1986-01. `lvl_y10` (the yield factor) is unchanged. 1973-85 levels correlate 0.969 with the old series.
+* **Sentiment.** Before 1978 the quarterly Michigan survey is held until the next survey (at most 3 months)
+  instead of interpolated.
+* `config.RELEASE_LAGS` (months from a quarter's first month to its first publication): PRS85006173, OPHNFB,
+  ULCNFB, A679RC1Q027SBEA 4; CP, GDP, PNFI, DPI, FGDEF, FYGFGDQ188S, HLW 5; B235RC1Q027SBEA 3; TNWBSHNO 6.
+  `VALUATION["release_lag_months"]` stays 5 and must equal `RELEASE_LAGS["CP"]` (test).
+* `panel_meta.json` `column_info`: `{col: {sources, alignment: reference_month | release_dated | month_end |
+  monthly_average | last_week | mixed, lag_months, first, last, late, full_history, revised, copyright, role:
+  model | state | view | audit}}` for every `s_`, `f_` and `x_` column (`panel.COLUMN_INFO` must have an entry
+  for each; the build fails otherwise). `late` = first observed more than 12 months after 1973-02;
+  `full_history` = observed in every month from 1973-02. panel_meta also gains `release_lags` and the notes on
+  release dating, the spread legs, GZ / ACM revisions and the house-price splice.
+
+### Engine settings (config.py)
+
+| Setting | Value | What it changes |
+|---|---|---|
+| `FACTORS` | 27 ids | roles: `core` (10, the fixed comparator `ModelSpec()`), candidates (`core: False`), `interaction` (`tp10_x_core4`: `{"factor": "tp10", "state": "core_yoy", "lag": 1, "above": 4.0}`), `dedicated` (`metals_oil`: `["energy"]`), `role: "audit"` (`tp10_x_infl4`, `ebp`: comparison columns only, `AUDIT_FACTOR_IDS`) |
+| `STATES` | 60 ids | the 30 earlier states plus 30 scenario view variables (`VIEW_STATE_IDS`), each with `concept` (a key of `VIEW_CONCEPTS`, concept id → Chinese name) and `source`; `late: True` for `tips10` (2003-01) and `mich1y` (1978-01) |
+| `RELEASE_LAGS` | see above | release dating of every quarterly series |
+| `FRED` | `{"api_url": "https://api.stlouisfed.org/fred", "key_env": "FRED_API_KEY", "min_interval_s": 0.6, "attempts": 4}` | the FRED API client |
+
+New factors: `gz` (GZ 信用利差变动, Fed EBP csv `gz_spread`, from 1973-02), `tp10` (Δ ACMTP10, NY Fed ACM,
+month-end, from 1961-07), `tp10_x_core4` (`f_tp10[t] · 1{s_core_yoy[t−1] > 4.0}`, NaN where the lag is NaN; the
+threshold is `factor_model.HIGH_INFLATION` and `config.REGIMES["params"]["high_inflation_pct"]`, test),
+`metals_oil` (Δlog of the World Bank Pink Sheet base-metals index over the average crude price, both monthly
+averages, from 1960-02). Three "high inflation" switches read the same 4%: the regime label `high_infl`
+(headline CPI y/y, same month), `ModelSpec(regime="inflation")` (headline, previous month; still rejected) and
+the TP term (core CPI, previous month).
+
+### Transmission model: per-asset equations (engine/factor_model.py)
+
+The selected model is **F** (`model_selection.json`): `factors = [oil, ip, cpi_goods, cpi_services, ff, y10,
+spread, usd, unrate, gz, tp10_x_core4]` (labor share dropped), linear, no lags, full sample, plus
+`asset_factors = {energy: [metals_oil]}` and `asset_start = {gold: "1982-01"}`; `describe()` 「11 个因子、能源股 +1
+个专门因子、黄金从 1982 年起估计」.
+
+* `ModelSpec` gains `asset_factors` (`((asset, (factor ids)), ...)`) and `asset_start` (`((asset, "YYYY-MM"),
+  ...)`): sorted tuples in the dataclass, dicts in JSON (`to_dict`); `from_dict` accepts dicts, lists or an
+  absent key, so older files load unchanged. `describe()` appends 「、能源股 +1 个专门因子」 (「、{n} 个资产有专门因子」
+  when several assets have extras) and 「、黄金从 1982 年起估计」.
+* Columns: `base_columns(spec)` = common `f_` columns + `shock_cols` + the sorted union of the extras;
+  `asset_columns(spec, asset)` and `asset_feature_names(spec, asset)` give one equation's columns and
+  features. Extras enter contemporaneously; lags and the regime interaction apply to the common columns.
+  Feature order: common, common lags, `_hi` terms, `hi_infl`, extras.
+* `AssetFactorModel.fit` keeps the joint row mask (every union feature and every model asset's return present)
+  and groups the assets by (extras, start); each group is its own OLS / ridge on its own columns and months.
+  `coef` stays one table, assets × union features, with 0.0 outside an equation (`tstat` NaN there, null in
+  JSON); `stats.r2` / `n_obs` / `resid_sd` are per asset over its own rows; `asset_train_start = {asset:
+  "YYYY-MM"}`. A spec without extras or own starts takes the previous single-equation code path (bit-identical).
+  Predictions keep the joint standardisation round trip (equal to `x @ coef.T + intercept` to about 1e-16).
+* Short own windows fall back: an `asset_start` is honoured only when its own window holds at least
+  `MIN_ASSET_WINDOW` = 120 months, else that asset uses the common start and `asset_start_used[asset]` is None.
+  The forecast's origins before 1991-12 fit gold from 1973; `fit(..., honor_asset_start=False)` turns the
+  windows off (causality's per-era betas). `kind="mlp"` with extras or a start raises `ValueError` (the networks
+  are report-only).
+* `contributions`, the attribution (`Attribution.asset_factor_terms`, each asset's own terms) and
+  `summary()` (adds `asset_factors`, `asset_start`, `asset_train_start`, `asset_start_used`) follow the per-asset
+  equations; a feature outside an equation contributes exactly 0.
+* `capital_market_assumptions` reads `coef` as before; gold's oil beta now comes from its 1982+ equation.
+
+### MonthDB (engine/simulate.py)
+
+`SIM_FACTORS = sorted((set(FACTOR_IDS) − AUDIT_FACTOR_IDS) | {"cpi"})`: gz, tp10, tp10_x_core4 and metals_oil
+are tracked like any factor (drawn months' values, optional `factor_drift`). `MonthDB.needed` = the
+non-optional `SIM_FACTORS` columns + `base_columns(model.spec)`. Every new input covers 1973-02 onward, so the
+MonthDB keeps **644 months, 1973-02..2026-09** with F (test). GZ, the TP term and metals/oil enter simulations
+with the drawn month's own values: no level scaling and no reversion (unlike `f_spread`). The TP term's dummy is
+the drawn month's own (its previous month's core CPI): 「期限溢价项只在抽中的历史月份本身处于高核心通胀时起作用」, so a
+phase that wants it must draw such months (a view on `s_core_yoy` or the regime layer's high-inflation flag).
+The dummy is on in 231 of the 644 months, last in 2023-12; today core CPI y/y is 2.57, so it is off. Gold's
+residuals for 1973-02..1981-12 come from its 1982+ fit. Simulated CPI, IP and unemployment for a given draw do
+not depend on the transmission, so the regime layer's reference run (2000 paths, seed 4242) keeps
+bit-identical regime mixes (checked: base on the old panel, base and F on the new panel, all 13 regime arrays
+and the drawn months equal).
+
+### Walk-forward (analysis/walkforward.py)
+
+* **Candidates.** 28 = the earlier 22 + `add_gz`, `add_tp10_x_core4`, `drop_labor_share` (eligible) and
+  `add_tp10_x_infl4`, `add_tp10`, `add_ebp` (report-only comparisons). `MLP_ELIGIBLE = False`: `mlp16` / `mlp32`
+  are report-only with the note 「传导模型必须是线性的：界面显示每个因子的 β，情景回报按因子拆分；神经网络只作对照（见缺失因子审计）」.
+  The old `QUARTERLY` set is folded into `RELEASE_DATED` (「季度数据按通常的发布滞后对齐，只在发布月变化（个别推迟发布的季度会早
+  1–2 个月出现）。」: the fixed lags of `RELEASE_LAGS` are the usual ones; ALFRED shows a few quarters published later, e.g.
+  the labor share's 2018-Q4 and 2025-Q3/Q4 and the tariff rate's 2013-Q3, 2018-Q4 and 2025-Q3/Q4, which the panel shows
+  1-2 months early).
+* **Incremental gate** (`GATE = "incremental"`). An iteration's selection is kept only when it differs from the
+  iteration's start and beats the *start* on the untouched test by more than `MIN_GAIN`:
+  `test_result.delta_vs_start` (and `delta` against the base, as before). The next iteration starts from the
+  kept spec; the final common spec is the last selection if it passed, else the last start. Iteration 1
+  (start = base) behaves as before.
+* **Stage B** (`dedicated_pass`), on the common spec C: `DEDICATED_CANDIDATES` = `energy_metals_oil` and
+  `gold_window` (options 1982-01 / 1985-01) eligible, `industrials_usd_em`, `gold_tips10_avg` (not evaluated:
+  the panel has no `f_tips10_avg`, TIPS start in 2003) and `gold_mortgage_spread` report-only. Per iteration: the
+  best option on the asset's own validation R² (benchmark: the asset's mean over the whole training window) is
+  chosen when it gains more than `MIN_GAIN_ASSET` = 0.003, and accepted when its test gain clears it too; the
+  final spec takes what passes in the last iteration (`final_rule: "last_iteration"`, `test_used_for_choice:
+  true`).
+* `run_walkforward(panel, base, iterations, diagnose, dedicated=None, gate=GATE, mlp_eligible=None)`:
+  `dedicated=[]` turns stage B off; `gate="base"` and `mlp_eligible=True` rerun the comparison protocols the
+  audit shows. It returns `stage_b`, `common_robustness` (ridge 0.01 / 0.05 on the common spec per decade),
+  `gate`, `mlp_eligible`, `min_gain_asset` and `final.common` / `final.dedicated`.
+
+Outcome on this build (the design's check values in brackets where they differ):
+
+| | value |
+|---|---|
+| iteration 1 (train 1973-94, validate 1995-2004, test 2005-14) | add_gz, add_tp10_x_core4, drop_labor_share; validation −0.0114 → 0.0372 → 0.0625 → 0.0754; test 0.0162 → 0.1679: kept |
+| iteration 2 (train 1973-2004, validate 2005-14, test 2015-01..2026-09) | add_real_y10, shocks_replace_oil, add_profit_growth; validation 0.1679 → 0.1867 → 0.2045 → 0.2112 [0.1951, 0.2016]; test on 131 months: base 0.1996, start 0.2795, selected 0.2681 [0.2707]; vs start −0.0114 [−0.0088], vs base +0.0685 [+0.0711]: not kept |
+| common spec C | the iteration-1 selection, 「11 个因子」 |
+| stage B (asset R² gains, iteration 1 val / test, iteration 2 val / test) | energy + metals_oil +0.0033 / +0.0078 / +0.0078 / +0.0150, accepted; gold from 1982-01 +0.0815 / +0.1711 / +0.1711 / +0.1081, accepted (1985-01 +0.0814 / +0.1583 / +0.1583 / +0.0864, not chosen); industrials + usd_em −0.0033 / +0.0313 / +0.0313 / +0.0057 [+0.0319 / +0.0068: the design added metals_oil to every equation]; gold + mortgage spread +0.0631 / +0.0804 / +0.0804 / +0.0546 (report-only) |
+| final F | validation 0.1858, test 0.2678 on 141 months (base 0.2128) |
+
+The iteration-2 numbers in brackets were computed with the structural shocks identified on the old spread
+timing; the causality step re-identifies them on the fixed spread (e_financial correlates 0.70 with the old
+series), which moves only iteration 2 (the decision and F are unchanged; F has no shocks).
+
+### Results files
+
+* **diagnostics.json** gains top-level `gate`, `mlp_eligible`, `min_gain_asset`, `stage_b` (`{candidates, common,
+  min_gain_asset, min_coverage, r2_benchmark, final_rule, test_used_for_choice, iterations: [{iter, train,
+  validate, test, rows: [{id, asset, option, label, change, eligible, evaluated, reason, val, test, val_gain,
+  test_gain, chosen, accepted}]}], accepted, accepted_options, change, text}`) and `common_robustness`;
+  `iterations[].test_result` gains `start`, `delta_vs_start` and `gate`; `iterations[].start` gains `label` and
+  `chain`; `final` gains `common {spec, describe, changes, kept}`, `dedicated` and `last_selected.{delta,
+  delta_vs_start, improved}`; `residual_analysis` gains `asset_train_start`, `asset_start_used`,
+  `assets[a].fit_start`, `assets[a].own_factors` (Chow, Ljung-Box and the rolling betas use each asset's own
+  equation and first month) and `leakage.wealth.quarter`. The recommendations answer the four questions
+  (factor: 是; mechanism: 部分; tuning: ridge 0.05 not selected; network: 只作对照) and keep the regime layer's
+  lookup (the 通胀状态依赖 title, `evidence.oos_delta`, `evidence.changes = ["add_tp10_x_core4"]`).
+* **model_selection.json**: `spec` carries `asset_factors` / `asset_start`; new key `dedicated` (the accepted
+  stage-B ids).
+* **factor_audit.json** (`analysis/factor_audit.py`, new step): `{version, data_version {panel_sha1,
+  model_selection_sha1, data_end}, archive {id, access_date, panel_sha1: "3869fdde3437", tag, docs, source},
+  model {spec, describe, is_expected, expected_describe, common_describe}, summary, coverage, data_fixes,
+  changes, plausible, families, per_asset, bh, refutation, forecast_states, upper_bound, residuals,
+  model_vs_factor, out_of_universe, protocol, concepts, concept_counts, today, replication, untested, no_source,
+  issues, notes}`. The sections that are wholly archived or recomputed say so with `source` (`archive`:
+  archive, families, plausible, concepts, bh, upper_bound, model_vs_factor, `out_of_universe.archive_U4`;
+  `recomputed`: residuals, `out_of_universe.final_common`, the recomputed refutation rows; `mixed`:
+  forecast_states; protocol says which its rows are). The derived sections (summary, coverage, data_fixes, changes,
+  per_asset, today, replication, concept_counts) carry no `source`: `summary.sources` names the origin of each
+  summary number (counts and bounds archive, scores recomputed, the unexplained share mixed), and a caveat that
+  quotes archived numbers is marked in `changes[].caveat_sources` (`"archive"` or null, aligned with `caveats`).
+  Archived numbers carry the tag 「研究轮存档（2026-11-01，面板 3869fdde3437）」 on the page and are never presented as
+  recomputed. `changes[]` (spread_timing, release_dating, sentiment_hold, add_gz, add_tp10_x_core4,
+  drop_labor_share, energy_metals_oil, gold_window) each carry `definition`, `alignment`, `coverage`,
+  `walkforward`, `replication`, `refutation`, `loo_in_final`, `loo_in_common`, `table {values, basis}`, `status`,
+  `verdict` and `caveats` (the mandatory UI sentences with the build's numbers); a dedicated change's
+  `loo_in_final` is its own asset's R² change and `dedicated.score_gain` the 10-asset average.
+  `protocol.alternatives` are recomputed on this build (`source: "recomputed"`; the archive's rows stay in
+  `archive_alternatives`). `replication.checks.sci` repeats the replication differences as text (the worst R² difference
+  `"4.99e-07"`), because results files round every float to 6 decimals and it would read 0.0.
+  `upper_bound.per_asset[].honest_range_T3` is each asset's 2015-26 range over the six honest fits (sets A and B
+  × ridge, lasso, PCR, penalty chosen on the 10-asset score; the archive's `critique.upper_bound_common_per_asset`,
+  from the critique's `upper_bound_r2.csv`), `upper_bound.beta_drift` the hindsight by-decade betas' adjusted R²
+  on the U5 residuals (range 0.06-0.29). `residuals.fallback` / `residuals.note` say which refits fit an
+  asset with its own start from the common start (gold in the 1985-1991 refits, the engine's 120-month rule).
+  The design's d05 fitted gold from 1982-01 at every refit (36 months at the first one), so two of its check
+  values differ by this rule, beyond its 1e-3 tolerance for gold: SSE kept vs the base 0.898 (d05 0.923; the
+  other nine assets agree to 1e-6) and the PC1 share 0.5135 (0.5141, inside the tolerance).
+  `today` percentiles are over the MonthDB's months (1973-02 on), as the design's d07.
+* **panel_meta.json**: `column_info`, `release_lags`, the new notes and sources (see Conventions and Data
+  sources).
+* **meta.json** gains `view_concepts` (`config.VIEW_CONCEPTS`, concept id → Chinese name): the method tab's step 1
+  groups the 30 view variables by it. The notes and sources follow panel_meta.json.
+* **regimes.json** (regime layer): `transmission` fits each asset's own equation (`asset_features`,
+  `asset_fit_start`; `engine_coef_check_max_abs_diff` 3.6e-13 with F) and says `labor_share_in_model`; the note
+  reads 「劳动收入占比按发布月对齐，只在发布月变化」, and with labor share out of the model
+  `n_sig_excl_labor_share` equals `n_sig_5pct`. `walk_forward_verdict.changes` is read from the diagnostics
+  recommendation, and `model_use.transmission.reason` names the one kept inflation-state term when it is
+  there.
+
+### Scenario spec: W12-W14 and the driftable factors
+
+* `drift_factor_ids(spec=None)`: with a spec, the model's common factors + its extras + `cpi` + `labor_share` (+
+  `profit_share` while the valuation state is on); without one, as before. runner, translator, the server's
+  custom run and the regime layer's conflict example pass `ctx.model.spec` to `validate_spec(...,
+  model_spec=...)`. With F a `factor_drift` can move `gz` (bound ±2 × the annualised sd of `f_gz`),
+  `tp10_x_core4` (in every month of the phase, so it amounts to assuming the phase is in high core inflation) and
+  `metals_oil`; audit factors are refused.
+* Warnings continue the regime layer's W1-W11:
+  **W12** a view on a variable first observed more than 12 months after the MonthDB's first month:
+  「阶段 {k}：{var} 从 {first} 才有数据，这一阶段只会抽 {first} 以后的历史月份（占 1973 年以来月份的 {share:.0%}）」
+  (s_tips10 2003-01, 44%; s_mich1y 1978-01, 91%);
+  **W13** a labour-share drift while labour share is not in the transmission (kept, warned; k_shaped and agi_boom
+  under F): 「阶段 {k}：劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²），它的漂移只改变模拟的劳动收入占比路径，不直接改变资产回报」;
+  **W14** a view on an audit-only variable (`f_ebp`, `f_tp10_x_infl4`, the stage-B regressors `f_usd_em` and
+  `f_mort_spread`, or any other `f_` column of the frame that is no config factor, `f_cpi` aside):
+  「阶段 {k}：{var} 只用于审计对照，不能作为情景视图，已忽略」.
+  `x_` columns are refused as unknown prefixes.
+* The calculator (`library.resolve_calibration(spec, base, model_spec)`) adds `calibrate.LABOR_SHARE_CAVEAT` to
+  the explanation and `engine_check.labor_share_in_transmission` (false under F).
+* Scenario details gain `transmission {describe, factors, notes, interactions: [{factor, phases: [{drawn_share,
+  database_share}]}]}`; each model asset's attribution lists only its own equation's terms (metals_oil only for
+  energy). Eras attribution follows each asset's equation too; the 30 view variables are in each era's `states`
+  but stay out of the era signatures.
+* The 13 built-in specs are not edited in this round. The one new clip: financial_crisis phase 2 `s_spread
+  mean 3.6` → 3.532 (the support's upper bound after the timing fix); `tests/test_scenarios.py` whitelists it
+  (`KNOWN_CLIPS`) until the post-merge content review.
+
+### LLM translator
+
+The root-cause list is generated from `ctx.model.spec` and the `FACTORS` names (under F it no longer names
+`f_labor_share`, and adds 「期限溢价（f_tp10；上月核心 CPI 同比 > 4% 的月份直接进入传导模型）」 and
+「能源股另含基础金属相对油价（f_metals_oil）」). Variable rows gain `asset_driver_assets` (null = every modelled
+asset; `["energy"]` for `f_metals_oil`; the prompt prints 是 / 是（仅能源股） / 否) and `late_from` / `late_share`.
+A section 「## 新增的情景变量」 follows the variable table: the 30 view variables by concept (`VIEW_CONCEPTS` order),
+the late ones with their first month and the W12 rule, the release-dating note, the GZ rule (only when `f_gz`
+is a model input) and the TP-term note. The regime layer's 「## 宏观体制（regime 字段）」 stays before 「## 覆盖项」.
+The prompt stays deterministic per build.
+
+### Data sources
+
+* **FRED through the API, graph CSV as fallback** (`data/sources.py`). `fred(series_id, eop=False,
+  refresh=False, agg=None)` reads the API JSON cache (`data/raw/fred/<ID>.json`, `<ID>_m_eop.json`,
+  `<ID>_m_avg.json`), then the graph CSV cache (`<ID>.csv`, `<ID>_eop.csv`), then downloads: through
+  `https://api.stlouisfed.org/fred/series/observations` when `FRED_API_KEY` is set (`env.load_dotenv()`; build.main
+  calls it right after parsing its arguments), else the graph CSV. When the API fails with a key set (FRED
+  rejects the key with HTTP 400, or the API is down after its retries), the keyless graph CSV is tried once, so a
+  bad key in `.env` does not stop a build; the warning and any final error name only the series, the status and
+  the exception type. `fred_meta(series_id)` caches
+  `/fred/series` metadata as `<ID>_meta.json`. Weekly and daily series keep their observation dates;
+  panel.py aggregates them (`last_in_month`, `mean_in_month`). A graph CSV download (keyless, or the fallback)
+  moves an older API JSON of the same request to `fred/superseded/` so the new CSV is not shadowed.
+* **Key hygiene.** The key is only the `api_key` query parameter, sent only to `api.stlouisfed.org` (redirects
+  off). It is never in a file name, a cache body, a log line, an exception, panel_meta.json, meta.json or
+  SOURCES.json: a failed call raises a fresh `RuntimeError("FRED API 下载失败：<ID>（HTTP <status> / <type>）")`
+  (a `requests` message contains the full URL, so it is never re-raised or printed), recorded URLs read
+  `…?series_id=<ID>&api_key=REDACTED&file_type=json`, and a body that echoes the key is refused. Politeness: at
+  least 0.6 s between calls, 4 attempts with 1.5·k s backoff on HTTP 429 / 5xx and timeouts; a body without an
+  `observations` list is a failure.
+* **Publisher downloaders** (keyless; each checks the content before caching): `fed_ebp()` (Federal Reserve
+  Board EBP csv; required for `gz`), `nyfed_acm()` (ACM term premium, xls; required for the TP term),
+  `worldbank_pinksheet()` (the monthly Pink Sheet, link discovered on the World Bank's commodity-markets page,
+  restricted to worldbank.org; required for `metals_oil`), and the optional `freddiemac_fmhpi()`,
+  `shiller_home()` (Fig. 3-1), `iacoviello_gpr()`, `epu_news()` and `nyfed_hlw()`. A required source raises when
+  neither a cache nor a download is available; an optional one returns None and leaves its columns empty with a
+  panel_meta note. New FRED ids: WBAA and WGS10YR (required) plus 28 optional view inputs. `openpyxl>=3.1`
+  joins the dependencies (Pink Sheet, HLW, EPU).
+* **Importing the research downloads** (one-off): `python -m scenariolab.data.import_raw <factors/raw>
+  [--force] [--dest DIR] [--families DIR]` copies bytes only (FRED responses and the families' sources.json are
+  parsed as JSON data; nothing is executed or opened with macros), checks recorded SHA-256 (and the 12-digit
+  SHA-1 prefixes some families used), refuses to overwrite a different file without `--force`, refuses any file
+  that contains the configured key, admits a FRED observations file to the cache only if it is a full, unpaged,
+  untransformed request (`observation_start` 1600-01-01, `observation_end` 9999-12-31, `units` lin, `count ==
+  len(observations) <= limit`; else `fred/alfred/`), files vintages under `fred/alfred/` and searches under
+  `fred/searches/`, and writes `data/raw/SOURCES.json` (one record per file: url with `api_key=REDACTED`,
+  publisher, access_date, terms, frequency, first_month, publication_lag, revised, copyright, sha256) and
+  `data/raw/import_log.json`. Where a series exists both as the project's CSV and an imported JSON, the JSON
+  wins (a test checks they agree).
+* Third-party copyright (SOURCES.json, `column_info.copyright`, the method tab's data card): Moody's (BAA, DBAA,
+  WBAA via FRED), Freddie Mac (PMMS, FMHPI), University of Michigan (UMCSENT, MICH), Robert J. Shiller (ie_data,
+  Fig. 3-1). `data/` stays git-ignored: nothing is redistributed.
+
+### The build
+
+`STEPS = [panel, causality, eras, diagnostics, factor_audit, backtest, scenarios, regimes, forecast, valuation,
+portfolio, llm, meta, ablation, regime_forecast]` (the order shared with the regime layer), `OPT_IN =
+{"ablation", "regime_forecast"}`.
+
+| Step | Code | Reads | Writes (data/…) |
+|---|---|---|---|
+| factor_audit | `analysis.factor_audit.run` (selection context) | panel + shocks, diagnostics.json, model_selection.json, the frozen archive (package data) | results/factor_audit.json |
+
+`factor_audit` runs on the selected model after diagnostics and before backtest; it needs diagnostics.json
+(without it the walk-forward rows are empty and `issues` says so) and reads nothing outside `data/` and the
+package. Two modes: *replication* rebuilds the research round's base B0 from the `x_` columns and recomputes
+the registered candidates (`REGISTERED`: the spread fix, GZ, the TP term and metals/oil required, plus
+tp10_x_infl4 and the mortgage spread) and three forecast states; it must reproduce the archive to 1e-6 on the
+deltas, 1e-4 on t / Stouffer z (the archive's inputs were stored with 6 significant digits) and exactly on the
+counts (`replication.checks.ok`). *Current* scores B0, B1 and the selected model, the data-fix deltas, each
+change alone on B1, the dedicated gains, leave-one-out in F and in the common spec, the residual anatomy, the
+six Fama-French industries the project does not use, coverage from `column_info`, today's readings, and the
+§2.3 protocols (one walk-forward run with the networks eligible; the old gate's rows are read off the
+two-iteration runs). CLI: `python -m scenariolab.analysis.factor_audit`.
+
+`analysis/factor_tests.py` is the validated core of the research harness: the same-sample transmission test
+(`Bench.transmission`: delta and `delta_same_sample`, Diebold-Mariano and Clark-West t with Newey-West, Stouffer
+z over decades with ≥ 120 training months), the pooled 10-asset score test, `bh()`, `circular_placebo` (seed
+`[20261101, crc32(id)]`), `refutation`, `predictive_test` (the KEY_STATES baseline, monthly and year-end origins),
+`oos_residuals` (through `AssetFactorModel`, so per-asset extras and windows follow the 120-month fallback) and
+`residual_pca`.
+
+Timings of the full build of 2026-11-02 (`--all --skip panel`, other jobs on the machine at the same time, so
+the times are upper bounds): causality 6.5 s, eras 1.1, diagnostics 15.7, factor_audit 99.7 (18.6 s when rerun alone after the protocol rows were changed to one walk-forward run per candidate set), backtest 68.0,
+scenarios 29.6, regimes 92.8, forecast 37.3, valuation 358.7, portfolio 29.1, llm 1.8, meta 0.0, ablation
+508.6, regime_forecast 96.6; 1346 s in all. The panel step (no downloads) takes about 3 s. The forecast step refused to
+append a second 2026-09 entry to `data/ledger/` (an origin is recorded once); the ledger is re-recorded after
+this branch and the regime layer merge.
+
+### HTTP API and web app
+
+`GET /api/factor_audit` serves factor_audit.json (`server.RESULT_NAMES`, `BUILD_STEP["factor_audit"] =
+"factor_audit"`); a missing file gives 404 naming `--only factor_audit` and its prerequisite diagnostics.json.
+The diagnostics tab gains the section 「缺失因子审计」 (drawn by `web/js/tabs/_factor_audit.js`; deep link
+`#diagnostics?audit`, sub-anchors `?audit-families`, `?audit-assets`, `?audit-concepts`; loaded optionally like
+the ablation), a stage-B card 「专门因子（只作用于单个资产）」 and the gate wording. Inside the section the
+archived numbers carry the 「研究轮存档」 chip and the recomputed ones 「本次构建重算」 (the protocol table by its
+`source`, a caveat by `caveat_sources`); the seven PLAUSIBLE transmission candidates get their own table; the
+coverage table calls a factor column 传导模型 only when the selected model uses it (else 候选因子). The method
+tab gets step 12 「缺失因子审计」 after the regime layer's step 11, and step 6 says what the TP term needs (drawn
+high-core-inflation months); the overview gets the 「信用与期限」 line under today's macro state; a scenario
+detail whose model has the TP term shows, per phase, the share of drawn months in which it is on next to the
+month database's (`transmission.interactions`). The lab's variable table marks a dedicated factor 「是（仅石油能源股）」
+and a late variable's first month; the eras tab's model check compares `asset_factors` / `asset_start` too. When
+this build's engine ablation picks a variant other than the one the engine runs, the diagnostics tab says so
+instead of 「引擎已经改用消融选出的…」.
+
+### Testing
+
+New files: `test_sources.py` (FRED API and CSV paths, the keyless graph-CSV fallback when the API rejects the key
+or is down, key hygiene, politeness, the publisher parsers; network mocked, fake key), `test_panel.py` (spread
+timing, release dating, a 20-draw no-look-ahead property that cuts each quarterly input at its publication month,
+so a quarter shown before it was published fails, the TP term, coverage and `column_info`, the Törnqvist index), `test_factor_audit.py` (replication, BH and placebos,
+residual anatomy, the JSON contract, out of universe, the protocol rows). Additions in test_engine and
+test_attribution (per-asset equations, fallbacks, bit-identity of the base path), test_diagnostics (28
+candidates, the incremental gate, stage B, the walk-forward on the panel: test 19 checks iteration 2 against
+the value of whichever structural shocks are on disk), test_scenarios / test_translator / test_eras (W12-W14,
+driftable factors, the root list, the new prompt section, eras by equation), test_server and test_build (the
+endpoint, the shared step order, `load_dotenv` before the panel).

@@ -6,6 +6,15 @@ the engine: it rejects unknown variables, bounds every number to what history
 can support, pads or trims phases to the horizon, and reports every change so
 the UI can show exactly what was adjusted. A phase's `regime` key (macro
 regimes, regime_views.py) becomes plain views on the ex-post rg_ columns.
+
+Views take the s_ / f_ / e_ / rg_ column families; the audit-only x_ columns and
+the audit-only f_ columns (those of audit-role factors, config.FACTORS "role":
+"audit", and the walk-forward's report-only stage-B regressors, which are no
+config factor at all) are refused.
+The checks of the missing-factor round (FACTORS_DESIGN §3.4) follow the regime
+layer's W1-W11: W12 a view on a variable first observed well after the month
+database starts, W13 a labour-share drift while the labour share is not in the
+transmission, W14 a view on an audit-only variable.
 """
 from __future__ import annotations
 
@@ -17,12 +26,18 @@ import numpy as np
 import pandas as pd
 
 from .. import config
+from ..data.panel import STAGE_B_AUDIT
+from ..engine.factor_model import ModelSpec, asset_extras
 from ..engine.pooling import BLOCK, start_prior, start_values, view_support
 from ..engine.sampler import phase_block
 from ..engine.simulate import DEFAULT_REVERSION
 from . import regime_views
 
-ALLOWED_PREFIXES = ("s_", "f_", "e_", "rg_")
+ALLOWED_PREFIXES = ("s_", "f_", "e_", "rg_")    # x_ columns (audit-only, stored in the panel) are refused
+# W14: the factor audit's comparison columns (audit-role factors) and the walk-forward's report-only stage-B
+# regressors (role "audit" in panel_meta's column_info)
+AUDIT_VARS = {f"f_{fid}" for fid in config.AUDIT_FACTOR_IDS} | {f"f_{c}" for c in STAGE_B_AUDIT}
+LATE_MONTHS = 12                  # W12: a view variable first observed more than this after the database starts
 REALTIME_PREFIX = "rg_rt_"        # real-time regime labels: nowcast and forecast test only, never a view
 # States defined as a difference of two others: a phase that sets all three
 # says the same thing twice (and EP cannot meet a contradictory triple).
@@ -152,20 +167,43 @@ def _normalize_overrides(ov) -> dict:
     return {k: v for k, v in ov.items() if v is not None and v != {} and v != []}
 
 
-def drift_factor_ids() -> list[str]:
-    """Factors a factor_drift can move: today's transmission (the core factors) and CPI, plus the
-    profit share when the valuation state is on (it moves the fair value). The other factors only
-    serve as views that pick historical months; a drift on them would change no path."""
-    ids = list(config.CORE_FACTOR_IDS) + ["cpi"]
+def audit_only(var: str, columns=()) -> bool:
+    """Whether a view variable is an audit-only f_ column (W14): AUDIT_VARS, or any other f_ column of the frame
+    (`columns`) that is no config factor (CPI's own change f_cpi aside), so a comparison column added to the
+    panel later is refused too."""
+    return var in AUDIT_VARS or (var in columns and var.startswith("f_") and var[2:] not in config.FACTOR_IDS
+                                 and var != "f_cpi")
+
+
+def transmission_factors(spec: ModelSpec) -> list[str]:
+    """Factor ids that enter some asset equation of `spec`: the common factors, then each asset's extras."""
+    out = [f for f in spec.factors if f not in config.AUDIT_FACTOR_IDS]
+    for ids in asset_extras(spec).values():
+        out += [f for f in ids if f not in out and f not in config.AUDIT_FACTOR_IDS]
+    return out
+
+
+def drift_factor_ids(spec: ModelSpec | None = None) -> list[str]:
+    """Factors a factor_drift can move.
+
+    With the active model's spec: its transmission (common factors and the assets' extras), CPI, the
+    labour share (a tracked macro path the income-distribution calculator drives, whether or not it is
+    in the transmission; W13) and the profit share when the valuation state is on (it moves the fair
+    value). Without one: the core factors and CPI (plus the profit share), the base model's list. The
+    other factors only serve as views that pick historical months; a drift on them would change no path.
+    """
+    ids = transmission_factors(spec) if spec is not None else list(config.CORE_FACTOR_IDS)
+    extra = ["cpi"] + (["labor_share"] if spec is not None else [])
     if config.VALUATION.get("enabled"):
-        ids.append("profit_share")
-    return ids
+        extra.append("profit_share")
+    return ids + [f for f in extra if f not in ids]
 
 
-def factor_drift_bounds(frame: pd.DataFrame) -> dict[str, float]:
-    """+-2x the annualized historical volatility of each driftable factor's monthly change."""
+def factor_drift_bounds(frame: pd.DataFrame, driftable: list[str] | None = None) -> dict[str, float]:
+    """+-2x the annualized historical volatility of each driftable factor's monthly change
+    (`driftable` defaults to drift_factor_ids())."""
     out = {}
-    for fid in drift_factor_ids():
+    for fid in drift_factor_ids() if driftable is None else driftable:
         col = f"f_{fid}"
         if col in frame:
             sd = float(frame[col].std()) * math.sqrt(12.0)
@@ -173,14 +211,43 @@ def factor_drift_bounds(frame: pd.DataFrame) -> dict[str, float]:
     return out
 
 
+def late_start(frame: pd.DataFrame, var: str) -> tuple[str, float] | None:
+    """(first month "YYYY-MM", share of the database's months where it is observed) of a variable first
+    observed more than LATE_MONTHS months after the month database starts (W12), else None."""
+    first = frame[var].first_valid_index()
+    if first is None:
+        return None
+    start = frame.index[0]
+    if (first.year - start.year) * 12 + first.month - start.month <= LATE_MONTHS:
+        return None
+    return first.strftime("%Y-%m"), float(frame[var].notna().mean())
+
+
+def late_view_text(k: int, var: str, first: str, share: float, since: str) -> str:
+    """W12."""
+    return f"阶段 {k}：{var} 从 {first} 才有数据，这一阶段只会抽 {first} 以后的历史月份（占 {since} 年以来月份的 {share:.0%}）"
+
+
+def labor_share_drift_text(k: int) -> str:
+    """W13."""
+    return (f"阶段 {k}：劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²），它的漂移只改变模拟的劳动收入"
+            f"占比路径，不直接改变资产回报")
+
+
 def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON_MONTHS,
-                  block: int = BLOCK) -> tuple[dict, dict]:
+                  block: int = BLOCK, driftable: list[str] | None = None,
+                  model_spec: ModelSpec | None = None) -> tuple[dict, dict]:
     """Return (clean_spec, report). `frame` is the MonthDB frame (view support).
 
     A view target is bounded by what the phase can average: the 2nd-98th
     percentile of the means of the `block`-month runs the sampler draws
     (pooling.view_support), which for monthly flows is much narrower than
     the range of single months.
+
+    `model_spec` is the active transmission (runner.run_spec and the translator pass ctx.model.spec): it
+    sets the factors a factor_drift may move (drift_factor_ids(model_spec), unless `driftable` lists
+    them) and warns when a labour-share drift no longer moves asset returns (W13). Without either, the
+    base model's list applies.
     """
     s = copy.deepcopy(spec or {})
     errors: list[str] = []
@@ -216,8 +283,12 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
                       "mechanism": str(e.get("mechanism", ""))[:300]})
     s["causal_chain"] = chain[:30]
 
-    drift_bounds = factor_drift_bounds(frame)
+    if driftable is None:
+        driftable = drift_factor_ids(model_spec)
+    drift_bounds = factor_drift_bounds(frame, driftable)
+    labor_outside = model_spec is not None and "labor_share" not in transmission_factors(model_spec)
     columns = set(frame.columns)
+    since = f"{frame.index[0]:%Y}" if len(frame) else ""
     phases_in = s.get("phases") or []
     if not isinstance(phases_in, list):
         errors.append("phases 必须是列表")
@@ -258,6 +329,9 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
             if var.startswith(REALTIME_PREFIX):
                 warnings.append(regime_views.realtime_view_text(k + 1, var))
                 continue
+            if audit_only(var, columns):
+                warnings.append(f"阶段 {k + 1}：{var} 只用于审计对照，不能作为情景视图，已忽略")       # W14
+                continue
             if not var.startswith(ALLOWED_PREFIXES) or var not in columns:
                 warnings.append(f"阶段 {k + 1}：变量 {var} 不在引擎支持的列表中，已忽略")
                 continue
@@ -291,6 +365,9 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
                     var.startswith("s_") and var[2:] in ENDOGENOUS_STATE_IDS):
                 warnings.append(f"阶段 {k + 1}：{var} 部分由资产价格本身构成（内生），对它设视图相当于直接规定股市涨跌，"
                                 f"请确认这是叙事本意")
+            late = late_start(frame, var)
+            if late:
+                warnings.append(late_view_text(k + 1, var, *late, since))                         # W12
             views.append(clean_v)
         by_var = {v["var"]: v for v in views}
         for derived, (a, b) in IDENTITIES.items():
@@ -305,7 +382,9 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
         for fid, val in (ov.get("factor_drift") or {}).items():
             val = _num(val)
             if fid not in drift_bounds or val is None:
-                if fid in config.FACTOR_IDS and val is not None:
+                if fid in config.AUDIT_FACTOR_IDS and val is not None:
+                    warnings.append(f"阶段 {k + 1}：因子 {fid} 只用于审计对照，不能加漂移，已忽略")
+                elif fid in config.FACTOR_IDS and val is not None:
                     warnings.append(f"阶段 {k + 1}：因子 {fid} 不在今天的传导模型里（只能作为视图来挑选历史月份），"
                                     f"给它加漂移不会改变任何资产或宏观路径，已忽略")
                 else:
@@ -317,6 +396,8 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
                 clipped.append({"phase": k + 1, "var": f"factor_drift.{fid}", "requested": val, "used": used})
                 warnings.append(f"阶段 {k + 1}：因子 {fid} 的额外漂移 {val:.4g}/年 截断为 {used:.4g}")
             fd[fid] = used
+            if fid == "labor_share" and labor_outside:
+                warnings.append(labor_share_drift_text(k + 1))                                    # W13
         if fd:
             clean_ov["factor_drift"] = fd
         ad = {}
@@ -397,7 +478,8 @@ def allowed_variables(frame: pd.DataFrame, block: int = BLOCK, prior: np.ndarray
     of shift_sd for a phase of `block` months).
     """
     names = {f"s_{s['id']}": s["name"] for s in config.STATES}
-    names.update({f"f_{f['id']}": f["name"] + "（月度）" for f in config.FACTORS})
+    names.update({f"f_{f['id']}": f["name"] + "（月度）" for f in config.FACTORS
+                  if f["id"] not in config.AUDIT_FACTOR_IDS})          # audit-only columns are never views
     names["f_cpi"] = "CPI 月度变化（log）"
     shock_names = {"e_oil_supply": "石油供给冲击（标准化）", "e_demand": "总需求冲击（标准化）",
                    "e_monetary": "货币政策冲击（标准化）", "e_financial": "金融/风险冲击（标准化）"}

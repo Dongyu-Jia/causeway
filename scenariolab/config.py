@@ -115,9 +115,13 @@ ASSET_IDS = [a["id"] for a in ASSETS]
 # Monthly factor changes (column prefix `f_` in the panel). `core` factors feed
 # the default asset model; the rest are candidates the diagnostics can add.
 # `endogenous` factors are built partly from asset prices themselves (the
-# market P/D; household net worth, which holds equities and is interpolated
-# from quarterly data), so they cannot explain asset returns and a view on
-# them amounts to dictating the market.
+# market P/D; household net worth, which holds equities), so they cannot
+# explain asset returns and a view on them amounts to dictating the market.
+# `interaction` factors are another factor's change switched on by a lagged
+# state (built in data/panel.py), `dedicated` ones are meant for the listed
+# assets' equations only, and `role: "audit"` factors are comparison columns of
+# the missing-factor audit: never simulated, driftable, a view or listed in the
+# variable table.
 FACTORS = [
     {"id": "oil", "name": "油价变动", "unit": "Δlog", "core": True, "group": "price"},
     {"id": "ip", "name": "工业产出增长", "unit": "Δlog", "core": True, "group": "cycle"},
@@ -145,10 +149,25 @@ FACTORS = [
     {"id": "fcf_share", "name": "利润减资本开支/GDP变动", "unit": "Δpp", "core": False, "group": "capital"},
     {"id": "cape", "name": "估值变动（席勒 CAPE）", "unit": "Δlog", "core": False, "group": "capital",
      "endogenous": True, "optional": True},
+    # Missing-factor round (FACTORS_DESIGN): candidates the walk-forward may add. The GZ spread is the Fed's
+    # monthly corporate-bond spread, the term premium the NY Fed's ACM month-end estimate; the interaction is
+    # the term-premium change in months whose previous-month core CPI y/y is above 4% (the same 4.0 as
+    # factor_model.HIGH_INFLATION and REGIMES["params"]["high_inflation_pct"]; a test checks it).
+    {"id": "gz", "name": "GZ 信用利差变动", "unit": "Δpp", "core": False, "group": "money"},
+    {"id": "tp10", "name": "10年期限溢价变动（ACM）", "unit": "Δpp", "core": False, "group": "money"},
+    {"id": "tp10_x_core4", "name": "期限溢价变动×高核心通胀", "unit": "Δpp", "core": False, "group": "money",
+     "interaction": {"factor": "tp10", "state": "core_yoy", "lag": 1, "above": 4.0}},
+    {"id": "metals_oil", "name": "基础金属相对油价变动", "unit": "Δlog", "core": False, "group": "price",
+     "dedicated": ["energy"]},
+    # audit-only comparison columns: never in SIM_FACTORS, views, drifts or the variable table
+    {"id": "tp10_x_infl4", "name": "期限溢价变动×高通胀（对照）", "unit": "Δpp", "core": False, "group": "money",
+     "role": "audit"},
+    {"id": "ebp", "name": "超额债券溢价变动（对照）", "unit": "Δpp", "core": False, "group": "money", "role": "audit"},
 ]
 FACTOR_IDS = [f["id"] for f in FACTORS]
 CORE_FACTOR_IDS = [f["id"] for f in FACTORS if f["core"]]
 ENDOGENOUS_FACTOR_IDS = [f["id"] for f in FACTORS if f.get("endogenous")]
+AUDIT_FACTOR_IDS = {f["id"] for f in FACTORS if f.get("role") == "audit"}
 
 # Level ("state") variables used for era fingerprints and scenario views.
 STATES = [
@@ -182,8 +201,114 @@ STATES = [
     {"id": "profit_growth_yoy", "name": "企业税后利润同比（按发布月）", "unit": "%"},
     {"id": "fcf_share", "name": "利润减资本开支/GDP（自由现金流代理）", "unit": "%"},
     {"id": "cape", "name": "席勒市盈率 CAPE", "unit": "倍", "endogenous": True},
+    # Scenario view variables of the missing-factor round (FACTORS_DESIGN §1.6): never model inputs (s_gz and
+    # s_tp10 are the levels of model factors). `concept` is the concept gap the variable closes (a key of
+    # VIEW_CONCEPTS), `source` where it comes from; `late` ones start well after 1973, so a view on them only
+    # draws months where they are observed (validation warning W12). Quarterly ones are release dated
+    # (RELEASE_LAGS); data/panel.py's column_info has each column's sources, timing and coverage.
+    {"id": "gz", "name": "GZ 信用利差", "unit": "pp", "concept": "risk_appetite",
+     "source": "美联储 GZ 信用利差与超额债券溢价"},
+    {"id": "ebp", "name": "超额债券溢价", "unit": "pp", "concept": "risk_appetite",
+     "source": "美联储 GZ 信用利差与超额债券溢价"},
+    {"id": "tp10", "name": "10 年期限溢价（ACM）", "unit": "pp", "concept": "term_premium",
+     "source": "纽约联储 ACM 期限溢价"},
+    {"id": "mort_spread", "name": "房贷利差（30 年房贷 − 10 年期）", "unit": "pp", "concept": "house_prices",
+     "source": "FRED：Freddie Mac PMMS（MORTGAGE30US）与 H.15（WGS10YR）"},
+    {"id": "hpi_yoy", "name": "房价同比", "unit": "%", "concept": "house_prices",
+     "source": "Freddie Mac 房价指数（FMHPI）；1973–74 年衔接 Shiller 美国房价"},
+    {"id": "re_loans_yoy", "name": "银行房地产贷款同比", "unit": "%", "concept": "credit_supply",
+     "source": "FRED：美联储 H.8（REALLN）"},
+    {"id": "real_pce_yoy", "name": "实际消费同比", "unit": "%", "concept": "consumption_income",
+     "source": "FRED：BEA（DPCERA3M086SBEA）"},
+    {"id": "real_dpi_yoy", "name": "实际可支配收入同比", "unit": "%", "concept": "consumption_income",
+     "source": "FRED：BEA（DSPIC96）"},
+    {"id": "real_wages_yoy", "name": "实际工资薪金总额同比", "unit": "%", "concept": "consumption_income",
+     "source": "FRED：BEA（A576RC1、PCEPI）"},
+    {"id": "wc_wage_yoy", "name": "白领普通员工时薪同比", "unit": "%", "concept": "white_collar_income",
+     "source": "FRED：BLS CES（信息、金融、专业与商业服务）"},
+    {"id": "wc_real_wage_yoy", "name": "白领实际时薪同比", "unit": "%", "concept": "white_collar_income",
+     "source": "FRED：BLS CES、CPI"},
+    {"id": "wc_wage_gap", "name": "白领与商品生产部门时薪增速差", "unit": "pp", "concept": "white_collar_income",
+     "source": "FRED：BLS CES（CES0600000008）"},
+    {"id": "wc_emp_yoy", "name": "白领行业就业同比", "unit": "%", "concept": "white_collar_jobs",
+     "source": "FRED：BLS CES（USINFO、USFIRE、USPBS）"},
+    {"id": "claims", "name": "首次申领失业金（月均）", "unit": "千人", "concept": "tightness",
+     "source": "FRED：美国劳工部（ICSA）"},
+    {"id": "ulc_yoy", "name": "单位劳动成本同比", "unit": "%", "concept": "bargaining",
+     "source": "FRED：BLS 生产率与成本（ULCNFB）"},
+    {"id": "it_invest_share", "name": "IT 设备与软件投资/GDP", "unit": "%", "concept": "ai_capex",
+     "source": "FRED：BEA（A679RC1Q027SBEA、GDP）"},
+    {"id": "philly_capex", "name": "费城联储制造业未来资本开支指数", "unit": "指数", "concept": "ai_capex",
+     "source": "FRED：费城联储制造业调查（CEFDFSA066MSFRBPHI）"},
+    {"id": "ip_power_yoy", "name": "电力生产同比", "unit": "%", "concept": "power",
+     "source": "FRED：美联储 G.17（IPG2211S）"},
+    {"id": "ip_oilgas_yoy", "name": "油气开采产出同比", "unit": "%", "concept": "oil_supply",
+     "source": "FRED：美联储 G.17（IPG211S）"},
+    {"id": "metals_oil_yoy", "name": "基础金属相对油价同比", "unit": "%", "concept": "china",
+     "source": "世界银行大宗商品价格（Pink Sheet）"},
+    {"id": "food_yoy", "name": "居家食品 CPI 同比", "unit": "%", "concept": "climate",
+     "source": "FRED：BLS CPI（CUSR0000SAF11）"},
+    {"id": "tariff_rate", "name": "有效关税率", "unit": "%", "concept": "tariffs",
+     "source": "FRED：BEA（B235RC1Q027SBEA、A255RC1Q027SBEA）"},
+    {"id": "deficit_gdp", "name": "联邦赤字/GDP（NIPA）", "unit": "%", "concept": "fiscal_deficit",
+     "source": "FRED：BEA（FGDEF、GDP）"},
+    {"id": "debt_gdp", "name": "联邦公众持有债务/GDP", "unit": "%", "concept": "debt",
+     "source": "FRED（FYGFGDQ188S）"},
+    {"id": "usd_em_yoy", "name": "美元对新兴市场货币同比", "unit": "%", "concept": "china",
+     "source": "FRED：美联储 H.10（TWEXOMTH、DTWEXEMEGS）"},
+    {"id": "rstar", "name": "中性实际利率 r*（HLW）", "unit": "%", "concept": "r_star",
+     "source": "纽约联储 Holston–Laubach–Williams 中性利率"},
+    {"id": "gpr", "name": "地缘政治风险（历史指数）", "unit": "指数", "concept": "geopolitics",
+     "source": "Caldara–Iacoviello 地缘政治风险指数"},
+    {"id": "epu", "name": "经济政策不确定性（新闻指数）", "unit": "指数", "concept": "political_pressure",
+     "source": "Baker–Bloom–Davis 经济政策不确定性指数"},
+    {"id": "tips10", "name": "10 年期 TIPS 实际收益率", "unit": "%", "concept": "real_yield",
+     "source": "FRED：美联储 H.15（DFII10）", "late": True},
+    {"id": "mich1y", "name": "密歇根 1 年期通胀预期", "unit": "%", "concept": "infl_expect",
+     "source": "FRED：密歇根大学（MICH）", "late": True},
 ]
 STATE_IDS = [s["id"] for s in STATES]
+VIEW_STATE_IDS = [s["id"] for s in STATES if s.get("concept")]
+
+# The concept gaps the view variables close (ids of the research round's concept table, harness/concept_gaps;
+# names as the audit's 概念缺口 table shows them), in that table's order.
+VIEW_CONCEPTS = {
+    "risk_appetite": "风险偏好 / 金融条件",
+    "term_premium": "期限溢价",
+    "china": "中国 / 全球需求",
+    "house_prices": "房价",
+    "credit_supply": "信贷供给",
+    "consumption_income": "家庭消费 / 实际收入",
+    "bargaining": "议价能力 / 工资–物价螺旋",
+    "tightness": "劳动力市场紧张度",
+    "real_yield": "实际收益率（TIPS）",
+    "ai_capex": "AI 资本开支",
+    "climate": "极端天气 / 食品价格",
+    "infl_expect": "通胀预期",
+    "tariffs": "关税",
+    "fiscal_deficit": "财政赤字",
+    "debt": "国债供给 / 债务",
+    "r_star": "中性利率 r*",
+    "white_collar_income": "白领劳动收入",
+    "white_collar_jobs": "白领岗位",
+    "power": "电力需求",
+    "oil_supply": "原油供给",
+    "geopolitics": "地缘政治",
+    "political_pressure": "政策不确定性 / 对央行的政治压力",
+}
+
+# Months from a quarter's first month (the FRED date of a quarterly observation) to its first publication.
+# data/panel.py dates every quarterly series at that month (release_dated) and holds it until the next
+# release: no interpolation, no look-ahead (today's revised vintage). Evidence: ALFRED first-release dates
+# (BLS Productivity and Costs: lag 4 in 95% of quarters; NIPA profits with the second GDP estimate; Z.1
+# about ten weeks after the quarter); HLW is the NY Fed's one-sided r* (FACTORS_DESIGN §1.1, §1.6).
+RELEASE_LAGS = {"PRS85006173": 4, "OPHNFB": 4, "ULCNFB": 4, "A679RC1Q027SBEA": 4, "CP": 5, "GDP": 5, "PNFI": 5,
+                "DPI": 5, "FGDEF": 5, "FYGFGDQ188S": 5, "HLW": 5, "B235RC1Q027SBEA": 3, "TNWBSHNO": 6}
+
+# FRED access (data/sources.py): the API when FRED_API_KEY is set (loaded from the git-ignored .env), the
+# keyless graph CSV otherwise. The key goes only to api_url's host, never into a file, log line or error.
+FRED = {"api_url": "https://api.stlouisfed.org/fred", "key_env": "FRED_API_KEY", "min_interval_s": 0.6,
+        "attempts": 4}
 
 # Valuation state (engine/simulate.py ValuationModel, analysis/valuation.py). A price is earnings x multiple,
 # so the multiple is never a same-month driver of the price; it is a state: today's market P/D, a fair
@@ -198,6 +323,7 @@ VALUATION = {
     "track": True,
     "infl_half_life_months": 36,          # inflation expectation = EWMA of past CPI inflation (panel and paths)
     "release_lag_months": 5,              # NIPA quarter (dated at its first month) is published by start + 5
+                                          # (= RELEASE_LAGS["CP"]; a test checks it)
     # before enabling: check results/valuation.json regression.theory_check and regression.stability -- with
     # these features the fitted real-yield sign decides whether a real-rate shock lowers or raises the fair value
     "features": ("real_y10", "profit_share", "infl_expect"),

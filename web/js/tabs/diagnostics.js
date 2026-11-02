@@ -1,5 +1,8 @@
 // Diagnostics: why the transmission model misses, what the walk-forward loop tried, which fixes survived
-// the untouched test months, how the coefficients drift across eras, and (optional) the engine ablation.
+// the untouched test months, how the coefficients drift across eras, and (optional) the missing-factor audit
+// (_factor_audit.js) and the engine ablation.
+import { renderAudit, AUDIT_CSS } from './_factor_audit.js';
+
 const QUESTIONS = ['tuning', 'neural_net', 'missing_factor', 'missing_mechanism'];
 const GROUP_COLOR = { tuning: '#3b5bdb', neural_net: '#c2255c', missing_factor: '#2f9e44', missing_mechanism: '#e8590c' };
 const GROUP_LABEL = { tuning: '调参数', neural_net: '神经网络', missing_factor: '加因子', missing_mechanism: '加传导机制' };
@@ -7,7 +10,9 @@ const CAND = { add_valuation: '+估值变动', add_sentiment: '+消费者信心'
   add_wealth: '+家庭净值', add_white_collar: '+白领就业占比', add_wage: '+普通工资', add_real_y10: '+实际收益率',
   add_profit_growth: '+利润增长', add_fcf_share: '+利润减资本开支', add_cape: '+CAPE 变动', lags1: '1 个月滞后', lags3: '1–3 个月滞后',
   regime_inflation: '通胀状态交互', shocks_add: '+结构冲击', shocks_replace_oil: '结构冲击替代油价', 'ridge_0.01': '岭回归 0.01',
-  'ridge_0.05': '岭回归 0.05', window_15: '只用近 15 年', window_25: '只用近 25 年', mlp16: '神经网络 16', mlp32: '神经网络 32' };
+  'ridge_0.05': '岭回归 0.05', window_15: '只用近 15 年', window_25: '只用近 25 年', mlp16: '神经网络 16', mlp32: '神经网络 32',
+  add_gz: '+GZ 信用利差', add_tp10_x_core4: '期限溢价×高核心通胀', drop_labor_share: '去掉劳动收入占比',
+  add_tp10_x_infl4: '期限溢价×高通胀（对照）', add_tp10: '+期限溢价（对照）', add_ebp: '+超额债券溢价（对照）' };
 const SHORT = { us_equity: '美股大盘', nasdaq: '纳指100', energy: '能源股', industrials: '工业股', staples: '必需消费',
   healthcare: '医疗', utilities: '公用事业', financials: '金融股', real_estate: 'REITs', gold: '黄金',
   crude_oil: '原油', treasury_10y: '10年美债', cash: '现金' };
@@ -66,6 +71,7 @@ const EVI = {
   us_equity_y10_beta_post2005: '美股对 10 年期收益率的 β（2005 年后）', reset_reject: 'RESET 显示非线性的资产数（各轮）',
   gold_acf1: '黄金残差一阶自相关', others_acf1: '其他风险资产平均一阶自相关', r2_risk_avg: '全样本风险资产平均 R²',
   bias: '验证期偏差最大的资产（年化）', robust: '每个十年都稳定提升的候选', n_reject: '交互项显著的资产数（各轮）',
+  dedicated: '采用的专门改动',
 };
 
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -202,6 +208,7 @@ function ensureStyle() {
   let el = document.getElementById('style-fe2r');
   if (!el) { el = document.createElement('style'); el.id = 'style-fe2r'; document.head.append(el); }
   if (!el.textContent.includes('/* diagnostics */')) el.textContent += CSS;
+  if (!el.textContent.includes('/* diagnostics-audit */')) el.textContent += AUDIT_CSS;
 }
 
 function failure(ui, err) {
@@ -257,7 +264,7 @@ function roundChart(charts, el, { rows, trials, round, lo, hi, minGain, label })
         const c = rows[params?.[0]?.dataIndex];
         const t = by[c];
         if (!t) return `${label(c)}<br/><span style="color:${INK3}">这一步没有尝试（已采纳、只作对照或不改变模型）</span>`;
-        return [`<b>${label(c)}</b>（${GROUP_LABEL[t.group] || t.group || ''}${t.eligible === false ? '，内生，只作对照' : ''}）`,
+        return [`<b>${label(c)}</b>（${GROUP_LABEL[t.group] || t.group || ''}${t.eligible === false ? '，只作对照' : ''}）`,
           t.hypothesis || '', `验证期平均 R² <b>${r2s(t.val_score)}</b>（变化 <b>${r2s(t.delta)}</b>）`,
           `训练期平均 R² ${num(t.train_r2, 3)}${t.accepted ? '　<b>被采纳</b>' : ''}`].filter(Boolean).join('<br/>');
       },
@@ -358,7 +365,7 @@ function betaChart(charts, el, { years, beta, se, color }) {
   return chart;
 }
 
-export async function render(root, { api, charts, ui, param, alive = () => root.isConnected }) {
+export async function render(root, { api, charts, ui, meta, param, alive = () => root.isConnected }) {
   const { h, card } = ui;
   ensureStyle();
   root.append(h('p', { class: 'lead' },
@@ -367,6 +374,9 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     '再把候选改动逐个加上去、只按验证期打分挑选，最后在从未参与挑选的测试期检验，能延续到测试期的改动才保留。',
     '打分 = 用真实因子变化预测 10 类风险资产月度价格收益的样本外 R²，衡量的是传导质量，而不是预测宏观。'));
   const ablation = api.get('ablation').then(d => ({ d }), e => ({ e }));       // optional file: never blocks the page
+  // optional too (the missing-factor audit); not requested when /api/meta's `results` lists the files and it is absent
+  const audit = Array.isArray(meta?.results) && !meta.results.includes('factor_audit') ? Promise.resolve({ e: { status: 404 } })
+    : api.get('factor_audit').then(d => ({ d }), e => ({ e }));
   const wait = ui.loading('读取诊断结果…');
   root.append(wait);
   let dg;
@@ -384,7 +394,12 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   const scoreAssets = dg.score_assets || [];
   const nA = scoreAssets.length || 10;
   const questions = dg.questions || {};
-  const label = (id) => CAND[id] || byId[id]?.hypothesis || id || '—';
+  // stage B (changes to one asset's equation): the label of the option the walk-forward kept, else of the first one
+  const sb = dg.stage_b && typeof dg.stage_b === 'object' ? dg.stage_b : null;
+  const sbRows = (sb?.iterations || []).flatMap(it => (it?.rows || []).map(r => ({ ...r, iter: it.iter })));
+  const sbLabel = Object.fromEntries((sb?.candidates || []).map(c => [c.id, (sbRows.find(r => r.id === c.id && r.accepted)
+    || sbRows.find(r => r.id === c.id))?.label || c.hypothesis]));
+  const label = (id) => CAND[id] || byId[id]?.hypothesis || sbLabel[id] || id || '—';
   const plus = (id) => (label(id).startsWith('+') ? label(id) : `+${label(id)}`);
   const nameOf = (a) => ui.META.assets[a]?.name || a;
   const short = (a) => SHORT[a] || nameOf(a);
@@ -395,7 +410,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   const sections = {};
   const itCharts = [];          // chart work queued by iterationBlock(), drawn once the DOM is in place
   // The page is long: an in-page table of contents (each entry is also a deep link, #diagnostics?<key>).
-  const TOC = [['recs', '四个问题的回答'], ['loop', '走步迭代'], ['robust', '候选改动的稳健性'], ['tests', '诊断检验'],
+  const TOC = [['recs', '四个问题的回答'], ['loop', '走步迭代'], ['robust', '候选改动的稳健性'], ['audit', '缺失因子审计'], ['tests', '诊断检验'],
     ['betas', '滚动 β'], ['mlp', '小型神经网络'], ['ablation', '引擎消融：为什么“知道宏观”反而更差']];
   root.append(h('div', { class: 'diagnostics-chips', style: { margin: '-6px 0 4px' } }, h('span', { class: 'muted', style: { fontSize: '12px' } }, '跳到：'),
     TOC.map(([k, t]) => h('a', { href: `#diagnostics?${k}`, class: 'chip', onclick: (e) => {
@@ -429,9 +444,14 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   // the COVID months), so it is compared with the base on that same sample, not with the base's all-month score.
   const lastTr = its.length ? its[its.length - 1].test_result || {} : {};
   const lastBase = lastTr.base?.score;
+  // the incremental gate: an iteration's new changes are judged against that iteration's start, on the same months
+  const incremental = dg.gate === 'incremental';
+  const lastRef = incremental && isNum(lastTr.start?.score) ? lastTr.start.score : lastBase;
   root.append(h('div', { style: { height: '16px' } }), card({
     title: `最终采用：${fin.is_base === true ? `基准线性模型（${fin.describe || '—'}）` : fin.describe || '—'}`,
-    sub: '走步验证最后一轮选中的改动，必须在未参与挑选的测试期胜过基准才会被采用，否则保留基准；最终模型在全部数据上重新估计，供情景引擎使用。',
+    sub: incremental
+      ? `走步验证每一轮新选中的改动，必须在未参与挑选的测试期比本轮起始模型高出 ${minGain} 以上才保留（第 1 轮的起始模型就是基准）${sb ? '；共同模型定下之后，只改单个资产方程的专门改动再单独检验' : ''}；最终模型在全部数据上重新估计，供情景引擎使用。`
+      : '走步验证最后一轮选中的改动，必须在未参与挑选的测试期胜过基准才会被采用，否则保留基准；最终模型在全部数据上重新估计，供情景引擎使用。',
     actions: h('div', { class: 'diagnostics-chips' },
       fin.is_base === true ? ui.chip('保留基准模型', 'accent') : fin.is_base === false ? ui.chip('采用改进模型', 'good') : null,
       fin.test_used_for_choice === true ? ui.chip('测试期参与了“采用 / 不采用”的决定', 'warn')
@@ -442,9 +462,9 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     tile('测试期 R²', r2s(fin.test_score), `${period(fin.selected_on?.test)}，${fin.test_months ?? '—'} 个月`),
     tile('基准的测试期 R²', r2s(fin.base_test_score), '同一测试期'),
     tile('最后一轮选中', r2s(fin.last_selected?.test_score),
-      isNum(lastBase) ? `测试期 R²；同一批 ${lastTr.n_months ?? '—'} 个月上基准为 ${r2s(lastBase)}` : `测试期 R²；验证期 ${r2s(fin.last_selected?.val_score)}`,
-      isNum(fin.last_selected?.test_score) && isNum(lastBase ?? fin.base_test_score)
-        && fin.last_selected.test_score < (lastBase ?? fin.base_test_score) ? 'is-bad' : '')),
+      isNum(lastBase) ? `测试期 R²；同一批 ${lastTr.n_months ?? '—'} 个月上${lastRef !== lastBase ? `起始模型为 ${r2s(lastRef)}、` : ''}基准为 ${r2s(lastBase)}` : `测试期 R²；验证期 ${r2s(fin.last_selected?.val_score)}`,
+      isNum(fin.last_selected?.test_score) && isNum(lastRef ?? fin.base_test_score)
+        && fin.last_selected.test_score < (lastRef ?? fin.base_test_score) ? 'is-bad' : '')),
   h('dl', { class: 'kv', style: { marginTop: '12px' } },
     h('dt', {}, '采用的改动'), h('dd', {}, finChanges.length ? finChanges.map(label).join('、') : '无（基准线性模型）'),
     h('dt', {}, '最后一轮选中'), h('dd', {}, `${fin.last_selected?.describe || '—'}（${(fin.last_selected?.changes || []).map(label).join(' → ') || '无改动'}；验证期 R² ${r2s(fin.last_selected?.val_score)}）`),
@@ -491,6 +511,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       root.append(h('div', { style: { height: '16px' } }), ui.notice(
         `最终决定：${fin.reason}${fin.test_used_for_choice === true ? '（测试期参与了这次决定，详见本页顶部的披露。）' : ''}`, 'info'));
     }
+    if (sb) root.append(h('div', { style: { height: '16px' } }), stageBCard());
   }
 
   // ---- robustness across decades
@@ -498,6 +519,11 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   root.append(sections.robust, card({ title: '单独加在基准模型上：样本外 R² 的变化（按问题分组）',
     sub: `每个数 = 只加这一个改动后样本外平均 R² 的变化（${periods.join('、') || '—'}，都只用之前的数据估计）；绿色为提升、红色为变差，三个十年都高于 +${minGain} 才算稳定有效。` },
   robustTable()));
+
+  // ---- missing-factor audit (optional file, _factor_audit.js)
+  sections.audit = h('div', { class: 'section-title diagnostics-anchor' }, '缺失因子审计：是不是少了专门的因子');
+  const auBox = h('div', {}, ui.loading('读取缺失因子审计结果…'));
+  root.append(sections.audit, auBox);
 
   // ---- diagnostic tests
   sections.tests = h('div', { class: 'section-title diagnostics-anchor' }, '诊断检验：哪里出了问题');
@@ -571,6 +597,17 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     nnCards.push(card({ title: `第 ${nnIt.iter} 轮验证期（${period(nnIt.validate)}）各资产 R²：线性 vs 神经网络`,
       sub: `同一训练期（${period(nnIt.train)}）、同一组因子，只换模型形式：${wins}；训练期更高而验证期更低就是过拟合。` }, nnAssetBox));
   }
+  // report-only networks: why, and what they would have added on a later iteration's start and alone on the base
+  const nnNote = nnIds.map(id => byId[id]?.note).find(Boolean);
+  if (nnIds.length && nnIds.every(id => byId[id]?.eligible === false)) {
+    const later = its.filter(it => it.start && !it.start.is_base).map(it => {
+      const r1 = (it.trials || []).filter(t => t.round === 1 && nnIds.includes(t.candidate) && isNum(t.delta));
+      const ab = (it.test_ablation || []).filter(t => nnIds.includes(t.candidate) && isNum(t.test_delta));
+      return [r1.length ? `第 ${it.iter} 轮的起点（${it.start.describe || '—'}）上，验证期 ${period(it.validate)}：${r1.map(t => `${label(t.candidate)} ${r2s(t.delta)}`).join('、')}` : '',
+        ab.length ? `单独替换基准的线性模型，测试期 ${period(it.test)}：${ab.map(t => `${label(t.candidate)} ${r2s(t.test_delta)}`).join('、')}` : ''].filter(Boolean).join('；');
+    }).filter(Boolean);
+    root.append(ui.notice(`只作对照，不参与选择。${nnNote || ''}${later.length ? `${later.join('。')}。` : ''}`, 'info'), h('div', { style: { height: '12px' } }));
+  }
   if (nnCards.length) root.append(h('div', { class: 'diagnostics-2col' }, nnCards));
   else root.append(ui.notice('诊断结果里没有神经网络候选的记录。', 'info'));
 
@@ -581,11 +618,12 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
 
   // ---- notes
   const units = dg.units || {};
-  const UNIT = { score: '打分', bias_annual: '漂移偏差', beta_per_sd: 'β', p: 'p 值' };
+  const UNIT = { score: '打分', asset_gain: '专门改动的资产增益', bias_annual: '漂移偏差', beta_per_sd: 'β', p: 'p 值' };
   root.append(h('div', { class: 'section-title' }, '口径与说明'), h('div', { class: 'grid cols-2 text' },
     card({ title: '口径' }, h('dl', { class: 'kv' }, Object.entries(units).flatMap(([k, v]) => [h('dt', {}, UNIT[k] || k), h('dd', {}, v)]))),
     card({ title: '说明' }, h('ul', { class: 'list' }, [
-      `采纳门槛：验证期平均 R² 至少提高 ${minGain}；每轮最多采纳 ${dg.max_accept ?? '—'} 个改动；${dg.require_test_gain ? '最终模型必须在测试期胜过基准。' : '测试期只用于报告。'}`,
+      `采纳门槛：验证期平均 R² 至少提高 ${minGain}；每轮最多采纳 ${dg.max_accept ?? '—'} 个改动；${!dg.require_test_gain ? '测试期只用于报告。'
+        : incremental ? '每轮新选中的改动要在测试期胜过本轮起始模型才保留。' : '最终模型必须在测试期胜过基准。'}`,
       ...(dg.notes || [])].map(n => h('li', { class: 'muted' }, n))))));
 
   // ================================================================ charts (after the DOM exists)
@@ -601,8 +639,12 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
   });
   if (betaCard) renderBetas();
   if (nnCards.length) renderNN();
-  // scenarios.json only names the scenarios the ablation text mentions by id
-  Promise.all([ablation, api.get('scenarios').catch(() => null)]).then(([res, sc]) => { if (alive()) renderAblation(res, sc); });
+  // scenarios.json only names the scenarios the ablation text (and the audit's concept table) mentions by id
+  const scenP = api.get('scenarios').catch(() => null);
+  Promise.all([audit, scenP]).then(([res, sc]) => {
+    if (alive()) renderAudit(auBox, res, { dg, scen: sc, label, short, minGain, nA, sections, param, finDescribe: fin.describe });
+  });
+  Promise.all([ablation, scenP]).then(([res, sc]) => { if (alive()) renderAblation(res, sc); });
   if (param && sections[param]) setTimeout(() => sections[param].scrollIntoView({ block: 'start' }), 80);
 
   // ================================================================ builders
@@ -690,7 +732,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     const startOf = (r) => path.find(p => p.round === r - 1);
     const pick = card({
       title: `逐步挑选：每一步把剩下的候选逐个加到当前模型上（验证期 ${period(it.validate)}）`,
-      sub: `条形 = 加入该改动后验证期平均 R² 的变化，超过虚线（+${minGain}）且最大的被采纳、下一步从它出发；浅色条为内生候选（只作对照），灰色行名表示这一步没有尝试，超出坐标范围的条在末端标出真实值。` },
+      sub: `条形 = 加入该改动后验证期平均 R² 的变化，超过虚线（+${minGain}）且最大的被采纳、下一步从它出发；浅色条为只作对照的候选（内生序列、神经网络和预先登记的对照项），灰色行名表示这一步没有尝试，超出坐标范围的条在末端标出真实值。` },
     h('div', { class: 'diagnostics-legend' },
       QUESTIONS.map(q => h('span', {}, h('i', { style: { background: GROUP_COLOR[q] } }), `${questions[q] || GROUP_LABEL[q]}`)),
       h('span', {}, h('s'), `采纳门槛 +${minGain}`)),
@@ -711,8 +753,14 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     // The data's carry-over note always talks about "the next round"; after the last round the same gate picks
     // the final model instead, so say that.
     const last = k === its.length - 1;
+    // the incremental gate compares this iteration's selection with its own start (iteration 1: the base)
+    const vsStart = tr.gate === 'incremental' && !!tr.start;
+    const beat = vsStart ? `本轮新选中的改动${tr.improved ? '' : '没有'}在测试期胜过本轮起始模型` : `选中模型${tr.improved ? '' : '没有'}在测试期胜过基准`;
+    const common = fin.common && typeof fin.common === 'object' ? fin.common : null;
+    const kept = common ? `共同部分${common.kept === 'start' ? `保留${it.start?.label || '本轮起始模型'}` : '采用本轮选中的模型'}（${common.describe || '—'}）`
+      + `${(fin.dedicated || []).length ? `，再加上专门改动（${fin.dedicated.map(label).join('、')}）` : ''}，` : '';
     const carry = !last ? it.carry_over && `↓ 下一轮：${it.carry_over}`
-      : typeof fin.is_base === 'boolean' ? `→ 最终：${tr.improved ? '选中模型在测试期胜过基准' : '选中模型没有在测试期胜过基准'}，`
+      : typeof fin.is_base === 'boolean' ? `→ 最终：${beat}，${kept}`
         + `${fin.is_base ? '最终保留基准模型' : `最终采用「${fin.describe || '选中模型'}」`}，并在全部数据上重新估计（见下方“最终决定”）。`
         : it.carry_over && `→ ${it.carry_over}`;
     const test = card({
@@ -724,7 +772,9 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
           tile('基准模型', r2s(tr.base?.score), `${it.baseline?.describe || '—'}，测试期 ${tr.n_months ?? '—'} 个月平均 R²`),
           tile('本轮选中', r2s(tr.selected?.score), it.selected?.describe || '—'),
           tr.start ? tile('本轮起点', r2s(tr.start.score), it.start?.describe || '—') : null,
-          tile('选中 − 基准', r2s(tr.delta), tr.improved ? '改进经受住了样本外检验' : '改进没有延续到测试期', ui.goodCls(!!tr.improved))),
+          vsStart ? tile('选中 − 起点', r2s(tr.delta_vs_start), `${tr.improved ? '新改动经受住了样本外检验' : '新改动没有延续到测试期'}；比基准 ${r2s(tr.delta)}`,
+            ui.goodCls(!!tr.improved))
+            : tile('选中 − 基准', r2s(tr.delta), tr.improved ? '改进经受住了样本外检验' : '改进没有延续到测试期', ui.goodCls(!!tr.improved))),
         tr.text ? h('p', { class: 'diagnostics-text' }, tr.text) : null,
         carry ? h('div', { class: 'diagnostics-carry' }, ui.notice(carry, tr.improved ? 'info' : '')) : null),
       h('div', {}, h('div', { class: 'muted', style: { fontSize: '12px', marginBottom: '4px' } }, '各资产测试期 R²（同一批月份）'), assetBox)));
@@ -775,7 +825,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
         const acc = accepted(c.id);
         body.push(h('tr', {},
           h('td', { title: c.note || '' }, label(c.id)),
-          h('td', { class: 'h' }, c.hypothesis || '—', c.eligible === false ? ui.chip('内生，只作对照', 'warn') : null),
+          h('td', { class: 'h' }, c.hypothesis || '—', c.eligible === false ? ui.chip('只作对照', 'warn') : null),
           periods.map(p => cell(ds[p])),
           h('td', { class: 'c' }, c.eligible === false ? '—' : robust(c.id) ? ui.chip('是', 'good') : ui.chip('否')),
           h('td', { class: 'c' }, acc.length ? acc.join('、') : '—'),
@@ -788,11 +838,47 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       h('tbody', {}, body)));
   }
 
+  // Stage B: each dedicated change on top of the common model, scored on its own asset's R^2 (benchmark: the
+  // whole training window's mean); kept when it passes the last iteration's validation and test.
+  function stageBCard() {
+    const gainCell = (v) => (isNum(v) ? h('span', { class: ui.signCls(v, 1) }, r2s(v)) : '—');
+    const result = (r) => {
+      if (r.evaluated === false) return h('span', { class: 'muted' }, r.reason || '没有计算');
+      if (r.eligible === false) return ui.chip('只作对照，不参与选择');
+      if (r.accepted) return ui.chip('通过', 'good');
+      if (!r.chosen) return ui.chip('验证期没选这个选项');
+      return ui.chip('没有通过', 'warn');
+    };
+    const caveats = (sb.candidates || []).filter(c => c.caveat);
+    const minA = isNum(sb.min_gain_asset) ? sb.min_gain_asset : minGain;
+    return card({
+      title: '专门因子（只作用于单个资产）',
+      sub: `共同模型（${sb.common?.describe || '—'}）定下之后，逐个尝试只改一个资产方程的改动：按这个资产自己的样本外 R² 判断（基准是整个训练期的平均收益），验证期提升超过 +${minA} 的选项再到测试期检验，${sb.final_rule === 'last_iteration' ? '最后一轮两次都通过' : '通过'}才进入最终模型；${sb.test_used_for_choice ? '它和共同改动用的是同一批测试十年。' : ''}`,
+      actions: h('div', { class: 'diagnostics-chips' },
+        (sb.accepted || []).map(id => ui.chip(`采用：${label(id)}`, 'good')),
+        caveats.map(c => ui.chip(`${short(c.asset)}：同一批十年上发现`, 'warn'))),
+    },
+    ui.table([
+      { key: 'iter', label: '轮次', fmt: (v) => { const it = its.find(x => x.iter === v); return `第 ${v} 轮${it ? `（验证 ${period(it.validate)}，测试 ${period(it.test)}）` : ''}`; } },
+      { key: 'label', label: '改动', wrap: true, minWidth: 160, fmt: (v, r) => h('span', {}, v || label(r.id), r.eligible === false ? [' ', ui.chip('只作对照', 'warn')] : null) },
+      { key: 'val_gain', label: '验证期 R² 变化', fmt: gainCell },
+      { key: 'test_gain', label: '测试期 R² 变化', fmt: gainCell },
+      { key: 'accepted', label: '结果', wrap: true, minWidth: 120, fmt: (v, r) => result(r) },
+    ], sbRows, { stack: true }),
+    sb.text ? h('p', { class: 'diagnostics-text' }, sb.text) : null,
+    // a caveat the text already ends with is not repeated in a notice
+    (() => {
+      const left = caveats.filter(c => !String(sb.text || '').includes(c.caveat));
+      return left.length ? h('div', { style: { marginTop: '10px' } }, ui.notice(left.map(c => `${short(c.asset)}：${c.caveat}`).join(' '), '')) : null;
+    })());
+  }
+
   function missingFactorTable(it) {
     const f = (it.findings || []).find(x => x.id === 'missing_factor');
     if (!f?.table?.length) return h('p', { class: 'muted' }, '这一轮没有候选因子的残差相关检验。');
     return ui.table([
-      { key: 'name', label: '候选序列', wrap: true, minWidth: 150, fmt: (v, r) => h('span', {}, v || r.column, r.eligible === false ? ui.chip('内生', 'warn') : null) },
+      { key: 'name', label: '候选序列', wrap: true, minWidth: 150, fmt: (v, r) => h('span', {}, v || r.column,
+        r.eligible === false ? ui.chip(r.endogenous ? '内生' : '只作对照', 'warn') : null) },
       { key: 'n_sig_train', label: '训练期', fmt: (v) => `${v ?? '—'}/${nA}` },
       { key: 'n_sig_validate', label: '验证期', fmt: (v) => `${v ?? '—'}/${nA}` },
       { key: 'n_sig_both', label: '两期都', fmt: (v) => `${v ?? '—'}/${nA}`, cls: (v) => (v >= 3 ? 'is-bad' : '') },
@@ -894,6 +980,9 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     const engineId = [sel?.engine_variant, set.engine_variant].find(x => typeof x === 'string' && x) || null;
     const engineV = engineId ? V.find(v => v.id === engineId) || null : null;
     const switched = !!engineId && engineId !== 'baseline' && engineV !== base;
+    // whether this run's selection rule picked what the engine runs (a later ablation may prefer another variant;
+    // the engine never switches by itself)
+    const agrees = !sel?.chosen || !engineId || sel.chosen === engineId;
     const c = {
       W, V, sel, base, hyp, engineId, engineV, switched,
       baseName: switched ? '基准引擎（采用前）' : '现行引擎',
@@ -914,8 +1003,11 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     nSeeds ? h('p', { class: 'muted', style: { fontSize: '12px', margin: '8px 0 0' } },
       `每个数字是 ${nSeeds} 个随机种子的平均${isNum(set.n_paths) ? `（每个种子 ${set.n_paths} 条路径）` : ''}，各方案用同一批种子，差别只来自改动本身`
       + `${reproduces === true ? `；现行引擎${switched ? `「${c.vName(engineId)}」` : ''}的结果与回测页一致` : reproduces === false ? '；注意：现行引擎的结果与回测页不完全一致（可能是回测或消融其中一个还没有重新生成）' : ''}。`) : null,
-    switched ? h('div', { style: { marginTop: '10px' } }, ui.notice(
-      `引擎已经改用消融选出的「${c.vName(engineId)}」（${engineId}）：回测、未来情景和一年期预测都在用它。下面的“基准引擎（采用前）”是原来的设置，各方案的改善都相对它计算。`, 'info')) : null,
+    switched ? h('div', { style: { marginTop: '10px' } }, agrees
+      ? ui.notice(`引擎已经改用消融选出的「${c.vName(engineId)}」：回测、未来情景和一年期预测都在用它。下面的“基准引擎（采用前）”是原来的设置，各方案的改善都相对它计算。`, 'info')
+      : ui.notice(`引擎现在用的是之前一次消融选出的「${c.vName(engineId)}」：回测、未来情景和一年期预测都在用它。`
+        + `这次消融按规则选的是「${c.vName(sel.chosen)}」，和引擎现在的设置不一致；引擎不会自动切换，是否改用要先复核，改了以后要完整重新构建。`
+        + '下面的“基准引擎（采用前）”是最初的全耦合设置，各方案的改善都相对它计算。', '')) : null,
     W.length ? h('div', { class: 'diagnostics-chips', style: { marginTop: '10px' } },
       W.map(w => ui.chip(`${c.wLabel(w)} ${Array.isArray(w.test) ? `${w.test[0] || ''} 至 ${w.test[1] || ''}` : ''}`, w.role === 'test' ? 'good' : 'accent'))) : null));
 
@@ -961,7 +1053,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       const elig = Array.isArray(sel.eligible) ? sel.eligible.map(c.vName).join('、') : null;
       blocks.push(gap(), h('div', { class: 'diagnostics-select' },
         h('div', { class: 'diagnostics-chips', style: { marginBottom: '8px' } }, h('b', {}, '选择结果'),
-          sel.adopt === true ? ui.chip(`采用「${c.vName(sel.chosen)}」`, 'good')
+          sel.adopt === true ? (agrees ? ui.chip(`采用「${c.vName(sel.chosen)}」`, 'good') : ui.chip(`建议采用「${c.vName(sel.chosen)}」（引擎还没有切换）`, 'warn'))
             : sel.adopt === false ? ui.chip(`不采用，保留${switched ? '基准引擎' : '现行引擎'}`, 'warn') : ui.chip('未说明是否采用'),
           engineId ? ui.chip(switched ? `引擎现行设置：${c.vName(engineId)}` : '引擎现行设置：基准引擎', 'accent') : null),
         h('dl', { class: 'kv' },

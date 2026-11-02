@@ -3,9 +3,10 @@
 spec -> validate_spec -> per-phase entropy pooling over block starts ->
 simulate -> chart-ready detail JSON (fans, monthly and yearly K-lines, macro
 paths, posterior correlations, the evidence behind the weights, each asset's
-return attribution per phase, and the macro regimes of the simulated paths
-next to the engine's own unconditional reference run). Used for the built-in
-library, LLM-translated scenarios and user-edited specs alike.
+return attribution per phase, the macro regimes of the simulated paths next to
+the engine's own unconditional reference run, and what the transmission's
+state-dependent terms do in this scenario). Used for the built-in library,
+LLM-translated scenarios and user-edited specs alike.
 """
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from ..engine.sampler import BlockProbs
 from ..engine.simulate import (MonthDB, SimOutput, ValuationModel, fit_valuation, simulate, valuation_settings,
                                valuation_setup, with_oil_lock)
 from . import regime_views
-from .schema import validate_spec
+from .schema import transmission_factors, validate_spec
 
 MACRO_VARS = ("cpi_yoy", "ff", "y10", "unrate", "oil", "spread")
 VALUATION_MACRO = ("pd", "pd_fair")     # fanned when the simulation pulls toward the fair value
@@ -41,6 +42,10 @@ REGIME_READOUT = True
 ATTRIBUTION_UNITS = "年化：每月算术回报的均值 ×12（小数），各项相加 = arithmetic；cagr_p50 = 各路径几何年化总回报的中位数"
 ATTRIBUTION_BAND = (10, 90)             # percentiles over paths of the factor part
 _VALUATION_CACHE: "weakref.WeakKeyDictionary[MonthDB, dict]" = weakref.WeakKeyDictionary()
+# detail["transmission"] note for an interaction factor of the model (config.FACTORS "interaction"; FACTORS_DESIGN
+# §3.3): its switch is the drawn month's own lagged state, and the simulator has no path for that state
+INTERACTION_NOTE = ("期限溢价项只在抽中的历史月份本身处于高核心通胀时起作用（1973–92 年的大部分月份、2021–23 年）；"
+                    "模拟路径的通胀升高不会自动打开它。要让它起作用，阶段视图里要多抽这些月份（例如 s_core_yoy 或宏观体制的高通胀标志）。")
 
 
 def valuation_for(ctx: EngineContext) -> tuple[dict, ValuationModel | None]:
@@ -188,12 +193,22 @@ def summarize(ctx: EngineContext, sim: SimOutput, valuation_macro: tuple[str, ..
             "representative_path": k}
 
 
+def _factor_terms(att, a: str, kind: str) -> list[str]:
+    """The factor terms of one asset: a model asset's own equation (an extra regressor of another asset,
+    such as energy's metals-vs-oil factor, is exactly 0 for it and is not listed), the structural factor
+    of the treasury and crude oil, none for cash."""
+    if kind == "model":
+        return list(att.asset_factor_terms.get(a, att.factor_terms))
+    return [] if kind == "cash" else ["y10" if kind == "treasury" else "oil"]
+
+
 def _attr_terms(att, kind: str, j: int) -> list[str]:
     """The terms that apply to one asset, in display order. Scenario overrides, income and the floor are
     listed only when they move this asset at all (no asset_drift, no income source, no floored month)."""
     if kind == "model":
-        keep = list(att.factor_terms) + [t for t in ("intercept", "unattributed", "cma", "overrides",
-                                                     "valuation_pull", "residual", "income") if t in att.terms]
+        keep = _factor_terms(att, att.assets[j], kind) + [
+            t for t in ("intercept", "unattributed", "cma", "overrides", "valuation_pull", "residual", "income")
+            if t in att.terms]
     elif kind == "cash":
         keep = ["income"]
     else:
@@ -237,8 +252,7 @@ def attribution_summary(sim: SimOutput, phases: list[dict], assets: dict) -> dic
     for j, a in enumerate(att.assets):
         kind = att.kinds[a]
         terms = _attr_terms(att, kind, j)
-        factor = (list(att.factor_terms) if kind == "model" else
-                  [] if kind == "cash" else ["y10" if kind == "treasury" else "oil"])
+        factor = _factor_terms(att, a, kind)
         rows = []
         for p, (ph, s0) in enumerate(zip(phases, starts)):
             m = int(att.phase_months[p])
@@ -254,6 +268,37 @@ def attribution_summary(sim: SimOutput, phases: list[dict], assets: dict) -> dic
                   "total": {"months": int(T), **total}}
         if method == "unattributed" and att.reason:
             out[a]["reason"] = att.reason
+    return out
+
+
+def interaction_active(panel: pd.DataFrame, dates: pd.DatetimeIndex, rule: dict) -> np.ndarray:
+    """1.0 where an interaction factor (config.FACTORS "interaction": {factor, state, lag, above}) is switched on
+    in each month of `dates` (its state `lag` months earlier above the threshold), else 0.0."""
+    state = panel[f"s_{rule['state']}"].shift(int(rule["lag"])).reindex(dates)
+    return (state > float(rule["above"])).to_numpy(float)
+
+
+def transmission_detail(ctx: EngineContext, spec: dict, pools: list[PhasePool]) -> dict:
+    """detail["transmission"]: the model the scenario ran (describe), and for each interaction factor of
+    it the share of each phase's drawn months in which it is switched on (the drawn months' own state,
+    as simulate() uses them), next to the unconditional share of the month database."""
+    model = ctx.model.spec
+    out: dict = {"describe": model.describe(), "factors": transmission_factors(model), "notes": [],
+                 "interactions": []}
+    info = {f["id"]: f for f in config.FACTORS}
+    prior = ctx.db.prior()
+    for fid in out["factors"]:
+        rule = info.get(fid, {}).get("interaction")
+        if not rule:
+            continue
+        on = interaction_active(ctx.panel, ctx.db.dates, rule)
+        out["interactions"].append({
+            "factor": fid, "name": info[fid]["name"], **rule,
+            "database_share": float(prior @ on),
+            "phases": [{"name": ph["name"], "drawn_share": float(pool.month_weights @ on)}
+                       for ph, pool in zip(spec["phases"], pools)]})
+        if INTERACTION_NOTE not in out["notes"]:
+            out["notes"].append(INTERACTION_NOTE)
     return out
 
 
@@ -275,7 +320,7 @@ def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
     """
     attribution = ATTRIBUTION if attribution is None else bool(attribution)
     readout = REGIME_READOUT if regimes is None else bool(regimes)
-    clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)
+    clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     pools = phase_pools(ctx, clean, report["warnings"])
     report["warnings"].extend(regime_views.spec_checks(ctx.db, clean, pools, report["clipped"]))
     weights, phase_reports = [p.blocks for p in pools], _phase_reports(ctx, clean, pools)
@@ -299,6 +344,7 @@ def run_spec(ctx: EngineContext, spec: dict, n_paths: int = 600, seed: int = 0,
         "phases": phase_reports,
         "start": sim.start, "n_paths": n_paths,
         "corr_prior": prior_correlation(ctx),
+        "transmission": transmission_detail(ctx, clean, pools),
     }
     detail.update(summarize(ctx, sim, TRACKED_MACRO if vm is not None and vm.kappa == 0 else VALUATION_MACRO))
     for a, att in attribution_summary(sim, phase_reports, detail["assets"]).items():

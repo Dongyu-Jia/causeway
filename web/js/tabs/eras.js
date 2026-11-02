@@ -432,7 +432,8 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     return vs.length ? vs.reduce((a, b) => a + b, 0) : null;
   };
   // the model the eras step used vs the one the scenarios run (meta.model)
-  const specKey = (s) => (s ? JSON.stringify([s.factors, s.lags, s.regime, s.kind, s.ridge, s.window_years, s.target, s.shock_cols]) : '');
+  const specKey = (s) => (s ? JSON.stringify([s.factors, s.lags, s.regime, s.kind, s.ridge, s.window_years, s.target, s.shock_cols,
+    s.asset_factors || {}, s.asset_start || {}]) : '');
   const modelMismatch = ainfo.model?.spec && meta?.model?.spec && specKey(ainfo.model.spec) !== specKey(meta.model.spec);
   let attrAsset = 'us_equity';
 

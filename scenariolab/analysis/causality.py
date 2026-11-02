@@ -535,7 +535,7 @@ def asset_betas(panel: pd.DataFrame, periods: list[dict] = PERIODS) -> dict:
            "factors": list(spec.factors), "assets": [], "beta_std": {}, "tstat": {}, "r2": {}}
     X_all = design_matrix(panel, spec)
     for per in periods:
-        m = AssetFactorModel(spec).fit(panel, per["start"], per["end"])
+        m = AssetFactorModel(spec).fit(panel, per["start"], per["end"], honor_asset_start=False)
         P = panel.loc[m.train_start:m.train_end]
         X = X_all.loc[P.index]
         Y = P[m.target_columns()]

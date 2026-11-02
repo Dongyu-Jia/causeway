@@ -26,7 +26,16 @@ which is what that transmission does not explain in the era; income makes it
 the total return, and `reconciliation` takes it to the era's CAGR. The era's
 own regression (its own betas) is reported next to it where the era is long
 enough. Eras without every factor (before 1973 there is no trade-weighted
-dollar) get no attribution, with the reason.
+dollar) get no attribution, with the reason. A model with per-asset equations
+(asset_factors, asset_start) splits each asset along its own equation: an extra
+regressor of another asset (energy's metals-vs-oil factor) is no term of it, and
+an asset fitted from a later month (gold from 1982) carries those betas into the
+earlier eras too, as the scenario engine does.
+
+The scenario view variables of config.STATES (the ones with a `concept`) are
+reported in every era's state levels but stay out of the signatures, which keep
+the long-standing macro states (the view variables have shorter or overlapping
+histories and would crowd them out).
 """
 from __future__ import annotations
 
@@ -37,7 +46,7 @@ from scipy.special import logsumexp
 
 from .. import config, jsonio
 from ..engine.ep import apply_views, effective_number, kl_divergence
-from ..engine.factor_model import AssetFactorModel, ModelSpec, design_matrix
+from ..engine.factor_model import AssetFactorModel, ModelSpec, asset_feature_names, design_matrix
 from ..engine.simulate import attribution_method, era_of
 
 FULL_START = "1955-01"           # reference window for z-scores and the similarity database
@@ -64,6 +73,7 @@ OWN_BETA_MONTHS_PER_PARAM = 5    # the era's own regression needs at least 5 mon
 ATTR_UNITS = "年化：每月算术回报的均值 ×12（小数）；price_mean = 各因子项 + 常数项 + 未解释部分，再加收入 = total_mean"
 
 STATE_INFO = {s["id"]: s for s in config.STATES}
+SIGNATURE_STATES = {s["id"] for s in config.STATES if not s.get("concept")}   # view variables stay out
 ERA_NAMES = {e["id"]: e["name"] for e in config.ERAS}
 ASSET_NAMES = {a["id"]: a["name"] for a in config.ASSETS}
 FACTOR_NAMES = {f["id"]: f["name"] for f in config.FACTORS}
@@ -179,7 +189,7 @@ def state_block(P: pd.DataFrame) -> dict:
 def factor_block(P: pd.DataFrame) -> dict:
     """Annualized mean (x12) and volatility (x sqrt 12) of monthly factor changes, in factor units."""
     out = {}
-    for fid in list(config.FACTOR_IDS) + ["cpi"]:
+    for fid in [f for f in config.FACTOR_IDS if f not in config.AUDIT_FACTOR_IDS] + ["cpi"]:
         col = f"f_{fid}"
         if col not in P:
             continue
@@ -275,11 +285,12 @@ def phillips_slope(panel: pd.DataFrame, start, end) -> tuple[float, str]:
 def signature(states: dict, ref: pd.DataFrame, k: int = SIGNATURE_SIZE) -> list[dict]:
     rows = []
     for sid, st in states.items():
-        if sid not in ref.index or not ref.loc[sid, "sd"] > 0:
+        if sid not in SIGNATURE_STATES or sid not in ref.index or not ref.loc[sid, "sd"] > 0:
             continue
         z = (st["mean"] - ref.loc[sid, "mean"]) / ref.loc[sid, "sd"]
         rows.append((abs(z), sid, z))
-    rows.sort(reverse=True)
+    # an exact tie keeps the shorter id: the release-dated profit share is now the same series as profit_share
+    rows.sort(key=lambda r: (-r[0], r[1]))
     out, families = [], set()
     for _, sid, z in rows:
         fam = FAMILY.get(sid, sid)
@@ -399,6 +410,8 @@ def era_attribution(panel: pd.DataFrame, model: AssetFactorModel, X: pd.DataFram
     months that have every feature, mean(p) = sum_k beta_k mean(x_k) + intercept + mean(residual) exactly
     (the residual is p minus the fitted value); with income it is the mean total return, and
     reconciliation = CAGR over those months - that arithmetic mean (compounding and volatility drag).
+    The terms k of an asset are the features of its own equation (factor_model.asset_feature_names);
+    the era's own regression (own_beta) uses the same features.
     """
     method, why = attribution_method(model.spec)
     P = panel.loc[start:end]
@@ -419,7 +432,6 @@ def era_attribution(panel: pd.DataFrame, model: AssetFactorModel, X: pd.DataFram
                          + ("，贸易加权美元指数 1973 年才开始；传导模型也只用 1973 年以后的数据估计"
                             if "usd" in missing else ""))
         return out
-    feats = list(model.features)
     linear = method == "linear"
     for a in list(model.assets) + ["cash"]:
         p, d, r = (P.get(f"{k}_{a}") for k in ("p", "d", "r"))
@@ -435,6 +447,7 @@ def era_attribution(panel: pd.DataFrame, model: AssetFactorModel, X: pd.DataFram
         if a == "cash" or a not in model.assets:
             rec = {"kind": "cash", "terms": {"income": 12.0 * float(de.mean())}}
         else:
+            feats = asset_feature_names(model.spec, a) if linear else []
             fit = fitted.loc[ok[ok].index, a].to_numpy(float)
             resid = pe - fit
             if linear:
@@ -457,13 +470,31 @@ def era_attribution(panel: pd.DataFrame, model: AssetFactorModel, X: pd.DataFram
 
 
 def attribution_info(model: AssetFactorModel) -> dict:
+    """How the attribution was made. factor_terms: the union of the equations' features (an asset's own
+    terms are asset_factor_terms[a] where its equation differs from the common one); own_beta_min_months:
+    the common equation's (an asset with extras needs OWN_BETA_MONTHS_PER_PARAM more per extra);
+    asset_train_start: each equation's first fit month (later than train_start for an asset_start)."""
     method, why = attribution_method(model.spec)
+    linear = method == "linear"
+    own = {a: asset_feature_names(model.spec, a) for a in model.assets} if linear else {}
+    common = min((len(v) for v in own.values()), default=len(model.features))
     return {"method": method, "reason": why or None, "beta": "full_sample",
             "model": {"spec": model.spec.to_dict(), "describe": model.spec.describe(),
-                      "train_start": _ym(model.train_start), "train_end": _ym(model.train_end)},
-            "factor_terms": list(model.features) if method == "linear" else [],
-            "min_coverage": ATTR_MIN_COVERAGE, "own_beta_min_months": OWN_BETA_MONTHS_PER_PARAM * (len(model.features) + 1),
+                      "train_start": _ym(model.train_start), "train_end": _ym(model.train_end),
+                      "asset_train_start": dict(getattr(model, "asset_train_start", {}) or {})},
+            "factor_terms": list(model.features) if linear else [],
+            "asset_factor_terms": {a: f for a, f in own.items() if f != list(model.features)},
+            "min_coverage": ATTR_MIN_COVERAGE, "own_beta_min_months": OWN_BETA_MONTHS_PER_PARAM * (common + 1),
             "units": ATTR_UNITS}
+
+
+def asset_start_note(model: AssetFactorModel) -> str | None:
+    """A note for the eras page when some equation starts later than the common sample, else None."""
+    late = {a: m for a, m in (getattr(model, "asset_start_used", {}) or {}).items() if m}
+    if not late:
+        return None
+    items = "、".join(f"{ASSET_NAMES.get(a, a)}从 {m[:4]} 年" for a, m in sorted(late.items()))
+    return (f"传导模型里{items}起估计：更早时期的归因也用这套β（情景引擎同样如此），这些时期不在它的估计样本里。")
 
 
 # ---------------------------------------------------------------- cross-era views
@@ -639,13 +670,14 @@ def run(ctx, **_) -> dict:
         "notes": [
             "z 值 = (时期均值 - 1955 年以来均值) / 1955 年以来标准差。",
             "实际年化回报用 CPI 指数平减；资产只统计在该时期每个月都有数据的。",
-            "劳动收入占比、利润、投资、净值等季度数据被插值成月度，其月度因子波动率偏低。",
+            "劳动收入占比、利润、投资、净值等季度数据按通常的发布滞后对齐，只在发布月变化，其月度因子变化集中在这些月份。",
             "今天的相似度：过去 12 个月均值作为观点，在 24 个月以前、且早于当前时代开始的历史月份上做熵池重新加权；"
             "无法同时满足的观点会被软化，剩下的差距列在 residual 中。",
             f"油价有变动的月份不到 {MIN_OIL_MOVES} 个的时期（1973 年以前 WTI 是管制挂牌价）不报告油价对 CPI 的传导。",
             ("传导归因：时期内每月价格回报的均值 ×12 = Σ（1973 年以来全样本β × 该时期因子的平均月度变化 ×12）+ 常数项"
              " + 未解释部分（残差均值），再加收入 = 总回报的算术年化；复利与波动修正（复利的抬升减去波动拖累，可正可负）把它换算到年化回报（CAGR）。"
              "1973 年以前没有贸易加权美元指数，不做归因。"),
+            *([note] if (note := asset_start_note(model)) else []),
         ],
     }
 
