@@ -2276,7 +2276,13 @@ def outputs(model: FactorModel, init: InitState, Y: np.ndarray, E: np.ndarray, d
     z1 = init.z[1]
     lvl = {v: tf.level(v, g[v]) for v in ("sp", "gz")}
     lvl0 = {v: float(tf.level(v, z1[IDX[v]])) for v in ("sp", "gz")}
-    usd = g["usd"] - (g["usd"].mean(axis=0, keepdims=True) - z1[IDX["usd"]]) if usd_hold else g["usd"]
+    if usd_hold:                                     # the cross-path mean over finite paths only: one non-finite path
+        fin = np.where(np.isfinite(g["usd"]), g["usd"], np.nan)    # would otherwise make every path's dollar NaN
+        with np.errstate(invalid="ignore"):
+            mu = np.nanmean(fin, axis=0, keepdims=True) if np.isfinite(fin).any() else np.zeros((1, g["usd"].shape[1]))
+        usd = g["usd"] - (np.nan_to_num(mu, nan=z1[IDX["usd"]]) - z1[IDX["usd"]])
+    else:
+        usd = g["usd"]
 
     def lagged(a, first):
         return np.concatenate([np.full((m, 1), first), a[:, :-1]], axis=1)

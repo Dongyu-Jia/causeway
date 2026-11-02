@@ -366,6 +366,16 @@ def test_usd_is_held_at_no_change_when_unstated(model, init):
     assert np.max(np.abs(res2.x["d_usd"][:, 0] - 3.0)) < 1e-8
 
 
+def test_the_dollar_hold_ignores_non_finite_paths(model, init):
+    """The hold subtracts the cross-path mean: a non-finite path must not turn every path's dollar into NaN."""
+    res = F.simulate(model, init, 4, n_paths=200, seed=3, usd_hold=False)
+    Y = np.concatenate([res.core, res.sats], axis=2).astype(float)
+    Y[0, :, F.IDX["usd"]] = np.inf
+    x, _, _ = F.outputs(model, init, Y, np.zeros_like(Y), np.asarray(res.draw_index), 4, usd_hold=True)
+    assert np.isfinite(x["d_usd"][1:]).all()
+    assert np.max(np.abs(x["d_usd"][1:].mean(axis=0))) < 1e-9
+
+
 @needs_qpanel
 def test_step_and_path_mode_agree_on_the_first_quarter(model, init):
     st = [S("d_ip", (1,), 0.5), S("d_ff", (1,), -0.25), S("d_gz", (1,), 0.2, sd=0.1)]
