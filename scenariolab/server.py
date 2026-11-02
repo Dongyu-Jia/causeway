@@ -31,13 +31,15 @@ RESULTS = config.RESULTS_DIR
 CUSTOM = RESULTS / "custom"
 ID_RE = re.compile(r"^[a-z0-9_]{1,60}$")
 RESULT_NAMES = {"eras", "causality", "backtest", "diagnostics", "scenarios", "forecast", "ablation",
-                "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast", "factor_audit"}
+                "portfolio_default", "llm_translator", "valuation", "regimes", "regime_forecast", "factor_audit",
+                "instrument_meta"}
 # Which command writes each result file (a 404 names it). Default-build steps can also be rebuilt alone.
 BUILD = "python -m scenariolab.build"
 BUILD_STEP = {"meta": "meta", "eras": "eras", "causality": "causality", "backtest": "backtest",
               "diagnostics": "diagnostics", "scenarios": "scenarios", "forecast": "forecast",
               "valuation": "valuation", "portfolio_default": "portfolio", "llm_translator": "llm",
-              "regimes": "regimes", "factor_audit": "factor_audit"}
+              "regimes": "regimes", "factor_audit": "factor_audit", "instrument_meta": "instruments"}
+CUSTOM_EXTS = (".json", ".npz", ".instr.npz", ".macro.npz")   # a custom scenario's files (portfolio.tickers: the last two)
 BUILD_HINT = {
     "ablation": f"{BUILD} --only ablation（引擎消融约需 5 分钟，默认构建不包含这一步）",
     "regime_forecast": f"{BUILD} --only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）",
@@ -158,6 +160,15 @@ def meta():
     return _json(m)
 
 
+@app.get("/api/instruments")
+def instruments_catalog():
+    """The ticker catalog (标的推演, the portfolio builders' ticker list): Chinese names, recipe cards, parameters
+    with defaults and ranges, validation, chips, the build's start state and statistics, and whether the ticker
+    files fit the current scenario paths (status). Defined before /api/{name}, which would take the path."""
+    from .portfolio import tickers
+    return _json(tickers.catalog_report())
+
+
 @app.get("/api/{name}")
 def result(name: str):
     if name not in RESULT_NAMES:
@@ -176,7 +187,8 @@ def list_custom():
                 continue
             items.append({"id": d["id"], "name": d["name"], "summary": d.get("summary", ""),
                           "source": d.get("source", "custom"), "created": d.get("created"),
-                          "prior_prob": d.get("prior_prob"), "prob": d.get("prob")})
+                          "prior_prob": d.get("prior_prob"), "prob": d.get("prob"),
+                          "instruments": (CUSTOM / f"{d['id']}.instr.npz").exists()})
     return _json({"scenarios": items})
 
 
@@ -235,6 +247,14 @@ def portfolio_evaluate(body: dict = Body(...)):
 def withdrawal_evaluate(body: dict = Body(...)):
     from .portfolio import service
     return _evaluate(service.evaluate_withdrawal, body)
+
+
+@app.post("/api/instruments/project")
+def instruments_project(body: dict = Body(...)):
+    """One ticker on every scenario path (portfolio.tickers.evaluate_project): fans, the comparison table, cash per
+    share, attribution and correlations; `params` recompute the recipe on the stored scenario paths."""
+    from .portfolio import tickers
+    return _evaluate(tickers.evaluate_project, body)
 
 
 # ---------------------------------------------------------------- custom backtest windows
@@ -372,13 +392,31 @@ def custom_run(body: dict = Body(...)):
     detail["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
     if body.get("save", True):
         CUSTOM.mkdir(parents=True, exist_ok=True)
+        _drop_custom_instruments(detail["id"])         # ticker files of an earlier run must not outlive its paths
         tmp = CUSTOM / f"{detail['id']}.tmp.npz"       # the portfolio service may be reading the old file
         np.savez_compressed(tmp, total=sim.total[None], income=sim.income[None],
                             cpi=sim.macro["cpi"][None], ids=np.array([detail["id"]]),
                             assets=np.array(sim.assets), labels=np.array(detail["labels"]))
         tmp.replace(CUSTOM / f"{detail['id']}.npz")
+        detail["instruments"] = _custom_instruments(sim, ctx, detail)
         jsonio.dump(detail, CUSTOM / f"{detail['id']}.json")
     return _json(detail)
+
+
+def _drop_custom_instruments(sid: str) -> None:
+    for ext in CUSTOM_EXTS[2:]:
+        (CUSTOM / f"{sid}{ext}").unlink(missing_ok=True)
+
+
+def _custom_instruments(sim, ctx, detail: dict) -> dict:
+    """The custom scenario's ticker columns (portfolio.tickers.write_custom: custom/<id>.instr.npz and .macro.npz,
+    about 1-3 s). A failure keeps the scenario itself; its tickers are then unavailable and the reason is saved."""
+    from .portfolio import tickers
+    try:
+        return tickers.write_custom(sim, ctx.db, detail["id"], CUSTOM, labels=detail["labels"])
+    except Exception as err:  # noqa: BLE001 - the scenario's own paths are saved already
+        _drop_custom_instruments(detail["id"])
+        return {"saved": False, "reason": f"标的路径没有生成（{type(err).__name__}: {err}）：这个自定义情景只能按资产类别评估"}
 
 
 def _custom_id(spec: dict) -> dict:
@@ -410,7 +448,7 @@ def custom_delete(sid: str):
     if not ID_RE.match(sid):
         raise _bad_id(sid)
     removed = False
-    for ext in (".json", ".npz"):
+    for ext in CUSTOM_EXTS:
         p = CUSTOM / f"{sid}{ext}"
         if p.exists():
             p.unlink()

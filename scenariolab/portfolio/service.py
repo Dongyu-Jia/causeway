@@ -75,6 +75,25 @@ written by the build's portfolio step as CONTINUATION_FILE next to the paths):
     cash interest). The macro levels themselves are the continuation's own
     from month 181, not each scenario's month-180 levels: no theme means no
     memory of one.
+
+Tickers (INSTRUMENTS_DESIGN §6.1, §7.3; tickers.py): `weights` may name the 16
+tickers of the instrument layer (QQQ ... BRK.B, case-insensitive) alone or
+mixed with asset classes; GOLD (金价) is the gold asset class itself. A request
+that holds no ticker runs exactly the asset-class code above (the same arrays
+and operations, so every such result is bit-identical to what it was before
+tickers existed); one that holds tickers evaluates the columns with a positive
+weight: the asset classes' and, row for row, the tickers' paths
+(instrument_paths.npz, custom/<id>.instr.npz) and, past year 15, the tickers'
+continuation (instrument_continuation.npz, the layer run on the very
+continuation paths the asset classes use). The dividend-first rules pay out
+each ticker's own distributions (its payout model's cash per start-of-month
+value: sticky payouts for the BDCs, MLPs, MO, SCHD and BME, 14.3% of NAV for
+QQQI, the coupon yield for TLT, index dividends for QQQ and XLG, none for the
+leveraged funds and BRK.B); the asset classes keep the engine's income. The
+withdrawal page's alpha_mode (shrunk / half / raw) swaps the estimated
+tickers' yearly factors for the build's precomputed variants (they differ in
+the alpha scalar only). The ticker files are loaded on the first request that
+holds a ticker (about 160 MB), never at start.
 """
 from __future__ import annotations
 
@@ -93,6 +112,7 @@ import numpy as np
 
 from .. import config, jsonio
 from . import metrics
+from . import tickers as tk
 from . import withdrawal as wd
 
 RESULTS_DIR = config.RESULTS_DIR          # module level so tests can point it elsewhere
@@ -128,6 +148,14 @@ PRESETS = [
                                                            "real_estate": 0.15, "cash": 0.2},
      "description": "能源股、黄金、REITs 和现金，针对高通胀情景。"},
 ]
+# Ticker portfolios (INSTRUMENTS_DESIGN §4.4, §7.2): evaluated by run() into portfolio_default.json's
+# instrument_presets when the instrument files are built; PRESETS above stay the asset-class presets.
+INSTRUMENT_PRESETS = [
+    {"id": "income_tickers", "name": "示例：收息标的",
+     "weights": {"MAIN": 0.10, "ARCC": 0.10, "CSWC": 0.05, "QQQI": 0.15, "MPLX": 0.075, "EPD": 0.075, "SCHD": 0.10,
+                 "MO": 0.05, "BME": 0.05, "TLT": 0.10, "QQQ": 0.10, "BRK.B": 0.05},
+     "description": "只为展示标的层，不是建议：三家 BDC、两家 MLP、QQQI、SCHD、MO、BME 收息，TLT、QQQ、BRK.B 平衡。"},
+]
 
 
 class PathsNotReady(ValueError):
@@ -147,10 +175,20 @@ class _Block:
     labels: list[str]            # T+1 monthly labels
     probs: np.ndarray | None     # (S,) if the npz stores them
     factors: wd.YearFactors      # (S*N, Y, A)
+    _fingerprint: str | None = field(default=None, repr=False)
 
     @property
     def months(self) -> int:
         return self.total.shape[1]
+
+    def fingerprint(self) -> str:
+        """instruments.build.paths_fingerprint of these paths (the ids and each scenario's first two paths): what
+        the ticker files record of the scenario paths they were run on."""
+        if self._fingerprint is None:
+            S = len(self.ids)
+            first = self.total.reshape(S, self.n_paths, *self.total.shape[1:])[:, :2]
+            self._fingerprint = tk.paths_fingerprint(self.ids, first)
+        return self._fingerprint
 
 
 def _load_block(path: Path) -> _Block:
@@ -201,6 +239,7 @@ class _Continuation:
     labels: list[str]            # year-end labels from month `offset` on (index 0 = month `offset`)
     factors: wd.YearFactors      # (N, Y, A); cpi relative to month `offset`
     info: dict = field(default_factory=dict)    # how it was made (build_continuation), shown with the results
+    _fingerprint: str | None = field(default=None, repr=False)
 
     @property
     def n_paths(self) -> int:
@@ -212,6 +251,13 @@ class _Continuation:
 
     def factors_for(self, assets: list[str]) -> wd.YearFactors:
         return self.factors if assets == self.assets else self.factors.select([self.assets.index(a) for a in assets])
+
+    def fingerprint(self) -> str:
+        """sha256 of the yearly total factors as CONTINUATION_FILE stores them: the ticker continuation records the
+        one it was simulated alongside (tickers.build_continuation)."""
+        if self._fingerprint is None:
+            self._fingerprint = tk.factors_fingerprint(self.factors.total)
+        return self._fingerprint
 
 
 YEARLY_KEYS = ("total_y", "price_y", "income_y", "cpi_y")       # CONTINUATION_FILE arrays (write_continuation)
@@ -299,8 +345,12 @@ def continuation_chunk_seed(seed: int, chunk: int) -> int:
 
 def build_continuation(ctx, offset: int = config.HORIZON_MONTHS, n_paths: int = 600,
                        seed: int = CONTINUATION_SEED, years: int = HORIZON_BOUNDS[1],
-                       chunk: int = CONTINUATION_CHUNK, yearly: bool = False) -> dict:
+                       chunk: int = CONTINUATION_CHUNK, yearly: bool = False, hook=None) -> dict:
     """The unconditional engine paths that follow month `offset` (write_continuation's arguments).
+
+    hook(sim, first_row, chunk_index), when given, is called with every run's SimOutput (all `years` x 12 months)
+    and its results are returned as the list out["hook"] (tickers.build_continuation runs the instrument layer on
+    each run this way); nothing else changes.
 
     simulate() of `years` x 12 months with no views: the prior over 6-month block starts (exactly what a
     view-free scenario phase draws), today's anchor, the default reversion, config.RESIDUALS and the
@@ -330,12 +380,14 @@ def build_continuation(ctx, offset: int = config.HORIZON_MONTHS, n_paths: int = 
         vm = None
     levels = ("y10", "ff", "spread", "unrate", "cpi_yoy")          # reported at month `offset` (info.at_start)
     shown = ("us_equity", "treasury_10y", "cash")                    # real CAGRs reported in info
-    parts, factors, seeds, start, assets = [], [], [], None, None
+    parts, factors, seeds, start, assets, hooked = [], [], [], None, None, []
     for c, a in enumerate(range(0, n_paths, chunk)):
         seeds.append(continuation_chunk_seed(seed, c))
         sim = simulate(db, anchor, [pool.blocks], [T], n_paths=min(chunk, n_paths - a), seed=seeds[-1], block=BLOCK,
                        cma=cma, valuation=vm, **config.RESIDUALS)
         start, assets = sim.start, list(sim.assets)
+        if hook is not None:
+            hooked.append(hook(sim, a, c))
         m = sim.macro
         tot, inc, cpi_c = sim.total[:, offset:], sim.income[:, offset:], m["cpi"][:, offset:].astype(np.float64)
         infl = cpi_c[:, -1] / cpi_c[:, 0]
@@ -378,6 +430,8 @@ def build_continuation(ctx, offset: int = config.HORIZON_MONTHS, n_paths: int = 
         "pd": pd_info,
     }
     out = {"assets": assets, "labels": labels[offset:], "start": labels[0], "offset": int(offset), "info": info}
+    if hook is not None:
+        out["hook"] = hooked
     if yearly:
         return {"factors": wd.YearFactors.concat(factors), **out}
     return {"total": cat["total"], "income": cat["income"], "cpi": cat["cpi"], **out}
@@ -432,6 +486,8 @@ def clear_cache() -> None:
         _FILES.clear()
         _SETS.clear()
         _CRIT.clear()
+        _BOOKS.clear()
+    tk.clear_cache()
 
 
 @dataclass
@@ -451,7 +507,10 @@ class ScenarioSet:
     notes: list[str] = field(default_factory=list)   # composition caveats shown with every result
     continuation: _Continuation | None = None        # what follows the paths' last month (CONTINUATION_FILE)
     continuation_issue: str = ""                     # why there is none (shown when a horizon needs it)
+    files: list = field(default_factory=list)        # (kind, npz path, custom id) of each part, in row order
+    root: Path | None = None                         # the results directory of the built-in files
     _extended: wd.YearFactors | None = field(default=None, repr=False)   # factors + continuation, built once
+    _tickers: tuple | None = field(default=None, repr=False)   # (tickers.ticker_key, tickers.TickerSet), on first use
 
     @property
     def years(self) -> int:
@@ -497,15 +556,19 @@ class ScenarioSet:
         """
         if years <= self.years:
             return self.factors.select(None, years)
+        self.check_continuation(years)
+        with _LOCK:
+            if self._extended is None:
+                self._extended = self.factors.chain(self.continuation.factors_for(self.assets), self.continuation_rows())
+        return self._extended.select(None, years)
+
+    def check_continuation(self, years: int) -> None:
+        """PathsNotReady when a horizon of `years` needs a continuation that is missing, stale or too short."""
         if self.continuation is None:
             raise PathsNotReady(f"期限 {years} 年超过情景路径的 {self.years} 年，需要无条件续抽路径："
                                 f"{self.continuation_issue or f'{CONTINUATION_FILE} 不可用'}")
         if years > self.max_years:
             raise PathsNotReady(f"无条件续抽路径只够到第 {self.max_years} 年：请运行 {BUILD_PORTFOLIO} 重新生成")
-        with _LOCK:
-            if self._extended is None:
-                self._extended = self.factors.chain(self.continuation.factors_for(self.assets), self.continuation_rows())
-        return self._extended.select(None, years)
 
     def with_continuation(self, cont: _Continuation | None, issue: str = "") -> "ScenarioSet":
         """A copy with `cont` attached when it fits these paths (else none, and the reason)."""
@@ -513,8 +576,18 @@ class ScenarioSet:
             issue = _continuation_issue(self, cont)
             if issue:
                 cont = None
-        return replace(self, continuation=cont, continuation_issue=issue, _extended=None, notes=list(self.notes),
-                       key=self.key + (("continuation", id(cont)),))
+        return replace(self, continuation=cont, continuation_issue=issue, _extended=None, _tickers=None,
+                       notes=list(self.notes), key=self.key + (("continuation", id(cont)),))
+
+    def tickers(self) -> "tk.TickerSet":
+        """The tickers' columns for these rows (tickers.compose): loaded on the first request that holds a ticker
+        and again whenever one of their files changes. PathsNotReady when the built-in ticker files are missing or
+        belong to other scenario paths; ValueError when an included custom scenario was saved without them."""
+        key = tk.ticker_key(self)
+        with _LOCK:
+            if self._tickers is None or self._tickers[0] != key:
+                self._tickers = (key, tk.compose(self))
+            return self._tickers[1]
 
 
 def _continuation_issue(data: ScenarioSet, cont: _Continuation) -> str:
@@ -613,7 +686,8 @@ def _compose_paths(parts: list[tuple[str, Path, Path, str | None]], key: tuple) 
         p[:] = 1.0
     return ScenarioSet(ids=ids, names=names, sources=sources, default_probs=p / p.sum(), ranges=ranges,
                        assets=list(main.assets), labels=main.labels[:T + 1], months=T, parts=blocks,
-                       factors=wd.YearFactors.concat(factors), key=key, notes=notes)
+                       factors=wd.YearFactors.concat(factors), key=key, notes=notes,
+                       files=[(kind, Path(npz), cid) for kind, npz, _, cid in parts], root=Path(parts[0][1]).parent)
 
 
 def load_scenarios(include_custom=(), results_dir: str | Path | None = None) -> ScenarioSet:
@@ -673,24 +747,125 @@ def parse_horizon(value) -> int:
     return int(x)
 
 
-def parse_weights(weights, assets: list[str]) -> np.ndarray:
-    """{asset_id: weight} -> (A,) non-negative weights over `assets`, summing to 1."""
-    if not isinstance(weights, dict) or not weights:
-        raise ValueError("weights 必须是 {资产id: 权重} 形式的非空对象")
-    w = np.zeros(len(assets))
-    for aid, val in weights.items():
-        if aid not in assets:
-            raise ValueError(f"未知资产：{aid}")
-        x = _number(val, f"资产 {aid} 的权重")
-        if x < 0:
-            raise ValueError(f"资产 {aid} 的权重不能为负")
-        w[assets.index(aid)] += x
+def _normalized(w: np.ndarray) -> np.ndarray:
     if w.max() <= 0:
         raise ValueError("权重不能全为 0")
     with np.errstate(over="ignore"):
         if not np.isfinite(w.sum()):     # e.g. 1e308 + 1e308: rescale instead of zeroing every weight
             w = w / w.max()
     return w / w.sum()
+
+
+def parse_book_weights(weights, assets: list[str]) -> tuple[np.ndarray, dict[str, float]]:
+    """{asset or ticker id: weight} -> ((A,) asset weights, {ticker: weight}), raw (not yet normalized).
+
+    Asset ids are exact; tickers are case-insensitive ("brk.b" is BRK.B) and GOLD (金价) is the gold asset class
+    (tickers.resolve). An id that is neither: ValueError 未知资产或标的."""
+    if not isinstance(weights, dict) or not weights:
+        raise ValueError("weights 必须是 {资产或标的 id: 权重} 形式的非空对象")
+    w = np.zeros(len(assets))
+    held: dict[str, float] = {}
+    for aid, val in weights.items():
+        kind, key = tk.resolve(aid, assets)
+        if kind is None:
+            raise ValueError(error_unknown(aid))
+        what = "资产" if kind == "asset" else "标的"
+        x = _number(val, f"{what} {aid} 的权重")
+        if x < 0:
+            raise ValueError(f"{what} {aid} 的权重不能为负")
+        if kind == "asset":
+            w[assets.index(key)] += x
+        else:
+            held[key] = held.get(key, 0.0) + x
+    return w, held
+
+
+def error_unknown(aid) -> str:
+    return f"未知资产或标的：{aid}"
+
+
+def parse_weights(weights, assets: list[str]) -> np.ndarray:
+    """{asset_id: weight} -> (A,) non-negative weights over `assets`, summing to 1 (asset classes only; a ticker
+    with a positive weight is refused here: _book takes both)."""
+    w, held = parse_book_weights(weights, assets)
+    if any(x > 0 for x in held.values()):
+        raise ValueError(f"这里只接受资产类别：{'、'.join(t for t, x in held.items() if x > 0)} 是标的")
+    return _normalized(w)
+
+
+@dataclass
+class _Book:
+    """The columns one request holds. Without a ticker: every asset class in data.assets order with the weights
+    parse_weights gives, i.e. exactly the asset-class evaluation. With tickers: the asset classes and the tickers
+    with a positive weight (assets first, in data.assets order, then tickers in instruments.TICKERS order)."""
+    columns: list[str]
+    w: np.ndarray                        # (C,) summing to 1
+    asset_cols: list[int] | None         # data.assets indices of the asset columns (None: all of them)
+    tickers: list[str]
+    alpha_mode: str = "shrunk"
+
+    @property
+    def key(self) -> tuple:
+        return () if not self.tickers else (tuple(self.columns), self.alpha_mode)
+
+    def weights_out(self) -> dict:
+        return {a: float(x) for a, x in zip(self.columns, self.w) if x > 0}
+
+
+def _book(data: ScenarioSet, weights, alpha_mode=None) -> _Book:
+    mode = tk.parse_alpha_mode(alpha_mode)
+    wa, held = parse_book_weights(weights, data.assets)
+    held = {t: x for t, x in held.items() if x > 0}
+    if not held:
+        return _Book(columns=list(data.assets), w=_normalized(wa), asset_cols=None, tickers=[], alpha_mode=mode)
+    cols = [i for i, x in enumerate(wa) if x > 0]
+    tickers = [t for t in tk.TICKERS if t in held]
+    w = _normalized(np.concatenate([wa[cols], [held[t] for t in tickers]]))
+    return _Book(columns=[data.assets[i] for i in cols] + tickers, w=w, asset_cols=cols, tickers=tickers,
+                 alpha_mode=mode)
+
+
+def _book_monthly(data: ScenarioSet, book: _Book, k: int, asset_total: np.ndarray) -> np.ndarray:
+    """Part k's monthly total returns in the book's columns (the asset totals themselves without a ticker)."""
+    if not book.tickers:
+        return asset_total
+    T = asset_total.shape[1]
+    return np.concatenate([asset_total[:, :, book.asset_cols], data.tickers().monthly(k, book.tickers, T)], axis=2)
+
+
+def _joined(af: wd.YearFactors, cols: list[int], tf: tuple, cpi: np.ndarray) -> wd.YearFactors:
+    cat = [np.concatenate([getattr(af, k)[:, :, cols], t], axis=2) for k, t in zip(("total", "price", "income"), tf)]
+    return wd.YearFactors(cat[0], cat[1], cat[2], cpi, np.argsort(-cat[0], axis=2, kind="stable"))
+
+
+_BOOKS: OrderedDict = OrderedDict()      # (set key, ticker key, book key, years) -> YearFactors
+_MAX_BOOKS = 2
+
+
+def _book_factors(data: ScenarioSet, book: _Book, years: int) -> wd.YearFactors:
+    """data.factors_for(years) in the book's columns: the scenario years, then the continuation (the asset classes'
+    and the tickers', row for row) past them."""
+    if not book.tickers:
+        return data.factors_for(years)
+    ts = data.tickers()
+    key = (data.key, ts.key, book.key, years)
+    with _LOCK:
+        hit = _BOOKS.get(key)
+        if hit is not None:
+            _BOOKS.move_to_end(key)
+            return hit
+    head = _joined(data.factors, book.asset_cols, ts.year_columns(book.tickers, book.alpha_mode), data.factors.cpi)
+    if years <= data.years:
+        f = head.select(None, years)
+    else:
+        data.check_continuation(years)
+        if ts.continuation is None:
+            raise PathsNotReady(f"期限 {years} 年超过情景路径的 {data.years} 年，标的需要续抽路径：{ts.continuation_issue}")
+        cf = data.continuation.factors_for(data.assets)
+        tail = _joined(cf, book.asset_cols, ts.cont_columns(book.tickers, book.alpha_mode), cf.cpi)
+        f = head.chain(tail, data.continuation_rows()).select(None, years)
+    with _LOCK:
+        return _remember(_BOOKS, key, f, _MAX_BOOKS)
 
 
 def _flag(value, what: str, default: bool) -> bool:
@@ -759,18 +934,21 @@ def _ruin_rank(e: dict) -> tuple:
 
 def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance: str = "monthly") -> dict:
     """evaluate_portfolio() on already loaded scenarios. Fans are wealth multiples of 1 at t=0."""
-    w = parse_weights(weights, data.assets)
+    book = _book(data, weights)
+    w = book.w
     probs = scenario_probabilities(data, scenario_probs)
     if rebalance not in metrics.REBALANCE_MODES:
         raise ValueError(f"rebalance 必须是 {' / '.join(metrics.REBALANCE_MODES)} 之一")
     T, Y = data.months, data.years
+    ts = data.tickers() if book.tickers else None
     cash = data.assets.index("cash") if "cash" in data.assets else None
     parts, yearly, yearly_real = [], [], []
-    for blk, cols in data.parts:
-        total = blk.total[:, :T] if cols is None else blk.total[:, :T][:, :, cols]
+    for k, (blk, cols) in enumerate(data.parts):
+        atot = blk.total[:, :T] if cols is None else blk.total[:, :T][:, :, cols]
+        total = _book_monthly(data, book, k, atot)
         wealth = metrics.portfolio_wealth(total, w, rebalance)
         deflator = blk.cpi[:, :T + 1]
-        rf = 0.0 if cash is None else total[:, :, cash].astype(np.float64)
+        rf = 0.0 if cash is None else atot[:, :, cash].astype(np.float64)
         parts.append(metrics.path_metrics(wealth, deflator, rf))
         yearly.append(wealth[:, 0:Y * MONTHS + 1:MONTHS])
         yearly_real.append(yearly[-1] / deflator[:, 0:Y * MONTHS + 1:MONTHS])
@@ -787,9 +965,9 @@ def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance:
            for k, (sid, name, src, (a, b)) in enumerate(zip(data.ids, data.names, data.sources, data.ranges))]
     groups = data.groups
     worst, best = _extremes(per, _real_growth)
-    return {
+    out = {
         "years": data.year_labels(Y), "dates": data.year_dates(Y), "horizon_months": T,
-        "weights": {a: float(x) for a, x in zip(data.assets, w) if x > 0},
+        "weights": book.weights_out(),
         "rebalance": rebalance,
         "per_scenario": per,
         "aggregate": {
@@ -806,6 +984,10 @@ def portfolio_report(data: ScenarioSet, weights, scenario_probs=None, rebalance:
             *data.notes,
         ],
     }
+    if ts is not None:
+        out["instruments"] = tk.describe(ts, book.tickers, book.alpha_mode, metrics.mixture_weights(groups, probs))
+        out["notes"] += tk.notes(ts, book.tickers, book.alpha_mode, withdrawal=False, scenario_years=Y)
+    return out
 
 
 def evaluate_portfolio(weights: dict, scenario_probs: dict | None = None,
@@ -816,14 +998,15 @@ def evaluate_portfolio(weights: dict, scenario_probs: dict | None = None,
 
 # ---------------------------------------------------------------- withdrawal
 
-def _critical(data: ScenarioSet, w: np.ndarray, strategy: str, indexed: bool, years: int) -> np.ndarray:
-    key = (data.key, tuple(np.round(w, 12)), strategy, indexed, years)
+def _critical(data: ScenarioSet, book: _Book, strategy: str, indexed: bool, years: int) -> np.ndarray:
+    ts_key = data.tickers().key if book.tickers else ()
+    key = (data.key, ts_key, book.key, tuple(np.round(book.w, 12)), strategy, indexed, years)
     with _LOCK:
         hit = _CRIT.get(key)
         if hit is not None:
             _CRIT.move_to_end(key)
             return hit
-    crit = wd.critical_rates(data.factors_for(years), w, strategy, indexed, years)
+    crit = wd.critical_rates(_book_factors(data, book, years), book.w, strategy, indexed, years)
     with _LOCK:
         return _remember(_CRIT, key, crit, _MAX_CRIT)
 
@@ -874,9 +1057,47 @@ def _continuation_notes(data: ScenarioSet, horizon: int) -> list[str]:
     return notes
 
 
+COVERAGE_HALF = 0.5          # the cash-flow KPI: some year's pot below half the withdrawal (INSTRUMENTS_DESIGN §7.3)
+
+
+def _cash_flow(res: wd.WithdrawalPaths, f: wd.YearFactors, initial: float, rate: float, indexed: bool,
+               pw: np.ndarray, data: ScenarioSet) -> dict | None:
+    """One strategy's pot (the cash the holdings paid) against each year's withdrawal: the weighted fan of
+    pot / withdrawal over the paths alive at the start of the year, and the probability that some year's pot is
+    below COVERAGE_HALF of the withdrawal (weighted and per scenario). None at a withdrawal rate of 0."""
+    if rate <= 0:
+        return None
+    flows = wd.cash_flows(res, f, rate * initial, indexed)
+    cover = np.where(flows["alive"], flows["pot"] / flows["need"], np.nan)
+    short = (flows["alive"] & (flows["pot"] < COVERAGE_HALF * flows["need"])).any(axis=1)
+    return {"coverage_fan": metrics.fan(cover, pw, decimals=4),
+            "prob_pot_below_half": metrics.weighted_mean(short, pw),
+            "prob_pot_below_half_per_scenario": {sid: metrics.weighted_mean(short[a:b])
+                                                 for sid, (a, b) in zip(data.ids, data.ranges)}}
+
+
+def _cash_sources(f: wd.YearFactors, book: _Book, initial: float, rate: float, indexed: bool, pw: np.ndarray) -> dict:
+    """What pays the withdrawal (strategy-independent): the weighted median of each holding's year-1 cash over the
+    year-1 withdrawal (and of their sum), and each holding's distribution-cut pressure over the first 10 years
+    (wd.cut_flags: one unit held, some year at least 10% / 20% below year 1)."""
+    out = {"pot_share_y1": None, "cut_pressure": {}, "cut_years": min(10, f.years)}
+    held = [j for j, x in enumerate(book.w) if x > 0]
+    if rate > 0:
+        need1 = rate * initial * (f.cpi[:, 1] if indexed else 1.0)
+        shares = {book.columns[j]: initial * book.w[j] * f.income[:, 0, j] / need1 for j in held}
+        out["pot_share_y1"] = {"total": metrics.weighted_percentile(sum(shares.values()), 50, pw),
+                               "columns": {c: metrics.weighted_percentile(s, 50, pw) for c, s in shares.items()}}
+    for j in held:
+        c10, c20 = wd.cut_flags(f, j, 10, 0.1), wd.cut_flags(f, j, 10, 0.2)
+        if np.isfinite(c20).any():
+            out["cut_pressure"][book.columns[j]] = {"cut10_prob": metrics.weighted_mean(c10, pw),
+                                                    "cut20_prob": metrics.weighted_mean(c20, pw)}
+    return out
+
+
 def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: float = 0.04,
                       strategy: str = "all", inflation_indexed: bool = True,
-                      scenario_probs=None, horizon_years: int = DEFAULT_HORIZON) -> dict:
+                      scenario_probs=None, horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk") -> dict:
     """evaluate_withdrawal() on already loaded scenarios. Wealth is in units of `initial`.
 
     Every figure is at `horizon_years`. Past the scenario paths (data.years) the years come from the
@@ -884,7 +1105,8 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
     ruin curves at the end of the scenario paths: the same withdrawal runs cut there, so they equal a
     run of exactly that length. Every input is checked before any path is touched.
     """
-    w = parse_weights(weights, data.assets)
+    book = _book(data, weights, alpha_mode)
+    w = book.w
     probs = scenario_probabilities(data, scenario_probs)
     strategies = _strategies(strategy)
     initial = _number(initial, "初始资产")
@@ -896,16 +1118,19 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
     Y = parse_horizon(horizon_years)
     indexed = _flag(inflation_indexed, "inflation_indexed ", True)
     S = data.years
-    f = data.factors_for(Y)
+    f = _book_factors(data, book, Y)
     longer = Y > S
     pw = metrics.mixture_weights(data.groups, probs)
     decimals = int(np.clip(6 - np.floor(np.log10(initial)), 0, 6))     # ~6 significant digits
     rows = list(enumerate(zip(data.ids, data.names, data.sources, data.ranges)))
     out, safe, curve = {}, {}, {"rates": list(RUIN_CURVE_RATES)}
+    flows = {**_cash_sources(f, book, initial, rate, indexed, pw), "strategies": {}}
     part = ({"years": S, "date": data.year_dates(S)[-1], "strategies": {}, "safe_rate": {},
              "ruin_curve": {"rates": list(RUIN_CURVE_RATES)}} if longer else None)
     for s in strategies:
-        res = wd.simulate(f, w, initial, rate, s, indexed, Y)
+        res = wd.simulate(f, w, initial, rate, s, indexed, Y, record_holdings=True)
+        flows["strategies"][s] = _cash_flow(res, f, initial, rate, indexed, pw, data)
+        res.holdings = None
         per = [{"id": sid, "name": name, "source": src, "prob": float(probs[k]), "n_paths": b - a,
                 **wd.summarize(res.rows(a, b), f.cpi[a:b], decimals=decimals)}
                for k, (sid, name, src, (a, b)) in rows]
@@ -927,7 +1152,7 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
                 "wealth_fan_real_weighted": mix["wealth_fan_real"],
             },
         }
-        safe[s], curve[s] = _rates(data, _critical(data, w, s, indexed, Y), pw)
+        safe[s], curve[s] = _rates(data, _critical(data, book, s, indexed, Y), pw)
         if part is not None:
             head = res.head(S)
             hper = [{"id": sid, "prob": float(probs[k]), **wd.summarize(head.rows(a, b), f.cpi[a:b], with_fan=False)}
@@ -941,7 +1166,8 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
                               **{f"{k}_weighted": hmix[k] for k in _THEMED_KEYS if k != "ruin_prob"}},
                 "per_scenario": {e["id"]: {k: e[k] for k in _THEMED_KEYS} for e in hper},
             }
-            part["safe_rate"][s], part["ruin_curve"][s] = _rates(data, _critical(data, w, s, indexed, S), pw)
+            part["safe_rate"][s], part["ruin_curve"][s] = _rates(data, _critical(data, book, s, indexed, S), pw)
+    ts = data.tickers() if book.tickers else None
     notes = [
         "每年年末提取一次，金额 = 提取率 × 初始资产" + (
             "（按期初购买力计），按各路径自身的 CPI 换算成当年名义金额，第 1 年末就已含第 1 年的通胀。"
@@ -953,7 +1179,10 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
         *(_continuation_notes(data, Y) if longer else []),
         DIVIDEND_NOTE,
         *data.notes,
+        *([] if ts is None else tk.notes(ts, book.tickers, book.alpha_mode, withdrawal=True, scenario_years=S,
+                                         horizon=Y)),
     ]
+    flows["note"] = CASH_FLOW_NOTE
     cont = None
     if longer:
         c = data.continuation
@@ -961,29 +1190,43 @@ def withdrawal_report(data: ScenarioSet, weights, initial: float = 1e6, rate: fl
         cont = {**(c.info or {}), "label": continuation_label(S), "first_year": S + 1, "years": Y - S,
                 "start_date": data.year_dates(S)[-1], "n_paths": c.n_paths, "rows": int(f.total.shape[0]),
                 "shared": bool(shared), "shared_scenarios": shared}
-    return {
+        if ts is not None:
+            cont["instruments"] = {k: (ts.continuation.info or {}).get(k) for k in (
+                "rows", "years", "offset_months", "anchor", "seed", "params_version")}
+    report = {
         "years": data.year_labels(Y), "dates": data.year_dates(Y), "horizon_years": Y,
         "scenario_years": S, "horizon_bounds": list(HORIZON_BOUNDS),
         "initial": initial, "rate": rate, "annual_withdrawal": rate * initial, "inflation_indexed": indexed,
-        "weights": {a: float(x) for a, x in zip(data.assets, w) if x > 0},
+        "weights": book.weights_out(),
         "strategies": out, "safe_rate": safe, "ruin_curve": curve,
         "safe_ruin_prob": wd.SAFE_RUIN_PROB, "scenario_horizon": part, "continuation": cont, "notes": notes,
+        "cash_flow": flows,
     }
+    if ts is not None:
+        report["instruments"] = tk.describe(ts, book.tickers, book.alpha_mode, pw)
+    return report
+
+
+CASH_FLOW_NOTE = ("现金流（cash_flow）：pot_share_y1 = 第一年各持仓的现金（股息、利息、分配）占第一年提取额的比例（中位数）；"
+                  "coverage_fan = 每年现金池 / 当年提取额的分布（只计当年年初还没破产的路径；按比例提取时现金留在原资产里再投资，"
+                  "这里仍按它产生的现金计）；prob_pot_below_half = 某年现金池不足提取额一半的概率；"
+                  "cut_pressure = 持有一份、不再投资时，前 10 年里某年现金比第一年低 10% / 20% 以上的概率。")
 
 
 def evaluate_withdrawal(weights: dict, initial: float = 1e6, rate: float = 0.04,
                         strategy: str = "all", inflation_indexed: bool = True,
                         scenario_probs: dict | None = None, include_custom: list[str] = (),
-                        horizon_years: int = DEFAULT_HORIZON) -> dict:
+                        horizon_years: int = DEFAULT_HORIZON, alpha_mode: str = "shrunk") -> dict:
     """Withdrawal strategies, ruin and safe rates per scenario and aggregated (docs/ARCHITECTURE.md).
 
     horizon_years: a whole number of years in HORIZON_BOUNDS (10..40, default 30). Years past the
     scenario paths (15) come from the unconditional continuation; scenario_horizon repeats the
     figures at year 15. ValueError (HTTP 400) for an invalid horizon, PathsNotReady (503) when a horizon
-    needs the continuation and it is missing or stale.
+    needs the continuation and it is missing or stale. weights may hold tickers (module docstring);
+    alpha_mode (shrunk / half / raw) picks the estimated tickers' alpha variant.
     """
     return withdrawal_report(load_scenarios(include_custom), weights, initial, rate, strategy,
-                             inflation_indexed, scenario_probs, horizon_years)
+                             inflation_indexed, scenario_probs, horizon_years, alpha_mode)
 
 
 # ---------------------------------------------------------------- build step
@@ -1039,19 +1282,7 @@ def run(ctx=None, results_dir: str | Path | None = None, out_dir: str | Path | N
               "computed_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     base = int(np.clip(data.years, *HORIZON_BOUNDS))
     horizons = sorted({base, DEFAULT_HORIZON})
-    presets = []
-    for p in PRESETS:
-        pr = portfolio_report(data, p["weights"])
-        by = {}
-        for H in horizons:
-            wr = withdrawal_report(data, p["weights"], horizon_years=H)
-            by[str(H)] = {"ruin_prob_weighted": {s: v["aggregate"]["ruin_prob_weighted"] for s, v in wr["strategies"].items()},
-                          "safe_rate_weighted": {s: v["weighted"] for s, v in wr["safe_rate"].items()}}
-        presets.append({**p, "portfolio": _brief(pr["aggregate"]["weighted"]),
-                        "worst_id": pr["aggregate"]["worst"]["id"],
-                        "ruin_prob_weighted": by[str(base)]["ruin_prob_weighted"],
-                        "safe_rate_weighted": by[str(base)]["safe_rate_weighted"],
-                        "withdrawal_horizon_years": base, "withdrawal_by_horizon": by})
+    presets = [_preset(data, p, base, horizons) for p in PRESETS]
     cont = data.continuation
     out = {"source": source, "default_weights": DEFAULT_WEIGHTS,
            "portfolio": portfolio_report(data, DEFAULT_WEIGHTS),
@@ -1060,8 +1291,37 @@ def run(ctx=None, results_dir: str | Path | None = None, out_dir: str | Path | N
                "file": source["continuation_file"], "label": continuation_label(data.years),
                "scenario_years": data.years, "max_years": data.max_years, **(cont.info or {})},
            "presets": presets}
+    try:                                     # the ticker presets, when the instruments step has run
+        data.tickers()
+        out["instrument_presets"] = [_preset(data, p, base, horizons, tickers=True) for p in INSTRUMENT_PRESETS]
+        out["instrument_presets_issue"] = None
+    except (PathsNotReady, ValueError) as err:
+        out["instrument_presets"], out["instrument_presets_issue"] = None, str(err)
     if write:
         jsonio.dump(out, Path(out_dir or root) / OUTPUT_FILE)
+    return out
+
+
+def _preset(data: ScenarioSet, p: dict, base: int, horizons: list[int], tickers: bool = False) -> dict:
+    """A preset's weighted portfolio statistics and its ruin / safe rates at each horizon (pro-rata etc.)."""
+    pr = portfolio_report(data, p["weights"])
+    by, cash = {}, {}
+    for H in horizons:
+        wr = withdrawal_report(data, p["weights"], horizon_years=H)
+        by[str(H)] = {"ruin_prob_weighted": {s: v["aggregate"]["ruin_prob_weighted"] for s, v in wr["strategies"].items()},
+                      "safe_rate_weighted": {s: v["weighted"] for s, v in wr["safe_rate"].items()}}
+        if tickers:
+            share = wr["cash_flow"]["pot_share_y1"]
+            cash[str(H)] = {"cash_y1_over_withdrawal_p50": None if share is None else share["total"],
+                            "prob_pot_below_half": {s: (v or {}).get("prob_pot_below_half")
+                                                    for s, v in wr["cash_flow"]["strategies"].items()}}
+    out = {**p, "portfolio": _brief(pr["aggregate"]["weighted"]),
+           "worst_id": pr["aggregate"]["worst"]["id"],
+           "ruin_prob_weighted": by[str(base)]["ruin_prob_weighted"],
+           "safe_rate_weighted": by[str(base)]["safe_rate_weighted"],
+           "withdrawal_horizon_years": base, "withdrawal_by_horizon": by}
+    if tickers:
+        out["cash_flow_by_horizon"] = cash
     return out
 
 

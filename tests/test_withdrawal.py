@@ -323,3 +323,44 @@ def test_safe_rate_quantile_rule_and_cap():
     total, income, cpi = paths(24)
     f = wd.year_factors(total + 0.01, income, cpi)        # strong growth: never ruined below 20%
     assert wd.critical_rates(f, np.array([0.5, 0.5]), "div_then_winners", True).tolist() == [0.2]
+
+
+# ---------------------------------------------------------------- cash flows (INSTRUMENTS_DESIGN §7.3)
+
+def test_cash_flows_pot_need_and_alive_hand_computed():
+    total, income, cpi = paths(36, A=2, cpi_growth=0.10)
+    total[0, 11::12, 0], income[0, 11::12, 0] = 0.05, 0.05      # asset 0 pays 5% in cash once a year, flat price
+    f = wd.year_factors(total, income, cpi)
+    w = np.array([0.6, 0.4])
+    res = wd.simulate(f, w, 1000.0, 0.1, "div_then_pro_rata", True, record_holdings=True)
+    fl = wd.cash_flows(res, f, 100.0, True)
+    # year 1: 600 in asset 0 pays 30 against 100 x 1.1; the holdings then shrink by (1030 - 110) / 1000
+    assert fl["pot"][0, 0] == pytest.approx(30.0) and fl["need"][0, 0] == pytest.approx(110.0)
+    assert fl["pot"][0, 1] == pytest.approx(600 * 0.92 * 0.05) and fl["need"][0, 1] == pytest.approx(121.0)
+    assert fl["alive"].all() and fl["pot"].shape == fl["need"].shape == (1, 3)
+    # pro_rata reinvests the cash: what the start-of-year holdings pay is still reported
+    res = wd.simulate(f, w, 1000.0, 0.1, "pro_rata", True, record_holdings=True)
+    fl = wd.cash_flows(res, f, 100.0, False)
+    assert fl["pot"][0, 1] == pytest.approx(630 * (920 / 1030) * 0.05) and np.allclose(fl["need"], 100.0)
+    # a ruined path: alive in its ruin year, not after; nothing is paid after it
+    res = wd.simulate(f, w, 1000.0, 0.6, "div_then_pro_rata", False, record_holdings=True)
+    assert res.ruin_year[0] == 2
+    fl = wd.cash_flows(res, f, 600.0, False)
+    assert fl["alive"][0].tolist() == [True, True, False] and fl["pot"][0, 2] == 0.0
+    with pytest.raises(ValueError):
+        wd.cash_flows(wd.simulate(f, w, 1000.0, 0.1, "pro_rata"), f, 100.0)
+
+
+def test_cut_flags_compare_each_years_cash_per_unit_with_year_one():
+    P, Y = 3, 10
+    price = np.ones((P, Y, 1))
+    income = np.full((P, Y, 1), 0.05)
+    price[1, 1, 0] = 0.7                      # path 1: the price falls 30% in year 2, the yield stays 5%
+    price[2, 4, 0] = 0.85                     # path 2: a 15% fall: a cut of 10% but not of 20%
+    income[0, :, 0] = [0.05] + [0.0] * 9      # path 0 stops paying after year 1
+    f = wd.YearFactors(price + income, price, income, np.ones((P, Y + 1)), np.zeros((P, Y, 1), dtype=int))
+    assert wd.cut_flags(f, 0, 10, 0.2).tolist() == [1.0, 1.0, 0.0]
+    assert wd.cut_flags(f, 0, 10, 0.1).tolist() == [1.0, 1.0, 1.0]
+    assert wd.cut_flags(f, 0, 5, 0.1).tolist() == [1.0, 1.0, 0.0]      # path 2's cut comes in year 6
+    none = wd.YearFactors(price, price, np.zeros_like(price), np.ones((P, Y + 1)), np.zeros((P, Y, 1), dtype=int))
+    assert np.isnan(wd.cut_flags(none, 0)).all()                       # a holding that pays nothing has no cut

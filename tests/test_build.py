@@ -90,9 +90,11 @@ def test_regimes_runs_after_scenarios_and_before_forecast_and_two_steps_are_opt_
 
 
 def test_the_step_order_shared_with_the_regime_layer():
-    """FACTORS_DESIGN §7.6: one STEPS list for both branches; factor_audit is a default step after diagnostics."""
+    """FACTORS_DESIGN §7.6: one STEPS list for both branches; factor_audit is a default step after diagnostics;
+    INSTRUMENTS_DESIGN §6.1: instruments (a default step) right after scenarios."""
     assert build.STEPS == ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios",
-                           "regimes", "forecast", "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+                           "instruments", "regimes", "forecast", "valuation", "portfolio", "llm", "meta", "ablation",
+                           "regime_forecast"]
     assert "factor_audit" not in build.OPT_IN
 
 

@@ -679,3 +679,550 @@ def test_real_paths_ruin_monotone_and_30_year_safe_rate_below_15():
         for sid, rate in r30["safe_rate"][s]["per_scenario"].items():
             assert rate <= part["safe_rate"][s]["per_scenario"][sid]
     assert runs[30, 0.04]["continuation"]["label"] == "第 16 年起没有情景主题：按历史月份无条件续抽"
+
+
+# ---------------------------------------------------------------- tickers (INSTRUMENTS_DESIGN §6.1, §6.4, §7.3, T17)
+
+from scenariolab.instruments import ESTIMATED, TICKERS  # noqa: E402
+from scenariolab.portfolio import tickers as tk  # noqa: E402
+
+K = len(TICKERS)
+PAYERS = {"MAIN": 0.007, "QQQI": 0.012, "TLT": 0.004, "SCHD": 0.003}       # monthly cash per start-of-month value
+
+
+def _write_tickers(root, seed=1, ids=("calm", "storm", "boom"), n=N, custom=None, fingerprint=True, alpha_shift=-0.02):
+    """Synthetic ticker paths in instrument_paths.npz's layout for the paths _write_paths wrote (same ids and rows):
+    random totals, the payers' cash, a TQQQ wipe-out on path 0, and alpha variants whose yearly factors are the
+    default ones shifted by alpha_shift (half) and -alpha_shift (raw) a year."""
+    rng = np.random.default_rng(seed)
+    S_ = len(ids)
+    total = rng.normal(0.006, 0.05, size=(S_, n, T, K)).astype(np.float32)
+    income = np.zeros_like(total)
+    for t, x in PAYERS.items():
+        income[..., TICKERS.index(t)] = x
+    j = TICKERS.index("TQQQ")
+    total[:, 0, 5, j], total[:, 0, 6:, j] = -1.0, 0.0
+    alive = np.ones((S_, n, T, 2), dtype=bool)
+    alive[:, 0, 5:, 1] = False
+    est = [TICKERS.index(t) for t in ESTIMATED]
+    f = service.wd.year_factors(total.reshape(-1, T, K), income.reshape(-1, T, K), np.ones((S_ * n, T + 1)))
+    arrays = {}
+    for mode, shift in (("half", alpha_shift), ("raw", -alpha_shift)):
+        g = np.exp(shift)
+        for k, a in (("total", f.total * g), ("price", f.price * g), ("income", f.income)):
+            arrays[f"alpha_{mode}_{k}"] = a[:, :, est].reshape(S_, n, T // 12, len(est)).astype(np.float32)
+    target = root if custom is None else root / "custom"
+    name = tk.PATHS_FILE if custom is None else f"{custom}{tk.CUSTOM_SUFFIX}"
+    with np.load(target / ("scenario_paths.npz" if custom is None else f"{custom}.npz")) as z:
+        fp = tk.paths_fingerprint([str(x) for x in z["ids"]], np.asarray(z["total"])[:, :2])
+        labels = z["labels"]
+    if custom is not None and fingerprint:
+        arrays["paths_fingerprint"] = np.array(fp)
+    np.savez_compressed(target / name, tickers=np.array(TICKERS), ids=np.array(ids), probs=np.full(S_, 1 / S_),
+                        labels=labels, start=np.linspace(10.0, 100.0, K), total=total, income=income, alive=alive,
+                        estimated=np.array(ESTIMATED), leveraged=np.array(["QLD", "TQQQ"]), **arrays)
+    if custom is None:
+        meta = {"scenario_ids": list(ids), "n_paths": n, "months": T, "anchor_month": "2026-09",
+                "built_at": "2026-11-02 00:00:00", "flags": {"MAIN": ["estimated", "credit_link", "tax"], "QQQ": ["tax"],
+                                                             "TQQQ": ["ruin_extrap", "tax"]},
+                "start": {t: {"price": float(p), "asof": "2026-09-30"} for t, p in zip(TICKERS, np.linspace(10, 100, K))}}
+        if fingerprint:
+            meta["paths_fingerprint"] = fp
+        jsonio.dump(meta, root / tk.META_FILE)
+    return total, income
+
+
+def _write_ticker_continuation(root, seed=31, fingerprint=None):
+    """A ticker continuation (tickers.write_continuation's format) for the asset continuation _write_continuation
+    wrote: one row per continuation path, its asset fingerprint unless `fingerprint` is given."""
+    cont = service._load_continuation(root / service.CONTINUATION_FILE)
+    R, Yc = cont.n_paths, cont.years
+    rng = np.random.default_rng(seed)
+    tot = np.exp(rng.normal(0.06, 0.15, size=(R, Yc, K)))
+    inc = np.zeros_like(tot)
+    for t, x in PAYERS.items():
+        inc[..., TICKERS.index(t)] = 12 * x
+    est = [TICKERS.index(t) for t in ESTIMATED]
+    alpha = {m: (tot[:, :, est] * np.exp(s), (tot - inc)[:, :, est] * np.exp(s), inc[:, :, est])
+             for m, s in (("half", -0.02), ("raw", 0.02))}
+    info = {"asset_fingerprint": fingerprint or cont.fingerprint(), "rows": R, "years": Yc}
+    tk.write_continuation(root / tk.CONTINUATION_FILE, TICKERS, ESTIMATED,
+                          {"total": tot, "price": tot - inc, "income": inc}, alpha, cont.factors.cpi, cont.labels,
+                          cont.start, cont.offset, info)
+    return tot, inc
+
+
+@pytest.fixture()
+def with_tickers(results):
+    _write_tickers(results)
+    _write_ticker_continuation(results)
+    service.clear_cache()
+    yield results
+    service.clear_cache()
+
+
+INCOME_MIX = {"us_equity": 0.4, "MAIN": 0.3, "tlt": 0.2, "GOLD": 0.1}          # tlt: case-insensitive; GOLD: the asset
+
+
+def test_weights_parse_tickers_aliases_and_unknown_ids():
+    assets = list(ASSETS)
+    wa, held = service.parse_book_weights({"us_equity": 2, "brk.b": 1, "GOLD": 1, "Main": 0}, assets)
+    assert held == {"BRK.B": 1.0, "MAIN": 0.0} and wa[assets.index("gold")] == 1.0 and wa.sum() == 3.0
+    for bad, needle in (({"bitcoin": 1}, "未知资产或标的：bitcoin"), ({"QQQ": -1}, "标的 QQQ 的权重不能为负"),
+                        ({"QQQ": "x"}, "必须是数字"), ([], "非空对象")):
+        with pytest.raises(ValueError) as err:
+            service.parse_book_weights(bad, assets)
+        assert needle in str(err.value)
+    with pytest.raises(ValueError):
+        service.parse_weights({"QQQ": 1}, assets)            # the asset-class parser refuses a held ticker
+
+
+def test_asset_only_results_ignore_the_ticker_files(results):
+    """Without a held ticker nothing of the instrument layer is read: the same report with or without its files,
+    and a ticker at weight 0 or the GOLD alias change nothing."""
+    weights = {"us_equity": 0.5, "treasury_10y": 0.3, "gold": 0.2}
+    before = (_report_json(service.evaluate_portfolio(weights)),
+              _report_json(service.evaluate_withdrawal(weights, horizon_years=30, include_custom=["c1"])))
+    _write_tickers(results)
+    _write_ticker_continuation(results)
+    service.clear_cache()
+    alias = {"us_equity": 0.5, "treasury_10y": 0.3, "GOLD": 0.2, "QQQ": 0}
+    assert _report_json(service.evaluate_portfolio(weights)) == before[0]
+    assert _report_json(service.evaluate_portfolio(alias)) == before[0]
+    assert _report_json(service.evaluate_withdrawal(alias, horizon_years=30, include_custom=["c1"])) == before[1]
+    assert "instruments" not in service.evaluate_portfolio(weights)
+
+
+def _manual_book(results, cols_assets, cols_tickers, s):
+    """Scenario s's monthly total and income in the given columns, straight from the files."""
+    with np.load(results / "scenario_paths.npz") as z, np.load(results / tk.PATHS_FILE) as zt:
+        tot = np.concatenate([z["total"][s][:, :, [ASSETS.index(a) for a in cols_assets]],
+                              zt["total"][s][:, :, [TICKERS.index(t) for t in cols_tickers]]], axis=2)
+        inc = np.concatenate([z["income"][s][:, :, [ASSETS.index(a) for a in cols_assets]],
+                              zt["income"][s][:, :, [TICKERS.index(t) for t in cols_tickers]]], axis=2)
+        cpi = z["cpi"][s].astype(np.float64)
+    return tot, inc, cpi
+
+
+def test_portfolio_with_tickers_equals_the_hand_computed_mix(with_tickers):
+    r = service.evaluate_portfolio(INCOME_MIX, rebalance="annual")
+    assert r["weights"] == pytest.approx({"us_equity": 0.4, "gold": 0.1, "TLT": 0.2, "MAIN": 0.3})
+    tot, _, cpi = _manual_book(with_tickers, ["us_equity", "gold"], ["TLT", "MAIN"], 1)
+    w = np.array([0.4, 0.1, 0.2, 0.3])
+    with np.load(with_tickers / "scenario_paths.npz") as z:
+        rf = z["total"][1][:, :, ASSETS.index("cash")].astype(np.float64)
+    m = metrics.path_metrics(metrics.portfolio_wealth(tot, w, "annual"), cpi, rf)
+    storm = r["per_scenario"][1]
+    assert storm["id"] == "storm"
+    for k, v in metrics.summarize(m).items():
+        assert storm[k] == pytest.approx(v, rel=1e-9, abs=1e-12), k
+    ins = r["instruments"]
+    assert ins["tickers"] == ["TLT", "MAIN"] and ins["names"]["MAIN"].startswith("Main Street")
+    assert ins["chips"]["credit_link"].startswith("与股市的联动") and ins["alpha_mode"] == "shrunk"
+    assert any("Main Street" in n for n in r["notes"]) and any("与股市的联动低于历史" in n for n in r["notes"])
+    # a leveraged fund wiped out on path 0 of every scenario
+    lev = service.evaluate_portfolio({"TQQQ": 1})
+    assert lev["instruments"]["wipeout_prob_scenario_end"]["TQQQ"] == pytest.approx(1 / N)
+    assert lev["aggregate"]["weighted"]["max_dd_p95"] >= -1.0 and any("归零" in n for n in lev["notes"])
+
+
+def test_withdrawal_uses_each_tickers_own_distributions(with_tickers):
+    """The dividend-first pot is each ticker's own cash: the hand-assembled year factors give the same results."""
+    weights = {"cash": 0.2, "MAIN": 0.5, "QQQI": 0.3}
+    r = service.evaluate_withdrawal(weights, horizon_years=10, rate=0.05)
+    pw = metrics.mixture_weights(service.load_scenarios().groups, [0.5, 0.3, 0.2])
+    parts = [_manual_book(with_tickers, ["cash"], ["QQQI", "MAIN"], s) for s in range(3)]
+    f = service.wd.year_factors(np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts]),
+                                np.concatenate([p[2] for p in parts]))
+    w = np.array([0.2, 0.3, 0.5])
+    for s in service.wd.STRATEGIES:
+        res = service.wd.simulate(f, w, 1e6, 0.05, s, True, 10)
+        assert r["strategies"][s]["aggregate"]["ruin_prob_weighted"] == pytest.approx(
+            service.wd.summarize(res, f.cpi, pw)["ruin_prob"], abs=1e-12)
+        crit = service.wd.critical_rates(f, w, s, True, 10)
+        assert r["safe_rate"][s]["weighted"] == service.wd.safe_rate(crit, pw)
+    # year 1's pot: MAIN pays 0.7% and QQQI 1.2% a month on their value
+    share = r["cash_flow"]["pot_share_y1"]["columns"]
+    need1 = 0.05 * f.cpi[:, 1]
+    assert share["MAIN"] == pytest.approx(metrics.weighted_percentile(0.5 * f.income[:, 0, 2] / need1, 50, pw))
+    assert share["QQQI"] > share["MAIN"] * 0.3 / 0.5 and "QQQI" in r["cash_flow"]["cut_pressure"]
+    flow = r["cash_flow"]["strategies"]["div_then_pro_rata"]
+    assert len(flow["coverage_fan"]["p50"]) == 10 and 0.0 <= flow["prob_pot_below_half"] <= 1.0
+    assert set(flow["prob_pot_below_half_per_scenario"]) == {"calm", "storm", "boom"}
+    # a ticker that pays nothing leaves the pot to the others: pro_rata is unchanged by the payout split
+    assert any("粘性分配" in n for n in r["notes"]) and r["instruments"]["tickers"] == ["QQQI", "MAIN"]
+
+
+def test_alpha_variants_change_only_the_estimated_tickers(with_tickers):
+    for weights, moves in (({"MAIN": 0.5, "QQQ": 0.5}, True), ({"QQQ": 0.6, "TLT": 0.4}, False)):
+        out = {m: service.evaluate_withdrawal(weights, horizon_years=30, rate=0.05, strategy="pro_rata", alpha_mode=m)
+               for m in tk.ALPHA_MODES}
+        ruin = {m: o["strategies"]["pro_rata"]["aggregate"]["ruin_prob_weighted"] for m, o in out.items()}
+        safe = {m: o["safe_rate"]["pro_rata"]["weighted"] for m, o in out.items()}
+        if moves:                                   # half: 2% a year less growth, raw: 2% more
+            assert safe["half"] < safe["shrunk"] < safe["raw"] and ruin["half"] >= ruin["shrunk"] >= ruin["raw"]
+            assert out["half"]["instruments"]["alpha_mode"] == "half"
+        else:
+            assert len({_report_json({k: v for k, v in o.items() if k != "instruments"}) for o in out.values()}) == 1
+    with pytest.raises(ValueError) as err:
+        service.evaluate_withdrawal({"MAIN": 1}, alpha_mode="double")
+    assert "alpha_mode" in str(err.value)
+
+
+def test_ticker_years_past_the_scenarios_come_from_the_ticker_continuation(with_tickers):
+    data = service.load_scenarios(["c1"]) if (with_tickers / "custom" / f"c1{tk.CUSTOM_SUFFIX}").exists() else None
+    assert data is None                             # c1 has no ticker file yet
+    data = service.load_scenarios()
+    book = service._book(data, {"us_equity": 0.5, "MAIN": 0.5})
+    f40 = service._book_factors(data, book, 40)
+    ts = data.tickers()
+    head = ts.year_columns(["MAIN"])
+    tail = ts.cont_columns(["MAIN"])
+    rows = data.continuation_rows()
+    assert np.array_equal(f40.total[:, :10, 1], head[0][:, :, 0])
+    assert np.array_equal(f40.total[:, 10:, 1], tail[0][rows, :, 0])
+    assert np.array_equal(f40.total[:, :, 0], data.factors_for(40).total[:, :, ASSETS.index("us_equity")])
+    assert np.array_equal(f40.cpi, data.factors_for(40).cpi)
+    assert set(np.unique(f40.order)) == {0, 1}            # the sale order of div_then_winners covers the ticker
+    r = service.evaluate_withdrawal({"us_equity": 0.5, "MAIN": 0.5}, horizon_years=40, strategy="pro_rata")
+    assert r["continuation"]["instruments"]["rows"] == N and any("估计型标的的 α 按路径固定" in n for n in r["notes"])
+    # the 10-year figures are the same with or without the ticker continuation
+    ten = _report_json(service.evaluate_withdrawal({"us_equity": 0.5, "MAIN": 0.5}, horizon_years=10))
+    (with_tickers / tk.CONTINUATION_FILE).unlink()
+    service.clear_cache()
+    assert _report_json(service.evaluate_withdrawal({"us_equity": 0.5, "MAIN": 0.5}, horizon_years=10)) == ten
+    with pytest.raises(service.PathsNotReady) as err:
+        service.evaluate_withdrawal({"us_equity": 0.5, "MAIN": 0.5}, horizon_years=30)
+    assert tk.CONTINUATION_FILE in str(err.value) and "--only instruments" in str(err.value)
+
+
+def test_stale_or_missing_ticker_files_are_refused_with_the_build_command(results):
+    weights = {"us_equity": 0.5, "QQQ": 0.5}
+    with pytest.raises(service.PathsNotReady) as err:
+        service.evaluate_portfolio(weights)
+    assert "--only instruments" in str(err.value)
+    _write_tickers(results)
+    service.clear_cache()
+    assert service.evaluate_portfolio(weights)["weights"] == {"us_equity": 0.5, "QQQ": 0.5}
+    # the scenario paths are rebuilt (other numbers): the ticker paths no longer belong to them
+    _write_paths(results, seed=11)
+    service.clear_cache()
+    with pytest.raises(service.PathsNotReady) as err:
+        service.evaluate_portfolio(weights)
+    assert "旧的情景路径" in str(err.value) and "--only instruments" in str(err.value)
+    assert service.evaluate_portfolio({"us_equity": 1})["weights"] == {"us_equity": 1.0}     # assets still work
+    # an asset continuation rebuilt from another engine state: the ticker continuation is refused, not mixed
+    _write_tickers(results)
+    _write_ticker_continuation(results, fingerprint="0" * 64)
+    service.clear_cache()
+    assert service.evaluate_withdrawal(weights, horizon_years=10)["horizon_years"] == 10
+    with pytest.raises(service.PathsNotReady) as err:
+        service.evaluate_withdrawal(weights, horizon_years=30)
+    assert "另一组资产续抽路径" in str(err.value)
+
+
+def test_custom_scenarios_need_their_own_ticker_file(with_tickers):
+    weights = {"us_equity": 0.5, "MAIN": 0.5}
+    with pytest.raises(ValueError) as err:
+        service.evaluate_portfolio(weights, include_custom=["c1"])
+    assert not isinstance(err.value, service.PathsNotReady) and "上线前保存" in str(err.value)
+    assert "自定义崩盘" in str(err.value)
+    _write_tickers(with_tickers, seed=4, ids=("c1",), n=30, custom="c1")
+    service.clear_cache()
+    r = service.evaluate_portfolio(weights, include_custom=["c1"])
+    assert [e["id"] for e in r["per_scenario"]] == ["calm", "storm", "boom", "c1"]
+    w = service.evaluate_withdrawal(weights, include_custom=["c1"], horizon_years=30, strategy="div_then_winners")
+    assert "自定义崩盘" in w["continuation"]["shared_scenarios"] and w["instruments"]["tickers"] == ["MAIN"]
+    # a custom ticker file run on other paths than the custom scenario's own is refused
+    _write_paths(with_tickers, seed=12, n=30, ids=("c1",), drift=(0.0,), custom="c1")
+    service.clear_cache()
+    with pytest.raises(ValueError) as err:
+        service.evaluate_portfolio(weights, include_custom=["c1"])
+    assert "不一致" in str(err.value)
+
+
+def test_api_tickers_in_portfolio_and_withdrawal_requests(with_tickers):
+    from fastapi.testclient import TestClient
+
+    from scenariolab.server import app
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.post("/api/portfolio/evaluate", json={"weights": {"QQQ": 60, "TLT": 40}})
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["weights"] == {"QQQ": 0.6, "TLT": 0.4} and r.json()["instruments"]["tickers"] == ["QQQ", "TLT"]
+    r = client.post("/api/withdrawal/evaluate", json={"weights": {"MAIN": 1}, "horizon_years": 30, "alpha_mode": "half",
+                                                      "strategy": "div_then_pro_rata"})
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["instruments"]["alpha_mode"] == "half" and r.json()["cash_flow"]["pot_share_y1"]["columns"]["MAIN"] > 0
+    for body, needle in (({"weights": {"XYZ": 1}}, "未知资产或标的：XYZ"),
+                         ({"weights": {"MAIN": 1}, "alpha_mode": "x"}, "alpha_mode")):
+        r = client.post("/api/withdrawal/evaluate", json=body)
+        assert r.status_code == 400 and needle in r.json()["detail"], r.text[:300]
+    (with_tickers / tk.PATHS_FILE).unlink()
+    service.clear_cache()
+    r = client.post("/api/portfolio/evaluate", json={"weights": {"QQQ": 1}})
+    assert r.status_code == 503 and "--only instruments" in r.json()["detail"]
+    assert client.post("/api/portfolio/evaluate", json={"weights": {"us_equity": 1}}).status_code == 200
+
+
+def test_api_instruments_catalog_without_and_with_the_files(results, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from scenariolab.server import app
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.get("/api/instruments")
+    assert r.status_code == 200, r.text[:300]
+    c = r.json()
+    assert set(TICKERS) | {"GOLD"} <= set(c["tickers"]) and c["tickers"]["TQQQ"]["name"].startswith("三倍纳指")
+    assert c["status"]["available"] is False and "--only instruments" in c["status"]["issue"]
+    assert c["order"][:4] == ["QQQ", "QLD", "TQQQ", "QQQI"] and c["aliases"] == {"GOLD": "gold"}
+    assert [m["id"] for m in c["alpha_modes"]] == list(tk.ALPHA_MODES) and c["presets"][0]["id"] == "income_tickers"
+    assert "{fee}" not in c["tickers"]["TQQQ"]["card"] and c["tickers"]["TQQQ"]["fee"] > 0
+    _write_tickers(results)
+    service.clear_cache()
+    c = client.get("/api/instruments").json()
+    assert c["status"]["available"] is True and c["tickers"]["MAIN"]["flags"] == ["estimated", "credit_link", "tax"]
+    # the result file itself, and its build step in the 404 hint
+    import scenariolab.server as server
+    monkeypatch.setattr(server, "RESULTS", results)
+    assert client.get("/api/instrument_meta").json()["scenario_ids"] == ["calm", "storm", "boom"]
+    assert server.BUILD_STEP["instrument_meta"] == "instruments"
+
+
+def test_example_ticker_preset_is_evaluated_into_portfolio_default(with_tickers):
+    out = service.run(None)
+    assert out["instrument_presets_issue"] is None and len(out["instrument_presets"]) == len(service.INSTRUMENT_PRESETS)
+    p = out["instrument_presets"][0]
+    assert p["id"] == "income_tickers" and set(p["withdrawal_by_horizon"]) == {"10", "30"}
+    assert sum(p["weights"].values()) == pytest.approx(1.0) and p["cash_flow_by_horizon"]["30"]["cash_y1_over_withdrawal_p50"] > 0
+    assert [q["id"] for q in out["presets"]] == [q["id"] for q in service.PRESETS]       # the asset presets stay
+    (with_tickers / tk.PATHS_FILE).unlink()
+    service.clear_cache()
+    out = service.run(None)
+    assert out["instrument_presets"] is None and "--only instruments" in out["instrument_presets_issue"]
+
+
+# ---------------------------------------------------------------- the build: macro paths, the instruments step
+
+def test_scenario_macro_is_saved_from_the_runs_in_hand(tmp_path):
+    """library.save_macro writes what instruments.build reads (fresh: no re-simulation) from the SimOutputs only."""
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from scenariolab.instruments import build as ib
+    from scenariolab.scenarios import library
+    rng = np.random.default_rng(5)
+    dates = pd.date_range("1973-01-01", periods=600, freq="MS")
+    sims = [SimpleNamespace(total=rng.normal(0, 0.03, (6, 24, len(ASSETS))).astype(np.float32),
+                            macro={k: rng.normal(4, 1, (6, 25)).astype(np.float32) for k in ("y10", "ff", "spread")},
+                            idx=rng.integers(0, 600, (6, 24))) for _ in range(2)]
+    ids = ["a", "b"]
+    np.savez_compressed(tmp_path / "scenario_paths.npz", total=np.stack([s.total for s in sims]).astype(np.float32),
+                        ids=np.array(ids))
+    assert library.save_macro(tmp_path, sims, ids, SimpleNamespace(dates=dates)) == tmp_path / library.MACRO_FILE
+    with np.load(tmp_path / "scenario_paths.npz") as z:
+        got = ib.scenario_macro(None, tmp_path, {k: z[k] for k in z.files})       # ctx=None: must not simulate
+    assert got["source"] == library.MACRO_FILE
+    assert np.array_equal(got["y10"][1], sims[1].macro["y10"]) and got["drawn"][0][2, 3] == dates[sims[0].idx[2, 3]].strftime("%Y-%m")
+    # a failure is reported, not raised: the scenario paths are already written
+    assert library.save_macro(tmp_path, [SimpleNamespace(total=None)], ["x"], None) is None
+
+
+def test_the_instruments_step_runs_the_layer_then_the_continuation(monkeypatch, tmp_path, capsys):
+    from scenariolab import build
+    calls = []
+    monkeypatch.setattr(build, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(build.config, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(build.config, "PANEL_PATH", tmp_path / "panel.csv")
+    (tmp_path / "panel.csv").write_text("date\n", encoding="utf-8")
+    monkeypatch.setattr(build.EngineContext, "load", classmethod(lambda cls, **kw: "ctx"))
+    monkeypatch.setattr(build, "_run", lambda module, ctx, **kw: calls.append(module) or {})
+    assert build.main(["--only", "instruments"]) == 0
+    assert calls == ["instruments.build", "portfolio.tickers"]
+    calls.clear()
+    assert build.main(["--only", "scenarios", "instruments", "portfolio"]) == 0
+    assert calls == ["scenarios.library", "instruments.build", "portfolio.tickers", "portfolio.service"]
+    (tmp_path / tk.PATHS_FILE).write_bytes(b"")
+    capsys.readouterr()
+    assert build.main(["--only", "scenarios"]) == 0
+    assert "--only instruments" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(not config.PANEL_PATH.exists(), reason="panel not built")
+def test_build_continuation_hook_sees_every_run_and_changes_nothing():
+    from scenariolab.context import EngineContext
+
+    ctx = EngineContext.load(selection=True)
+    seen = []
+    a = service.build_continuation(ctx, offset=180, n_paths=50, seed=5, chunk=20, yearly=True)
+    b = service.build_continuation(ctx, offset=180, n_paths=50, seed=5, chunk=20, yearly=True,
+                                   hook=lambda sim, r0, c: seen.append((r0, c, sim.total.shape)) or c)
+    assert seen == [(0, 0, (20, 480, len(ASSETS))), (20, 1, (20, 480, len(ASSETS))), (40, 2, (10, 480, len(ASSETS)))]
+    assert b["hook"] == [0, 1, 2] and "hook" not in a and a["info"] == b["info"]
+    for k in ("total", "price", "income", "cpi", "order"):
+        assert np.array_equal(getattr(a["factors"], k), getattr(b["factors"], k)), k
+
+
+# ---------------------------------------------------------------- the project endpoint and custom scenarios (the layer)
+
+def _db():
+    from types import SimpleNamespace
+
+    import pandas as pd
+    return SimpleNamespace(dates=pd.date_range("1973-01-01", periods=600, freq="MS"))
+
+
+def _macro(rng, S_, n):
+    y10 = 5.29 + np.concatenate([np.zeros((S_, n, 1)), np.cumsum(rng.normal(0, 0.08, (S_, n, T)), axis=2)], axis=2)
+    ff = np.clip(3.75 + 0.8 * (y10 - 5.29), 0.0, None)
+    spread = np.clip(1.47 + np.concatenate([np.zeros((S_, n, 1)), np.cumsum(rng.normal(0, 0.04, (S_, n, T)), axis=2)],
+                                           axis=2), 0.3, None)
+    return {"y10": y10.astype(np.float32), "ff": ff.astype(np.float32), "spread": spread.astype(np.float32)}
+
+
+def _write_macro(root, seed=2, custom=None):
+    """scenario_macro.npz (or custom/<id>.macro.npz) for the synthetic paths, in library.save_macro's layout."""
+    target = root if custom is None else root / "custom"
+    with np.load(target / ("scenario_paths.npz" if custom is None else f"{custom}.npz")) as z:
+        ids = [str(x) for x in z["ids"]]
+        S_, n = z["total"].shape[:2]
+        fp = tk.paths_fingerprint(ids, np.asarray(z["total"])[:, :2])
+    rng = np.random.default_rng(seed)
+    dates = np.asarray(_db().dates.strftime("%Y-%m")).astype("U7")
+    name = tk.MACRO_FILE if custom is None else f"{custom}{tk.CUSTOM_MACRO_SUFFIX}"
+    np.savez_compressed(target / name, ids=np.array(ids), **_macro(rng, S_, n),
+                        drawn_idx=rng.integers(0, 600, (S_, n, T)).astype(np.int16), db_dates=dates,
+                        paths_fingerprint=np.array(fp))
+
+
+def test_project_api_on_synthetic_paths(with_tickers):
+    """POST /api/instruments/project runs the real recipes on the stored scenario paths (T17, T21)."""
+    from fastapi.testclient import TestClient
+
+    from scenariolab.server import app
+    client = TestClient(app, raise_server_exceptions=False)
+    r = client.post("/api/instruments/project", json={"ticker": "TQQQ"})
+    assert r.status_code == 503 and tk.MACRO_FILE in r.json()["detail"] and "--only instruments" in r.json()["detail"]
+    _write_macro(with_tickers)
+    t0 = time.time()
+    r = client.post("/api/instruments/project", json={"ticker": "tqqq"})
+    assert r.status_code == 200, r.text[:300]
+    assert time.time() - t0 < 10.0
+    p = r.json()
+    assert p["ticker"] == "TQQQ" and p["kind"] == "structural" and len(p["labels"]) == T + 1
+    assert p["quarter_index"][:3] == [0, 3, 6] and [e["id"] for e in p["per_scenario"]] == ["calm", "storm", "boom"]
+    agg = p["aggregate"]["weighted"]
+    for key in ("cagr10_p10", "cagr10_p50", "cagr10_p90", "max_dd_p50", "prob_loss15", "wipeout_prob"):
+        assert key in agg, key
+    assert agg["cagr10_p10"] <= agg["cagr10_p50"] <= agg["cagr10_p90"] and agg["income_y1_p50"] == 0.0
+    fans = agg["fans"]
+    assert len(fans["total"]["p50"]) == T + 1 and fans["total"]["p50"][0] == 1.0 and len(fans["dps"]["p50"]) == T // 12
+    assert set(p["per_scenario"][0]["attribution"]["median_path"]) == {"index", "vol_drag", "third_moment",
+                                                                       "fourth_moment", "dividend", "financing", "fee"}
+    assert p["part_names"]["vol_drag"] == "波动损耗" and set(p["corr"]["with"]) >= {"us_equity", "nasdaq", "QQQ", "MAIN"}
+    assert p["recomputed"] is False and p["params"]["s_eff"] == "mean_2019_2026" and "ruin_extrap" in p["flags"]
+    again = client.post("/api/instruments/project", json={"ticker": "TQQQ"}).json()
+    assert again["cached"] is True and again["aggregate"] == p["aggregate"]
+    dear = client.post("/api/instruments/project", json={"ticker": "TQQQ", "params": {"s_eff": "latest", "ruin": False}}).json()
+    assert dear["recomputed"] is True and dear["aggregate"]["weighted"]["wipeout_prob"] is None    # not drawn
+    assert dear["ruin"] is False and "ruin_extrap" not in dear["flags"] and any("爆仓抽签已关闭" in n for n in dear["notes"])
+    assert dear["aggregate"]["weighted"]["cagr10_p50"] < agg["cagr10_p50"] + 0.01
+    # an estimated ticker pays cash, by its own payout rule; the alpha variant is a parameter
+    m = client.post("/api/instruments/project", json={"ticker": "MAIN", "alpha_mode": "half"}).json()
+    assert m["alpha_mode"] == "half" and m["params"]["alpha_mode"] == "half"
+    assert m["aggregate"]["weighted"]["income_y1_p50"] > 0.05 and "alpha" in m["aggregate"]["weighted"]["attribution"]["mean"]
+    # the credit-link chip follows this request's own correlations (T18); a typed start price is the reader's
+    assert m["credit_link"] is not None and ("credit_link" in m["flags"]) == m["credit_link"]["bad"]
+    assert ("credit_link_ok" in m["flags"]) == (not m["credit_link"]["bad"])
+    u = client.post("/api/instruments/project", json={"ticker": "MAIN", "params": {"price": 40}}).json()
+    assert u["start"]["basis"] == "user" and u["start"]["user_price"] == 40 and u["start"]["price"] == 40
+    assert "start_est" not in u["flags"] and "start_est" in m["flags"] and isinstance(u["start"]["build"], dict)
+    v = client.post("/api/instruments/project", json={"ticker": "QQQ", "vol_source": "fixed", "fixed_vol": 0.3}).json()
+    assert v["vol_applies"] is False and v["recomputed"] is False and any("不影响这个标的" in n for n in v["notes"])
+    g = client.post("/api/instruments/project", json={"ticker": "GOLD", "params": {"price": 4000}}).json()
+    assert g["start"]["price"] == 4000.0 and "gold_avg" in g["flags"]
+    for body, needle in (({"ticker": "XYZ"}, "未知标的"), ({"ticker": "TQQQ", "params": {"bogus": 1}}, "没有参数"),
+                         ({"ticker": "TQQQ", "params": {"s_eff": 0.5}}, "之间"),
+                         ({"ticker": "TQQQ", "params": {"s_eff": "soon"}}, "之一"),
+                         ({"ticker": "TQQQ", "vol_source": "fixed"}, "fixed_vol"),
+                         ({"ticker": "TQQQ", "vol_source": "fixed", "fixed_vol": 3}, "固定波动"),
+                         ({"ticker": "TQQQ", "fixed_vol": 0.2}, "fixed_vol"),
+                         ({"ticker": "MAIN", "alpha_mode": "x"}, "alpha_mode"),
+                         ({"ticker": "TQQQ", "speed": 1}, "不认识的参数"), ({}, "缺少参数：ticker")):
+        r = client.post("/api/instruments/project", json=body)
+        assert r.status_code == 400 and needle in r.json()["detail"], (body, r.text[:200])
+    fixed = client.post("/api/instruments/project", json={"ticker": "QLD", "vol_source": "fixed", "fixed_vol": 0.25})
+    assert fixed.status_code == 200 and "fixed_vol" in fixed.json()["flags"]
+    drawn = client.post("/api/instruments/project", json={"ticker": "QQQI", "vol_source": "drawn"})
+    assert drawn.status_code in (200, 400), drawn.text[:200]          # needs the drawn months' RV table (data/)
+
+
+def test_custom_scenario_ticker_files_are_written_and_recomputed_alike(with_tickers):
+    """server.custom_run's tickers.write_custom: the layer on a custom run, saved like instrument_paths.npz (S = 1,
+    alpha variants included) with its macro paths; the service mixes it in and the project endpoint recomputes the
+    same numbers from the saved arrays."""
+    from types import SimpleNamespace
+    rng = np.random.default_rng(8)
+    n = 40
+    total = rng.normal(0.005, 0.04, (n, T, len(ASSETS))).astype(np.float32)
+    income = np.full_like(total, 0.002)
+    total[..., ASSETS.index("cash")] = income[..., ASSETS.index("cash")] = 0.003
+    macro = {k: v[0] for k, v in _macro(rng, 1, n).items()}
+    macro["cpi"] = (100.0 * 1.002 ** np.arange(T + 1) * np.ones((n, 1))).astype(np.float32)
+    sim = SimpleNamespace(total=total, income=income, macro=macro, idx=rng.integers(0, 600, (n, T)),
+                          assets=list(ASSETS), start="2026-09-30")
+    labels = [service._shift_label("2026-09", k) for k in range(T + 1)]
+    custom = with_tickers / "custom"
+    np.savez_compressed(custom / "c2.npz", total=total[None], income=income[None], cpi=macro["cpi"][None],
+                        ids=np.array(["c2"]), assets=np.array(ASSETS), labels=np.array(labels))
+    jsonio.dump({"id": "c2", "name": "自定义标的", "prior_prob": 0.1}, custom / "c2.json")
+    info = tk.write_custom(sim, _db(), "c2", custom, labels=labels)
+    assert info["saved"] and info["files"] == ["c2.instr.npz", "c2.macro.npz"]
+    blk = tk.load_block(custom / "c2.instr.npz")
+    assert blk.ids == ["c2"] and blk.n_paths == n and set(blk.alpha) == {"half", "raw"} and blk.fingerprint
+    service.clear_cache()
+    r = service.evaluate_withdrawal({"MAIN": 0.5, "QQQ": 0.5}, include_custom=["c2"], horizon_years=10,
+                                    alpha_mode="raw", strategy="pro_rata")
+    assert [e["id"] for e in r["strategies"]["pro_rata"]["per_scenario"]][-1] == "c2"
+    _write_macro(with_tickers)
+    p = tk.evaluate_project("MAIN", include_custom=["c2"])
+    j = blk.col("MAIN")
+    stored = np.cumprod(1.0 + blk.total[:, :, j].astype(np.float64), axis=1)[:, -1] ** (1 / 10) - 1
+    c2 = [e for e in p["per_scenario"] if e["id"] == "c2"][0]
+    assert c2["cagr10_p50"] == pytest.approx(float(np.percentile(stored, 50, method="hazen")), abs=1e-6)
+    assert c2["source"] == "custom" and c2["n_paths"] == n
+
+
+needs_tickers = pytest.mark.skipif(
+    not all((config.RESULTS_DIR / f).exists() for f in ("scenario_paths.npz", service.CONTINUATION_FILE, tk.PATHS_FILE,
+                                                         tk.CONTINUATION_FILE, tk.META_FILE)),
+    reason="instruments not built (python -m scenariolab.build --only instruments)")
+
+
+@needs_tickers
+def test_real_ticker_files_belong_to_the_built_paths_and_stay_fast():
+    """The built ticker files compose with the built scenario paths and their continuation (fingerprints), a row's
+    ticker years follow its scenario years, and a 12-ticker request stays within the T21 budget."""
+    service.clear_cache()
+    data = service.load_scenarios()
+    ts = data.tickers()
+    assert ts.continuation is not None, ts.continuation_issue
+    assert ts.continuation.info["asset_fingerprint"] == data.continuation.fingerprint()
+    assert ts.tickers == list(TICKERS) and ts.factors.total.shape[:2] == (data.factors.total.shape[0], data.years)
+    for k in ("total", "price", "income"):
+        assert np.isfinite(getattr(ts.continuation.factors, k)).all() and np.isfinite(getattr(ts.factors, k)).all()
+    weights = service.INSTRUMENT_PRESETS[0]["weights"]
+    t = time.time()
+    p = service.evaluate_portfolio(weights)
+    assert time.time() - t < 3.0 and len(p["instruments"]["tickers"]) == 12
+    t = time.time()
+    w = service.evaluate_withdrawal(weights, horizon_years=30)
+    assert time.time() - t < 15.0
+    t = time.time()
+    service.evaluate_withdrawal(weights, horizon_years=30, rate=0.035)      # cached critical rates
+    assert time.time() - t < 3.0
+    agg = {s: v["aggregate"]["ruin_prob_weighted"] for s, v in w["strategies"].items()}
+    assert agg["pro_rata"] <= agg["div_then_pro_rata"] + 0.05 and 0 < agg["pro_rata"] < 0.5
+    assert 1.2 < w["cash_flow"]["pot_share_y1"]["total"] < 2.5           # ~1.7x the 4% withdrawal (design 1.76x)
+    half = service.evaluate_withdrawal(weights, horizon_years=30, alpha_mode="half", strategy="pro_rata")
+    assert half["safe_rate"]["pro_rata"]["weighted"] < w["safe_rate"]["pro_rata"]["weighted"]

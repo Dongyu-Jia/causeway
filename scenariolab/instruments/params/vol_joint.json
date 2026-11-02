@@ -1,0 +1,59 @@
+{
+ "version": "instruments 1 (2026-11-01): instr-design d03 (monthly) / d02 (quarterly), refit by fit.vol_joint",
+ "train_end": "2014-12",
+ "monthly": {
+  "ndx": "structural.vol.rv_M",
+  "mkt": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd",
+    "dspread"
+   ],
+   "coef": [
+    -3.6646901306940265,
+    0.4839942745469399,
+    1.8463585026478997,
+    -8.619811984782604,
+    -1.0127440613561098,
+    0.5019477911872184
+   ],
+   "sigma": 0.586955555091256,
+   "n": 347
+  },
+  "rho": 0.7858643123925275,
+  "train": [
+   "1986-02",
+   "2014-12"
+  ],
+  "inputs": "x = log1p(p_<asset>) of the core, dspread = the Baa-10y change (pp), RV = sum of squared daily log returns (NDX: FRED NASDAQ100; market: Ken French Mkt-RF + RF)"
+ },
+ "quarterly": {
+  "ndx": "structural.vol.rv_Q",
+  "mkt": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd",
+    "dspread"
+   ],
+   "coef": [
+    -2.747459177323528,
+    0.5250972741581763,
+    0.4637328401228877,
+    -7.269360671974964,
+    -0.267441475366621,
+    0.2529609316586456
+   ],
+   "sigma": 0.44711174280000326,
+   "n": 115
+  },
+  "rho": 0.7296271079855581,
+  "train": [
+   "1986Q2",
+   "2014Q4"
+  ]
+ }
+}

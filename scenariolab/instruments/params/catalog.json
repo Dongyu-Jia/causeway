@@ -1,0 +1,665 @@
+{
+ "version": "instruments 1 (2026-11-01)",
+ "intro": [
+  "每个标的都是一份“配方”：在核心模拟的同一批路径上，用资产类别回报、因子与宏观路径（利率、信用利差）和波动率状态，推出它的价格、总回报和现金分配。",
+  "QQQ、QLD、TQQQ、QQQI、TLT、GLD 按产品机制推导：杠杆、期权和久期都是算出来的，不是拟合的。",
+  "XLG、SCHD、MO、BRK.B、三家 BDC、两家 MLP 和 BME 是用 2013 年以来的季度数据估计的“风格组合 + 因子 + 自身残差”。",
+  "预测（带判断的假设）只发生在情景层：在同一条路径上，标的之间、标的与资产类别之间永远一致。"
+ ],
+ "groups": [
+  {
+   "id": "nasdaq",
+   "name": "纳指系",
+   "tickers": [
+    "QQQ",
+    "QLD",
+    "TQQQ",
+    "QQQI"
+   ]
+  },
+  {
+   "id": "bond_gold",
+   "name": "债与金",
+   "tickers": [
+    "TLT",
+    "GOLD",
+    "GLD"
+   ]
+  },
+  {
+   "id": "dividend_value",
+   "name": "红利与价值",
+   "tickers": [
+    "XLG",
+    "SCHD",
+    "MO",
+    "BRK.B",
+    "BME"
+   ]
+  },
+  {
+   "id": "bdc",
+   "name": "BDC",
+   "tickers": [
+    "MAIN",
+    "ARCC",
+    "CSWC"
+   ]
+  },
+  {
+   "id": "mlp",
+   "name": "MLP",
+   "tickers": [
+    "EPD",
+    "MPLX"
+   ]
+  }
+ ],
+ "tickers": {
+  "QQQ": {
+   "name": "纳指100 ETF（QQQ）",
+   "kind": "structural",
+   "native": "any",
+   "cash": "指数股息 − 费率（约 0.3%）",
+   "card": "纳指 100 资产减费率：总回报 = 纳指资产回报 − {fee}/年；现金 = 指数股息 − 费率。",
+   "params": [],
+   "validation": [
+    {
+     "what": "N-PORT 2019-07..2026-06（84 个月）",
+     "actual": 0.224,
+     "model": 0.2228,
+     "te_ann": 0.0008,
+     "src": "QQQ"
+    }
+   ],
+   "sources": [
+    "FRED NASDAQ100",
+    "Ken French BusEq（股息代理）",
+    "SEC N-PORT（验证）"
+   ],
+   "limits": [
+    "股息用 BusEq 代理，与 QQQ 实际毛股息率差 ±0.4%"
+   ]
+  },
+  "QLD": {
+   "name": "两倍纳指（QLD，日度 2×）",
+   "kind": "structural",
+   "native": "M",
+   "cash": "0（实际 0–0.3%）",
+   "card": "每天 2 倍纳指 100（日度再平衡，按日对数回报展开到四阶）：期间对数回报 = 2 × 指数对数回报 − 期内方差 + 期内三阶矩 − 1.08 × 期内四阶矩 + 2 × 股息 − (联邦基金利率 + 互换利差) × 365/360 − 费率 {fee}。",
+   "params": [
+    {
+     "id": "s_eff",
+     "name": "互换利差",
+     "default": "mean_2019_2026",
+     "options": {
+      "mean_2019_2026": 0.0081,
+      "latest": 0.0143,
+      "train_2006_2018": 0.0075
+     },
+     "range": [
+      0.0,
+      0.03
+     ]
+    },
+    {
+     "id": "ruin",
+     "name": "爆仓抽签",
+     "default": true
+    }
+   ],
+   "validation": [
+    {
+     "what": "只给月度输入的历史回放，全期 2006-07..2026-09（样本内外两个方向的误差相互抵消）",
+     "sample": "full",
+     "src": "QLD",
+     "actual": 0.2535,
+     "model": 0.2527,
+     "rmse_monthly": 0.0051
+    },
+    {
+     "what": "其中样本内 2006-07..2018-12（波动模型拟合到 2014-12，2019 年以前的融资利差在这些月份的净值上拟合）",
+     "sample": "in",
+     "src": "QLD.windows.in_sample",
+     "actual": 0.1857,
+     "model": 0.1763,
+     "rmse_monthly": 0.0037,
+     "t3_pass": false
+    },
+    {
+     "what": "其中样本外 2019-01..2026-09（融资利差只用每月之前披露的互换条款；T3 容差 年化差 ≤ 0.5%、月 RMSE ≤ 0.6%）",
+     "sample": "oos",
+     "src": "QLD.windows.oos",
+     "actual": 0.371,
+     "model": 0.3865,
+     "rmse_monthly": 0.0068,
+     "t3_pass": false
+    },
+    {
+     "what": "同一公式用每月实际的期内方差、三阶矩、四阶矩（日度数据）：样本内",
+     "sample": "in",
+     "src": "QLD.actual_rv.windows.in_sample",
+     "actual": 0.1857,
+     "model": 0.1855,
+     "t3_pass": true
+    },
+    {
+     "what": "同一公式用实际期内波动：样本外 2019-01..2026-09（误差来自期内波动模型的水平，而不是杠杆公式）",
+     "sample": "oos",
+     "src": "QLD.actual_rv.windows.oos",
+     "actual": 0.371,
+     "model": 0.3738,
+     "t3_pass": true
+    }
+   ],
+   "sources": [
+    "ProShares 每日 NAV（本地，不再分发）",
+    "SEC N-PORT 互换条款",
+    "FRED 纳指 100 与联邦基金利率"
+   ],
+   "limits": [
+    "期内波动的水平是唯一要建模的输入，也是主要误差：只给月度输入时，波动模型高估了 2006–18 年纳指的期内方差（2010–18 年约高 40%）、低估了 2019–26 年的（约低 15%），所以样本外（2019–26）模型每年高估 QLD 约 1.6%、TQQQ 约 4.6%，没有通过 T3；用实际期内波动时，公式在两个窗口都在容差内。",
+    "融资利差的未来水平是情景假设（2024–26 年翻倍）",
+    "“月收益不大但月内剧烈波动”的月份（2020-03）拖累被低估",
+    "现金分配记为 0"
+   ],
+   "breakeven": "μ + q − b − s > (L+1)·σ²/2 + (fee_L − fee_1)/(L−1)：期内波动 24%、融资 4.9% 时，纳指 100 的算术总回报要超过每年 14.2%，QLD 才跑赢 QQQ。"
+  },
+  "TQQQ": {
+   "name": "三倍纳指（TQQQ，日度 3×）",
+   "kind": "structural",
+   "native": "M",
+   "cash": "0（实际 0–1.9%）",
+   "card": "每天 3 倍纳指 100（日度再平衡，按日对数回报展开到四阶）：期间对数回报 = 3 × 指数对数回报 − 3 × 期内方差 + 5 × 期内三阶矩 − 9.25 × 期内四阶矩 + 3 × 股息 − 2 × (联邦基金利率 + 互换利差) × 365/360 − 费率 {fee}。",
+   "params": [
+    {
+     "id": "s_eff",
+     "name": "互换利差",
+     "default": "mean_2019_2026",
+     "options": {
+      "mean_2019_2026": 0.0088,
+      "latest": 0.0155,
+      "train_2006_2018": 0.006
+     },
+     "range": [
+      0.0,
+      0.03
+     ]
+    },
+    {
+     "id": "ruin",
+     "name": "爆仓抽签",
+     "default": true
+    }
+   ],
+   "breakeven": "μ + q − b − s > (L+1)·σ²/2 + (fee_L − fee_1)/(L−1)：期内波动 24%、融资 4.9% 时，纳指 100 的算术总回报要超过每年 16.7%，TQQQ 才跑赢 QQQ。",
+   "validation": [
+    {
+     "what": "只给月度输入的历史回放，全期 2010-03..2026-09（样本内外两个方向的误差相互抵消）",
+     "sample": "full",
+     "src": "TQQQ",
+     "actual": 0.4247,
+     "model": 0.4168,
+     "rmse_monthly": 0.0139
+    },
+    {
+     "what": "其中样本内 2010-03..2018-12（波动模型拟合到 2014-12，2019 年以前的融资利差在这些月份的净值上拟合）",
+     "sample": "in",
+     "src": "TQQQ.windows.in_sample",
+     "actual": 0.4036,
+     "model": 0.3512,
+     "rmse_monthly": 0.0077,
+     "t3_pass": false
+    },
+    {
+     "what": "其中样本外 2019-01..2026-09（融资利差只用每月之前披露的互换条款；T3 容差 年化差 ≤ 1.0%、月 RMSE ≤ 1.5%）",
+     "sample": "oos",
+     "src": "TQQQ.windows.oos",
+     "actual": 0.449,
+     "model": 0.4954,
+     "rmse_monthly": 0.0186,
+     "t3_pass": false
+    },
+    {
+     "what": "同一公式用每月实际的期内方差、三阶矩、四阶矩（日度数据）：样本内",
+     "sample": "in",
+     "src": "TQQQ.actual_rv.windows.in_sample",
+     "actual": 0.4036,
+     "model": 0.4038,
+     "t3_pass": true
+    },
+    {
+     "what": "同一公式用实际期内波动：样本外 2019-01..2026-09（误差来自期内波动模型的水平，而不是杠杆公式）",
+     "sample": "oos",
+     "src": "TQQQ.actual_rv.windows.oos",
+     "actual": 0.449,
+     "model": 0.4524,
+     "t3_pass": true
+    }
+   ],
+   "sources": [
+    "ProShares 每日 NAV（本地，不再分发）",
+    "SEC N-PORT 互换条款",
+    "FRED 纳指 100 与联邦基金利率"
+   ],
+   "limits": [
+    "期内波动的水平是唯一要建模的输入，也是主要误差：只给月度输入时，波动模型高估了 2006–18 年纳指的期内方差（2010–18 年约高 40%）、低估了 2019–26 年的（约低 15%），所以样本外（2019–26）模型每年高估 QLD 约 1.6%、TQQQ 约 4.6%，没有通过 T3；用实际期内波动时，公式在两个窗口都在容差内。",
+    "爆仓概率是外推（主要由 1987-10-19 一天决定）",
+    "融资利差的未来水平是情景假设"
+   ]
+  },
+  "QQQI": {
+   "name": "纳指备兑收益（QQQI）",
+   "kind": "structural",
+   "native": "M",
+   "cash": "NAV 的 14.3%/年，按月",
+   "card": "纳指 100 + 每月两档卖出看涨（行权价 1.019 / 1.034 倍，各覆盖约 31%），期权费按 Black–Scholes 在 0.855 × VXN 上计算，费率 {fee}。",
+   "params": [
+    {
+     "id": "coverage",
+     "name": "覆盖率",
+     "default": 0.627,
+     "options": {
+      "mean_2024_2026": 0.627,
+      "latest": 0.545
+     },
+     "range": [
+      0.0,
+      1.0
+     ]
+    },
+    {
+     "id": "dist_rule",
+     "name": "分配规则",
+     "default": "nav_rate",
+     "options": {
+      "nav_rate": "NAV 的 14.3%/年",
+      "premium_plus_dividend": "只分配期权费 + 股息"
+     }
+    },
+    {
+     "id": "dist_rate",
+     "name": "分配率",
+     "default": 0.1434,
+     "range": [
+      0.0,
+      0.25
+     ]
+    }
+   ],
+   "validation": [
+    {
+     "what": "N-PORT 2024-02..2026-06（29 个月，用 VXN；覆盖率与两档行权价取自同期 11 份 N-PORT：样本内）",
+     "actual": 0.2257,
+     "model": 0.2228,
+     "rmse_monthly": 0.0081,
+     "sample": "in",
+     "src": "QQQI"
+    },
+    {
+     "what": "QYLD 对照 2019-08..2026-07（84 个月）",
+     "actual": 0.086,
+     "model": 0.082,
+     "rmse_monthly": 0.0097,
+     "sample": "oos",
+     "src": "QYLD"
+    }
+   ],
+   "sources": [
+    "SEC N-PORT（持仓与期权）",
+    "NEOS 分配表与 Form 8937",
+    "FRED / Cboe VXN"
+   ],
+   "limits": [
+    "只有 29 个月历史；不用 VXN 时约高估 2%/年",
+    "覆盖率从 71% 漂到 54%；主动展期、价差、偏斜没有建模"
+   ],
+   "tax_note": "分配约 99.6% 为资本返还（Form 8937，2025 年 6–12 月）：分配高于期权费+股息时每股净值缩水"
+  },
+  "TLT": {
+   "name": "20 年以上美债（TLT）",
+   "kind": "structural",
+   "native": "M",
+   "cash": "票息收益率（当期收益率/YTM 0.857，7 年半衰回到 1）",
+   "card": "TLT 收益率 = 0.513 × 20 年 + 0.487 × 30 年（由核心的 10 年期与期限利差误差修正推出）；月回报 = 收益率/12 − D(y)·Δy + ½C(y)·Δy² − {fee}/12，D(y) = 20.96 − 95.2y，C(y) = 514 − 3191y。",
+   "params": [
+    {
+     "id": "cy_halflife_years",
+     "name": "当期收益率回到 YTM 的半衰期（年）",
+     "default": 7.0,
+     "range": [
+      1.0,
+      20.0
+     ]
+    }
+   ],
+   "validation": [
+    {
+     "what": "实际 20/30 年收益率 2019-09..2026-08",
+     "actual": -0.0518,
+     "model": -0.0508,
+     "rmse_monthly": 0.0048
+    },
+    {
+     "what": "模拟可得的 10 年 + 利差模型",
+     "actual": -0.0518,
+     "model": -0.0418,
+     "rmse_monthly": 0.0124
+    }
+   ],
+   "sources": [
+    "SEC N-PORT 持仓（久期与凸性）",
+    "FRED DGS10/20/30、联邦基金利率"
+   ],
+   "limits": [
+    "D(y)、C(y) 只覆盖 1.4–5.3% 的收益率区间",
+    "2023–26 年期限溢价上升，模型低估长端约 20bp",
+    "当期收益率回到 YTM 的速度是假设"
+   ]
+  },
+  "GOLD": {
+   "name": "黄金（金价）",
+   "kind": "alias",
+   "asset": "gold",
+   "native": "any",
+   "cash": "0",
+   "card": "金价就是核心的黄金资产本身（伦敦金价月均价），不另占一列。",
+   "params": [],
+   "validation": [],
+   "sources": [
+    "datasets/gold-prices（核心面板）"
+   ],
+   "limits": [
+    "金价为月均价：月度波动和回撤被低估"
+   ]
+  },
+  "GLD": {
+   "name": "黄金 ETF（GLD）",
+   "kind": "structural",
+   "native": "any",
+   "cash": "0",
+   "card": "GLD = 金价 − {fee}/年（赞助费每天以黄金支付）。",
+   "params": [],
+   "validation": [],
+   "sources": [
+    "datasets/gold-prices（核心面板）"
+   ],
+   "limits": [
+    "金价为月均价：月度波动约低估 18%"
+   ]
+  },
+  "XLG": {
+   "name": "标普前 50 大（XLG）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "按指数股息比例",
+   "card": "季度 log 回报 = 现金 + 0.712 × (美股 − 现金) + 0.288 × (纳指 − 现金) + α(−0.5%/年) + 残差（3.9%/年）。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.95,
+      0.94,
+      0.92
+     ],
+     "r2_market": [
+      0.92,
+      0.93,
+      0.92
+     ]
+    }
+   ]
+  },
+  "SCHD": {
+   "name": "美国红利（SCHD）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性",
+   "card": "行业组合：必需消费 0.47、工业 0.13、金融 0.10、能源 0.09、公用 0.08、医疗 0.07、REITs 0.05；α +1.6%/年（收缩后），残差 4.9%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.87,
+      0.9,
+      0.8
+     ],
+     "r2_market": [
+      0.55,
+      0.68,
+      0.54
+     ]
+    }
+   ]
+  },
+  "MO": {
+   "name": "奥驰亚（MO）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性",
+   "card": "必需消费 0.90 + 能源 0.13 + 公用 0.06；α +0.6%/年（原始 +4.1% 收缩到 0），残差 17.2%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.43,
+      0.51,
+      0.44
+     ],
+     "r2_market": [
+      0.17,
+      0.11,
+      -0.01
+     ]
+    }
+   ]
+  },
+  "BRK.B": {
+   "name": "伯克希尔（BRK.B）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "0",
+   "card": "金融 0.40 + 公用 0.30 + 必需消费 0.10，另有两成现金；α +0.6%/年，残差 14.4%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.34,
+      0.52,
+      0.42
+     ],
+     "r2_market": [
+      0.18,
+      0.4,
+      0.35
+     ]
+    }
+   ]
+  },
+  "MAIN": {
+   "name": "Main Street（MAIN，BDC）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性 + 短端利率（按月支付）",
+   "card": "0.5 × 现金 + 金融 0.145 + 美股 0.037 + GZ 利差 −0.249/pp；α +6.5%/年（贷款信用溢价，收缩到 BDC 组均值），残差 12.7%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.7,
+      0.61,
+      0.63
+     ],
+     "r2_market": [
+      0.4,
+      0.21,
+      0.03
+     ]
+    }
+   ]
+  },
+  "ARCC": {
+   "name": "Ares Capital（ARCC，BDC）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性 + 短端利率",
+   "card": "0.5 × 现金 + 金融 0.165 + GZ 利差 −0.187/pp；α +5.9%/年，残差 9.0%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.81,
+      0.68,
+      0.69
+     ],
+     "r2_market": [
+      0.44,
+      0.32,
+      -0.08
+     ]
+    }
+   ]
+  },
+  "CSWC": {
+   "name": "Capital Southwest（CSWC，BDC）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性 + 短端利率",
+   "card": "BDC 池化载荷：0.5 × 现金 + 金融 0.192 + GZ 利差 −0.200/pp；α +6.7%/年，残差 15.5%/年（2016 年起）。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，2019 年底切分）",
+     "r2": [
+      0.64,
+      0.56,
+      0.71
+     ],
+     "r2_market": [
+      0.13,
+      0.27,
+      0.38
+     ]
+    }
+   ]
+  },
+  "EPD": {
+   "name": "Enterprise Products（EPD，MLP）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性 + 冻结规则",
+   "card": "能源 0.52 + 公用 0.23 + 美股 0.01 + GZ 利差 −0.076/pp；α +2.1%/年，残差 11.2%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.83,
+      0.78,
+      0.76
+     ],
+     "r2_market": [
+      0.19,
+      -0.36,
+      -0.88
+     ]
+    }
+   ]
+  },
+  "MPLX": {
+   "name": "MPLX（MLP）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "粘性 + 冻结规则",
+   "card": "MLP 池化载荷：能源 0.49 + 美股 0.07 + 公用 0.05 + GZ 利差 −0.115/pp；α +2.5%/年，残差 15.4%/年（2016 年起）。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.8,
+      0.75,
+      0.73
+     ],
+     "r2_market": [
+      0.26,
+      -0.05,
+      -0.45
+     ]
+    }
+   ]
+  },
+  "BME": {
+   "name": "贝莱德健康科学信托（BME，封闭式基金）",
+   "kind": "estimated",
+   "native": "Q",
+   "cash": "管理型粘性（按月支付）",
+   "card": "医疗 0.975 + 美股 0.04；α −1.0%/年（费率 {fee}），残差 6.8%/年。",
+   "validation": [
+    {
+     "what": "样本外 R²（1/4/8 季，扩展窗口）",
+     "r2": [
+      0.86,
+      0.87,
+      0.88
+     ],
+     "r2_market": [
+      0.42,
+      0.24,
+      0.18
+     ]
+    }
+   ]
+  }
+ },
+ "estimated_common": {
+  "params": [
+   {
+    "id": "alpha_mode",
+    "name": "α",
+    "default": "shrunk",
+    "options": {
+     "shrunk": "收缩后（默认）",
+     "half": "减半",
+     "raw": "原始"
+    }
+   }
+  ],
+  "sources": [
+   "SEC 13F 数据集季末价（2013 起，几百家机构中位数）",
+   "SEC XBRL / N-CSR 分配",
+   "核心资产类别与 GZ 利差"
+  ],
+  "limits": [
+   "2013 年以前没有价格：2008 年不在样本里",
+   "季内月度路径为布朗桥拆分（假设）",
+   "粘性分配的削减规则是假设：分配让收益率（按 4 个季末均价）超过正常水平的 2 倍时，削减到正常收益率；样本里没有可用来估计它的 BDC / MLP 削减。"
+  ]
+ },
+ "chips": {
+  "estimated": "估计型 · 2013 年起的季末价格（13F）",
+  "bridge_month": "季内月度路径为布朗桥拆分（假设）",
+  "credit_link": "与股市的联动低于历史（核心问题）",
+  "credit_link_ok": "与股市的联动接近历史（模拟与历史相差不超过 0.15）",
+  "gold_avg": "金价为月均价：月度波动和回撤被低估",
+  "ruin_extrap": "归零概率是外推（主要由 1987-10-19 一天决定）",
+  "qqqi_short": "QQQI 只有 29 个月历史；不用 VXN 时约高估 2%/年",
+  "tax": "税前",
+  "start_est": "起点价格为估计（13F 2026-06-30 推一季）",
+  "no_2008": "样本里没有 2008 年",
+  "fixed_vol": "固定波动：敏感性，不是推演",
+  "long_yield_range": "收益率超出久期/凸性的拟合区间（1.4–5.3%）",
+  "rv_level": "期内波动的水平是主要误差：只用月度输入时，样本外（2019–26）TQQQ 每年高估约 4.6%、QLD 约 1.6%",
+  "payout_cut": "收益率超过正常水平 2 倍时按正常收益率削减分配（假设）"
+ },
+ "withdrawal_note": [
+  "标的的分配来自各自的分配模型。",
+  "BDC、MLP、MO、SCHD、BME 为粘性分配，向各自的正常收益率回归；QQQI 为每年 NAV 的 14.3%；TLT 为票息收益率；QQQ、XLG 为指数股息；杠杆 ETF 与 BRK.B 为 0。",
+  "资产类别仍按引擎口径，即今天的股息率乘以当时的市值。",
+  "全部为税前。"
+ ],
+ "alpha_note": "α 是历史上相对风格组合的超额回报。BDC 的约 +6% 是贷款信用溢价；它在 30 年里决定了大部分差异。",
+ "errors": {
+  "paths_missing": "标的路径还没有生成：请运行 python -m scenariolab.build --only instruments",
+  "unknown": "未知资产或标的：{id}",
+  "custom_old": "该自定义情景是在标的层上线前保存的，请重新运行以包含标的"
+ },
+ "note": "{fee} in a card is filled from params/fees.json by catalog.entries() (the one fee table)"
+}

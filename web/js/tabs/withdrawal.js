@@ -4,13 +4,21 @@
 // paths are 15 years long: from year 16 on there is no scenario theme and every path goes on with an
 // unconditional engine path of its own (portfolio/service.py, continuation_paths.npz), so the figures at the
 // chosen horizon are shown next to their 15-year (scenario-themed) counterparts (`scenario_horizon`).
-// Inputs (_weights.js) are shared with 组合评估.
-// Deep links: #withdrawal?income, #withdrawal?rate=3.5&horizon=10&nominal&strategy=div_then_winners&scenario=stagflation
+// The weights may hold tickers (标的, _tickers.js): their cash comes from each ticker's own distribution model, so
+// the dividend-first strategies spend real payouts; the 现金流 section shows year-1 cash against the withdrawal,
+// coverage by year and payout-cut pressure, and the estimated tickers' α (收缩后 / 减半 / 原始) is an explicit
+// choice, with the three versions side by side. Inputs are shared with 组合评估.
+// Deep links: #withdrawal?income, #withdrawal?rate=3.5&horizon=10&nominal&strategy=div_then_winners&scenario=stagflation,
+// #withdrawal?preset=income_tickers&alpha=half, #withdrawal?w=MAIN:10,QQQI:15,SCHD:20
 import {
-  shared, weightsEditor, probEditor, customPicker, statusPill, liveRequest, debounce, errorNotice, parseParam,
-  parseWeightsParam, scenarioRows, rangeChart, labelWidth, rowsHeight, shortName, fmtProb, weightsLabel, isNum, esc,
-  niceAxis, plainNote, FALLBACK_PRESETS, injectStyle,
+  shared, probEditor, customPicker, statusPill, liveRequest, debounce, errorNotice, parseParam,
+  scenarioRows, rangeChart, labelWidth, rowsHeight, shortName, fmtProb, isNum, esc,
+  niceAxis, plainNote, injectStyle,
 } from './_weights.js';
+import {
+  portfolioEditor, allPresets, loadCatalog, parseLinkWeights, isEstimated, holdingsCard, cashFlowView, alphaCompare,
+  weightsText, catalog, TK,
+} from './_tickers.js';
 
 const INK = '#1d2433', INK2 = '#4a5468', INK3 = '#7a8396', LINE = '#e3e6ec';
 const STRATS = [
@@ -42,6 +50,7 @@ const RUIN_PIECES_LONG = [
   { gt: 0.5, label: '>50%', color: '#a51d24' },
 ];
 const RATE_CAP = 0.2;            // portfolio/withdrawal.py RATE_BOUNDS: the safe-rate search stops here
+const ALPHA_MODES = [{ value: 'shrunk', label: '收缩后（默认）' }, { value: 'half', label: '减半' }, { value: 'raw', label: '原始' }];
 // portfolio/service.py HORIZON_BOUNDS and DEFAULT_HORIZON: the horizons the API accepts, and this page's default
 const HORIZON_MIN = 10, HORIZON_MAX = 40, HORIZON_DEFAULT = 30;
 const CONT_SHADE = 'rgba(122, 131, 150, 0.09)';    // the continuation years on the time charts
@@ -101,7 +110,7 @@ function injectHorizonStyle(h) {
 `));
 }
 
-export async function render(root, { api, charts, ui, meta, param }) {
+export async function render(root, { api, charts, ui, meta, param, rerender }) {
   injectStyle();
   const { h, card } = ui;
   injectHorizonStyle(h);
@@ -136,6 +145,11 @@ export async function render(root, { api, charts, ui, meta, param }) {
   const st = q.kv.strategy || take(t => STRATS.some(s => s.id === t));
   if (STRATS.some(s => s.id === st)) strat = st;
   let wantScope = q.kv.scenario || null;
+  if (q.kv.alpha !== undefined && !rerender) {
+    if (ALPHA_MODES.some(m => m.value === q.kv.alpha)) TK.alpha = q.kv.alpha;
+    else linkNotes.push(`链接里的 α「${String(q.kv.alpha).slice(0, 20)}」不认识（可选 shrunk / half / raw）`);
+  }
+  const assetIds = (meta?.assets || []).map(a => a.id);
 
   // `root` (#view) is reused by whichever tab opens next, so "is this page still showing" is
   // checked on a node of our own: the lead paragraph, later the results container.
@@ -144,24 +158,35 @@ export async function render(root, { api, charts, ui, meta, param }) {
     '比较三种提取方式在每个情景里会不会破产（钱不够付当年的提取额）。破产概率按情景概率加权汇总，',
     '安全提取率是破产概率不超过 5% 的最高提取率；所有数字都由引擎在模拟路径上算出。',
     `期限默认 ${HORIZON_DEFAULT} 年（4% 法则说的就是 30 年）；情景路径只有 ${themedYears} 年，再往后没有情景主题，按历史月份无条件续抽，`,
-    `所以每个数字旁边都给出前 ${themedYears} 年（情景主题内）的对照。`);
+    `所以每个数字旁边都给出前 ${themedYears} 年（情景主题内）的对照。`,
+    '组合里可以放标的：BDC、MLP、QQQI、SCHD 等按各自的分配模型付现金，“先用分红”的现金池用的就是这些分配；',
+    '下方的“现金流”一节给出第一年现金能付提取额的几倍、每年的覆盖和分配削减的压力。');
   root.append(lead);
 
   const defaultsP = api.get('portfolio_default').catch(err => ({ error: err }));
   const scenP = api.get('scenarios').catch(err => ({ error: err }));
-  const presetsOf = (d) => (d && !d.error && Array.isArray(d.presets) && d.presets.length ? d.presets : FALLBACK_PRESETS);
-  // a preset named in the link needs the preset list before the editor starts
-  const defaults = tokens.length || q.kv.preset ? await defaultsP : null;
+  const catP = loadCatalog();
+  // a preset named in the link needs the preset list before the editor starts; the ticker rows need the catalog
+  const [defaults, cat] = await Promise.all([tokens.length || q.kv.preset ? defaultsP : null, catP]);
   if (!lead.isConnected) return;       // the user moved on while the preset list loaded
-  const presetId = q.kv.preset || take(t => presetsOf(defaults).some(p => p.id === t));
-  let initial = presetsOf(defaults).find(p => p.id === presetId)?.weights || null;
-  if (q.kv.w && Object.keys(parseWeightsParam(q.kv.w)).length) initial = parseWeightsParam(q.kv.w);
+  const presets = allPresets(defaults, cat);
+  const presetId = q.kv.preset || take(t => presets.some(p => p.id === t));
+  let initial = presets.find(p => p.id === presetId)?.weights || null;
+  if (rerender) initial = null;        // the K-line toggle redraws the page: keep the reader's weights
+  if (q.kv.w && !rerender) {
+    const lw = parseLinkWeights(q.kv.w, assetIds.length ? assetIds : undefined);
+    if (Object.keys(lw.weights).length) initial = lw.weights;
+    if (lw.unknown.length) linkNotes.push(`链接里的权重有无法识别的资产或标的：${lw.unknown.join('、')}`);
+  }
 
   // ---- inputs
   let scen = null, probInfo = {};
   const pill = statusPill();
-  const editor = weightsEditor({ assets: meta?.assets, presets: presetsOf(defaults), initial, cls: 'span-2',
-    onChange: () => refresh() });
+  const amountHint = h('div', { class: 'withdrawal-amount' });
+  const editor = portfolioEditor({ assets: meta?.assets, presets, initial, cls: 'span-2',
+    onChange: () => refresh(), amountBase: () => params.initial, onAmount: (tot) => paintAmount(tot) });
+  editor.setCatalog(cat);
+  const heldEstimated = () => editor.heldTickers().some(isEstimated);
   const probs = probEditor({ onChange: () => refresh() });
   const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); refresh(); } });
   const schedule = debounce(() => refresh(), 400);
@@ -218,21 +243,48 @@ export async function render(root, { api, charts, ui, meta, param }) {
     rateIn.value = String(+(params.rate * 100).toFixed(2));
   });
   horizonRange.addEventListener('input', () => { params.horizon = Number(horizonRange.value); paintHints(); schedule(); });
+  // 按金额 in the weights editor: offer its total as the initial wealth
+  function paintAmount(tot) {
+    if (!(isNum(tot) && tot > 0)) { amountHint.replaceChildren(); return; }
+    const same = Math.abs(tot - params.initial) < 0.5;
+    amountHint.replaceChildren(...[h('span', { class: 'muted' }, `组合按金额合计 ${money(tot)}${same ? '，与初始资产相同' : ''}`),
+      same ? null : h('button', { class: 'btn', onclick: () => {
+        params.initial = tot;
+        initialIn.value = String(Math.round(tot / 100) / 100);
+        paintHints();
+        paintAmount(tot);
+        schedule.flush();
+      } }, '设为初始资产')].filter(Boolean));
+  }
+  // the estimated tickers' α: an explicit choice (INSTRUMENTS_DESIGN §7.4), only meaningful when one is held
+  const alphaSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '估计型标的的 α' });
+  const alphaHint = h('div', { class: 'muted' });
+  function paintAlpha() {
+    const on = heldEstimated();
+    alphaSeg.replaceChildren(...ALPHA_MODES.map(m => h('button', { type: 'button', class: m.value === TK.alpha ? 'on' : '',
+      disabled: on ? null : true, onclick: () => { if (TK.alpha === m.value) return; TK.alpha = m.value; paintAlpha(); schedule.flush(); } }, m.label)));
+    alphaHint.textContent = on
+      ? `${catalog()?.alpha_note || 'α 是历史上相对风格组合的超额回报。'}默认用收缩后的版本，减半与原始只作对照；下方“α 的影响”同时给出三个版本的破产概率和安全提取率。`
+      : '当前组合没有估计型标的（BDC、MLP、SCHD、MO、BRK.B、XLG、BME），α 不影响结果。';
+  }
   const probState = h('span', { class: 'muted' });
   const paintProbState = () => { probState.textContent = probs.label(); };   // posterior, calibrated or hand-set
   paintHints();
   paintProbState();
+  paintAlpha();
+  paintAmount(editor.amountTotal());
 
   const field = (title, ...body) => h('div', { class: 'withdrawal-field' }, h('div', { class: 't' }, title), ...body);
   root.append(h('div', { class: 'grid cols-3' }, editor.el,
     card({ title: '提取参数', sub: '破产概率只取决于提取率，初始金额只决定财富数字的大小', cls: 'weights-side' },
       h('div', { class: 'withdrawal-form' },
-        field('初始资产（万）', h('div', { class: 'withdrawal-inline' }, initialIn, initialHint)),
+        field('初始资产（万）', h('div', { class: 'withdrawal-inline' }, initialIn, initialHint), amountHint),
         field('年提取率（占初始资产）', h('div', { class: 'withdrawal-inline' }, rateRange, rateIn, h('span', { class: 'muted' }, '%')), rateHint),
         field('通胀挂钩', ui.seg([{ value: 'real', label: '随通胀上调' }, { value: 'nominal', label: '名义固定' }],
           params.indexed ? 'real' : 'nominal', (v) => { params.indexed = v === 'real'; paintHints(); schedule.flush(); })),
         field('期限', h('div', { class: 'withdrawal-inline' }, horizonRange, horizonVal), horizonHint),
         ui.notice('每年年末提取一次（第一次在满 1 年时）；随通胀上调时，提取额按该路径自己的 CPI 逐年调高，始终保持期初的购买力。', 'info'),
+        field('估计型标的的 α', alphaSeg, alphaHint),
         field('纳入已保存的自定义情景', picker.el),
         field('情景概率', h('div', { class: 'row' }, probState,
           h('button', { class: 'btn', onclick: () => probs.el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '调整情景概率')))))));
@@ -249,10 +301,14 @@ export async function render(root, { api, charts, ui, meta, param }) {
 
   // ---- results view (built on the first result)
   let view = null, shown = null, idx = null;
+  const cash = cashFlowView({ strategies: STRATS });
+  const alphaBox = alphaCompare({ strategies: STRATS });
+  const alphaWrap = h('div', { style: { display: 'none', marginTop: '16px' } }, alphaBox.el);
   function buildView() {
     const v = {
       head: h('div', { class: 'section-title' }), summary: h('div', { class: 'portfolio-summary' }),
       cont: h('div', {}), kpis: h('div', { class: 'grid cols-4' }), compare: h('div', { class: 'withdrawal-compare' }),
+      holdings: h('div', {}),
       heat: ui.chartBox('tall'), curve: ui.chartBox('tall'), safe: ui.chartBox('tall'), surv: ui.chartBox('tall'),
       fan: ui.chartBox('tall'), term: ui.chartBox('tall'), extremes: h('div', { class: 'withdrawal-extremes' }),
       table: h('div', { class: 'withdrawal-table' }),
@@ -281,9 +337,10 @@ export async function render(root, { api, charts, ui, meta, param }) {
       '按破产概率排序（相同时比较期末实际财富）：最坏情景就是这个提取计划最怕的宏观环境。', v.extremes);
     [tableCard, v.tableTitle] = titled('各情景明细', '概率是计算所用的情景概率；耗尽年份 = 破产路径用光资产的年份中位数（没有路径破产时为 —）。', v.table);
     results.replaceChildren(
-      v.head, v.summary, v.cont, v.kpis, v.compareCard,
+      v.head, v.summary, v.cont, v.kpis, v.compareCard, v.holdings, alphaWrap,
       h('div', { class: 'withdrawal-toolbar' },
-        h('span', {}, '图表范围'), v.scopeSel, h('span', {}, '财富图与明细表的策略'), v.stratSeg),
+        h('span', {}, '图表范围'), v.scopeSel, h('span', {}, '财富图、现金覆盖与明细表的策略'), v.stratSeg),
+      cash.el,
       h('div', { class: 'section-title' }, '破产概率从哪里来'),
       h('div', { class: 'weights-pair' }, heatCard, curveCard),
       h('div', { class: 'section-title' }, '安全提取率与存活曲线'),
@@ -658,7 +715,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
   }
 
   const drawScoped = () => { if (!shown) return; drawCurve(shown); drawSurv(shown); drawFan(shown); drawTable(shown); };
-  const drawStrategy = () => { if (!shown) return; drawFan(shown); drawTerm(shown); drawTable(shown); };
+  const drawStrategy = () => { if (!shown) return; drawFan(shown); drawTerm(shown); drawTable(shown); cash.drawCover(shown, strat); };
 
   // adjusted: which scenario probabilities the request that produced `res` carried: 'calibrated' (the set
   // calibrated to the one-year forecast), true (hand-set) or false (none: the model posterior)
@@ -675,15 +732,22 @@ export async function render(root, { api, charts, ui, meta, param }) {
     const part = partOf(res);
     const custom = idx.list.filter(e => e.source === 'custom').length;
     view.head.textContent = `${res.horizon_years} 年内三种提取方式的破产概率（按情景概率加权）`;
+    const est = (res.instruments?.estimated || []).length > 0;
     view.summary.textContent = [
-      weightsLabel(res.weights), `初始 ${money(res.initial)}`, `每年提取 ${rateTxt(res.rate)}（${money(res.annual_withdrawal)}）`,
+      weightsText(res.weights), `初始 ${money(res.initial)}`, `每年提取 ${rateTxt(res.rate)}（${money(res.annual_withdrawal)}）`,
       res.inflation_indexed ? '随通胀上调' : '名义固定',
+      est ? `估计型标的 α：${res.instruments.alpha_mode_name || res.instruments.alpha_mode}` : null,
       part ? `${res.horizon_years} 年（前 ${part.years} 年情景 + ${res.horizon_years - part.years} 年无条件续抽）` : `${res.horizon_years} 年`,
       `${idx.list.length} 个情景${custom ? `（含 ${custom} 个自定义）` : ''}`,
       adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : '模型后验概率',
-    ].join(' · ');
+    ].filter(Boolean).join(' · ');
     view.cont.replaceChildren(contNote(res));
     view.kpis.replaceChildren(...kpis(res));
+    const hc = holdingsCard(res, { scenarioYears: res.scenario_years ?? themedYears, include: shared.include });
+    view.holdings.replaceChildren(...(hc ? [hc] : []));
+    view.holdings.style.marginTop = hc ? '16px' : '';
+    alphaWrap.style.display = est ? '' : 'none';
+    cash.show(res, strat);
     drawCompare(res);
     notesList.replaceChildren(...(res.notes || []).map(n => h('li', { class: 'muted' }, plainNote(n))));
     drawExtremes(res);
@@ -702,6 +766,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
     if (!weights) return null;
     const b = { weights, initial: params.initial, rate: params.rate, strategy: 'all',
       inflation_indexed: params.indexed, horizon_years: params.horizon };
+    if (TK.alpha !== 'shrunk' && heldEstimated()) b.alpha_mode = TK.alpha;
     if (shared.include.length) b.include_custom = shared.include.slice();
     const sp = probs.overrides();
     if (sp) b.scenario_probs = sp;
@@ -714,7 +779,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
   // portfolio it cannot evaluate, so the page watches the editor itself and hides the previous portfolio's
   // numbers (not shown as if they were this one's) until a valid portfolio is computed, or until the inputs
   // are back to exactly the request whose result is hidden.
-  const ZERO = '组合权重合计为 0：请至少给一个资产设置权重。上一个组合的结果已隐藏，设置权重后会自动重算。';
+  const ZERO = '组合权重合计为 0：请至少给一个资产或标的设置权重。上一个组合的结果已隐藏，设置权重后会自动重算。';
   let stale = false, shownKey = null, pendingKey = null, staleTimer = 0;
   const keyOf = (b) => (b ? JSON.stringify(b) : null);
   function setStale(on) {
@@ -737,10 +802,38 @@ export async function render(root, { api, charts, ui, meta, param }) {
   editor.el.addEventListener('input', watchWeights);
   editor.el.addEventListener('click', watchWeights);
 
+  // The other two α versions of the same plan, one request at a time after the result on screen; a newer
+  // request stops the chain (it starts again from that result), and versions already computed are kept.
+  let alphaGen = 0;
+  function runAlpha(b, res) {
+    if (!(res?.instruments?.estimated || []).length) { alphaGen += 1; return; }
+    const { alpha_mode: cur = 'shrunk', ...rest } = b;
+    const key = JSON.stringify(rest);
+    alphaBox.reset(key, cur);
+    alphaBox.put(key, cur, res);
+    const gen = ++alphaGen;
+    (async () => {
+      for (const m of ALPHA_MODES.map(x => x.value)) {
+        if (alphaBox.has(key, m)) continue;
+        await new Promise(r => setTimeout(r, 250));
+        if (gen !== alphaGen || !alive() || pendingKey) return;
+        alphaBox.busy(key, m, true);
+        try {
+          const r = await api.post('withdrawal/evaluate', m === 'shrunk' ? rest : { ...rest, alpha_mode: m });
+          if (gen !== alphaGen || !alive()) { alphaBox.busy(key, m, false); return; }
+          alphaBox.put(key, m, r);
+        } catch (err) {
+          if (gen === alphaGen && alive()) alphaBox.fail(key, m, err);
+          return;
+        }
+      }
+    })();
+  }
+
   let live = false;
-  const go = liveRequest(async ({ b, adjusted }) => ({ res: await api.post('withdrawal/evaluate', b), adjusted, key: keyOf(b) }), {
+  const go = liveRequest(async ({ b, adjusted }) => ({ res: await api.post('withdrawal/evaluate', b), adjusted, key: keyOf(b), b }), {
     start: () => { pill.busy('重新模拟提取中…'); results.classList.add('weights-busy'); },
-    done: ({ res, adjusted, key }) => {
+    done: ({ res, adjusted, key, b }) => {
       if (!alive()) return;
       pendingKey = null;
       results.classList.remove('weights-busy');
@@ -753,6 +846,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
       errBox.replaceChildren();
       setStale(false);
       pill.done('已更新');
+      runAlpha(b, res);
     },
     error: async (err) => {
       if (!alive()) return;
@@ -779,6 +873,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
     if (!alive()) return;                  // a timer from a page the user has left
     clearTimeout(staleTimer);
     paintProbState();
+    paintAlpha();
     const b = body();
     if (!b) {
       setStale(true);
@@ -804,5 +899,5 @@ export async function render(root, { api, charts, ui, meta, param }) {
   if (linkNotes.length) root.insertBefore(ui.notice(`${linkNotes.join('；')}。`, 'info'), errBox);
   refresh();
   const d = defaults || await defaultsP;
-  if (alive() && d && !d.error) editor.setPresets(presetsOf(d));
+  if (alive() && d && !d.error) editor.setPresets(allPresets(d, cat));
 }

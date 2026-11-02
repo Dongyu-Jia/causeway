@@ -1,0 +1,295 @@
+{
+ "version": "instruments 1 (2026-11-01): instr-structural calibration, refit by fit.py",
+ "train_end": "2014-12",
+ "provenance": "instr-structural/instrument_params.json (s06 vol, s07 spreads, s09 options, s10 TLT, s12 tail); fit.py refits vol, iv_M and the TLT spread models from data/raw/instruments to the same numbers",
+ "vol": {
+  "rv_M": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd",
+    "dspread"
+   ],
+   "coef": [
+    -2.4479595511666337,
+    0.6099859612379442,
+    1.9206094880342486,
+    -4.868678327299433,
+    -0.08865632311017173,
+    0.3095745463230402
+   ],
+   "sigma": 0.6000001214733005,
+   "n": 346,
+   "sample": [
+    "1986-03",
+    "2014-12"
+   ]
+  },
+  "rv_M_nospread": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd"
+   ],
+   "coef": [
+    -2.4622552937298483,
+    0.6098272585744154,
+    1.9059003458479589,
+    -5.400363409047976,
+    -0.08685908710304724
+   ],
+   "sigma": 0.6037234303265837,
+   "n": 347
+  },
+  "rs3_M": {
+   "form": "rs3 = a1*rv**1.5 + a2*x*rv",
+   "a1": 0.08075961979236326,
+   "a2": 0.20946623758352806,
+   "n": 347
+  },
+  "rs4_M": {
+   "form": "rs4 = k*rv**2/days",
+   "k": 2.7171722342076787,
+   "n": 347,
+   "note": "median over the training periods of sum(x^4) / (RV^2 / trading days); 3 for Gaussian days of constant vol"
+  },
+  "days_M": 21.0,
+  "rv_Q": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd",
+    "dspread"
+   ],
+   "coef": [
+    -1.8693442281432715,
+    0.6212792784560938,
+    0.9595525191218545,
+    -2.6006643078388234,
+    0.02771958894174644,
+    0.4101716672266766
+   ],
+   "sigma": 0.5055992475007091,
+   "n": 114,
+   "sample": [
+    "1986Q3",
+    "2014Q4"
+   ]
+  },
+  "rv_Q_nospread": {
+   "feats": [
+    "lrv_lag",
+    "abs_r",
+    "neg_r",
+    "dd"
+   ],
+   "coef": [
+    -1.8946646091768142,
+    0.6117586863854346,
+    0.49333553978474204,
+    -3.788396687458414,
+    0.060899274111471474
+   ],
+   "sigma": 0.5235597081442759,
+   "n": 115
+  },
+  "rs3_Q": {
+   "form": "rs3 = a1*rv**1.5 + a2*x*rv",
+   "a1": 0.010719406640534161,
+   "a2": 0.011648716470370983,
+   "n": 115
+  },
+  "rs4_Q": {
+   "form": "rs4 = k*rv**2/days",
+   "k": 3.22095375254048,
+   "n": 115,
+   "note": "median over the training periods of sum(x^4) / (RV^2 / trading days); 3 for Gaussian days of constant vol"
+  },
+  "days_Q": 63.0,
+  "iv_M": {
+   "feats": [
+    "lvol_rv",
+    "lvol_rv_lag",
+    "dd",
+    "dspread"
+   ],
+   "coef": [
+    -0.20501326860238042,
+    0.5002028632371438,
+    0.26541298644123557,
+    0.011377380283551564,
+    0.011219877858181123
+   ],
+   "sigma": 0.15169034727065198,
+   "n": 167,
+   "sample": [
+    "2001-02",
+    "2014-12"
+   ]
+  },
+  "iv_atm_multiplier_on_vxn": 0.8550399205634738,
+  "bridge_month_var_ratio": {
+   "ratio": 0.847652056826945,
+   "n": 348,
+   "sample": [
+    "1986-01",
+    "2014-12"
+   ],
+   "note": "var(monthly NDX log return) / mean(monthly RV): the month variance of the quarterly Brownian bridge is this ratio x RV_Q / 3 (realized daily variance runs above the variance of monthly returns, so RV_Q / 3 alone made the bridged months too volatile)"
+  }
+ },
+ "tail": {
+  "lambda": 0.94,
+  "q": 0.95,
+  "fit": {
+   "u": 1.7073416961267165,
+   "xi": 0.16820361174973125,
+   "beta": 0.5758310724630595,
+   "n_exc": 515,
+   "p_u": 0.05006318654612618,
+   "max_L": 9.090603807166936
+  },
+  "fit_train": {
+   "u": 1.6916235679171174,
+   "xi": 0.17555880463613593,
+   "beta": 0.5202944447000519,
+   "n_exc": 366,
+   "p_u": 0.050054704595185996,
+   "max_L": 9.090603807166936
+  }
+ },
+ "letf": {
+  "QLD": {
+   "L": 2,
+   "s_eff": {
+    "mean_2019_2026": 0.008109642857142859,
+    "latest": 0.01434,
+    "train_2006_2018": 0.007460220987676464
+   },
+   "s_eff_default": "mean_2019_2026",
+   "s_eff_latest_date": "2026-08-31",
+   "stocks_nav_latest": 0.68235,
+   "swaps_nav_latest": 1.19425
+  },
+  "TQQQ": {
+   "L": 3,
+   "s_eff": {
+    "mean_2019_2026": 0.008832500000000002,
+    "latest": 0.01547,
+    "train_2006_2018": 0.00600537781952025
+   },
+   "s_eff_default": "mean_2019_2026",
+   "s_eff_latest_date": "2026-08-31",
+   "stocks_nav_latest": 0.38022,
+   "swaps_nav_latest": 2.49087
+  },
+  "financing_accrual": "ACT/360",
+  "formula_note": "log(1 + L(e^x - 1)) expanded to the fourth order in the daily log return x and summed over the period's days: L sum x - (L^2 - L)/2 RV + L(2L-1)(L-1)/6 RS3 + c4(L) RS4 + log(1 + carry), c4 = L/24 - 7L^2/24 + L^3/2 - L^4/4; the swaps accrue (b + s) ACT/360 (x 365/360 a year)"
+ },
+ "ndx_div_yield": {
+  "qqq_gross_fy2025": 0.0074,
+  "qqq_gross_fy2021_2025_mean": 0.008100000000000001
+ },
+ "qqqi": {
+  "k1": 1.0190116812744285,
+  "k2": 1.03404817600379,
+  "coverage_total": 0.6269097103942916,
+  "coverage_latest": 0.5449889655284077,
+  "coverage_by_report": {
+   "2024-02-29": 0.7107216637724396,
+   "2024-05-31": 0.7029976038976151,
+   "2024-08-31": 0.6078694726249202,
+   "2024-11-30": 0.7495819013010119,
+   "2025-02-28": 0.6922068459682342,
+   "2025-05-31": 0.5371081731282961,
+   "2025-08-31": 0.6349957301348557,
+   "2025-11-30": 0.6178314162997505,
+   "2025-12-31": 0.5589270840957034,
+   "2026-03-31": 0.5387779575859731,
+   "2026-06-30": 0.5449889655284077
+  },
+  "distribution_rate_annual": 0.1434,
+  "distribution_rate_source": "NEOS fact sheet 2026-09-30 (12-month trailing)",
+  "roc_share_tax": 0.996,
+  "roc_source": "Form 8937 (12/31/2025): 99.597% of the Jun-Dec 2025 distributions",
+  "beta_ndx_model": 0.68775,
+  "note": "two written NDX calls per month (N-PORT, 11 reports 2024-02..2026-06): strikes k1 / k2 x the month-start index on half the coverage each; premiums Black-Scholes at 0.855 x VXN"
+ },
+ "qyld_like": {
+  "k": 1.0,
+  "coverage": 1.0
+ },
+ "tlt": {
+  "w20": 0.512837043969756,
+  "D_of_y": [
+   -95.20464891726044,
+   20.958104155706586
+  ],
+  "C_of_y": [
+   -3190.7628197232866,
+   513.9695860798383
+  ],
+  "spread_models": {
+   "s20": {
+    "col": "s20",
+    "c0": 0.0027527238051176612,
+    "c1": 0.0801285442984115,
+    "a": -1.188299393056452e-05,
+    "b_dslope": 0.002174982016215271,
+    "g_dy10": -0.11918741242355455,
+    "kappa": 0.042741270182670946,
+    "sigma": 0.0009566496150357035,
+    "n": 445,
+    "sample": [
+     "1971-03-31",
+     "2014-12-31"
+    ]
+   },
+   "s30": {
+    "col": "s30",
+    "c0": 0.0015134669601906939,
+    "c1": 0.15969860272251646,
+    "a": -1.4115015743132503e-05,
+    "b_dslope": 0.003216415667721406,
+    "g_dy10": -0.16471836843047175,
+    "kappa": 0.03381563341473937,
+    "sigma": 0.0009409360192259946,
+    "n": 454,
+    "sample": [
+     "1977-03-31",
+     "2014-12-31"
+    ]
+   }
+  },
+  "current_yield_over_ytm_latest": 0.8570655571018211,
+  "cy_halflife_years": 7.0,
+  "yield_range_fitted": [
+   0.014,
+   0.053
+  ],
+  "holdings_latest": {
+   "rep_date": "2026-08-31",
+   "n_bonds": 46,
+   "value_bn": 46.17524,
+   "yield": 0.05294,
+   "mod_duration": 15.32007,
+   "convexity": 326.11079,
+   "avg_maturity": 25.99065,
+   "min_maturity": 17.70568,
+   "max_maturity": 29.70568,
+   "dgs20": 0.0524,
+   "dgs30": 0.0525,
+   "dgs10": 0.0475,
+   "y_mix": 0.05245
+  }
+ },
+ "gld": {
+  "note": "engine gold = monthly-average London price; GLD = daily LBMA PM less 0.40%/yr"
+ },
+ "qqq": {
+  "note": "0.20% until 2025-12-19 (UIT), 0.18% unitary fee from 2025-12-20 (open-end)"
+ }
+}

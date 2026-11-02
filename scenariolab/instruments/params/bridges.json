@@ -1,0 +1,109 @@
+{
+ "version": "instruments 1 (2026-11-01): instr-design p04 bridges, refit by fit.d_gz_bridges",
+ "train": [
+  "1990Q1",
+  "2014Q4"
+ ],
+ "d_gz": {
+  "default": "spread_eq",
+  "noise": false,
+  "note": "quarterly GZ change (pp) = a + b x d(Baa-10y) + c x (the US market quarterly log total return); on a monthly core the same linear map runs month by month (it sums to the quarter). The default is the fitted formula as it stands, the design's D15 default (0.019 + 1.003 d(Baa-10y) - 0.771 r_eq), applied identically to every row, scenario, custom run, view and continuation chunk. Decision of the 2026-11-02 review round (spec default kept): the per-view centring of the equity term (equity_center \"core\") was withdrawn because it removed every scenario-level equity stress from d_gz (ai_bust, equity 2.9%/yr, widened less than the baseline) and made a row's d_gz depend on the other rows of its view. The formula's own level drift on cores whose market return is below the 1990-2014 mean (about +0.8pp of GZ over 15 years on the baseline, +1.1pp on ai_bust) is part of the bridge and is disclosed. No noise by default: the residual is unrelated to equities and lowers the BDC / MLP correlation with the market further (0.32 -> 0.27).",
+  "models": {
+   "spread": {
+    "x": [
+     "d_baa10"
+    ],
+    "coef": [
+     0.0006595945311158092,
+     1.0909814855246551
+    ],
+    "sd_e_train": 0.2661346889488673,
+    "x_mean_train": {
+     "d_baa10": 0.006000000000000001
+    },
+    "rmse_test": 0.11298395962900329,
+    "r2_test": 0.940524496662797,
+    "n_train": 100,
+    "n_test": 47
+   },
+   "spread_eq": {
+    "x": [
+     "d_baa10",
+     "lr_us_equity"
+    ],
+    "coef": [
+     0.019258009477212252,
+     1.0033319007382517,
+     -0.7704840721780696
+    ],
+    "sd_e_train": 0.2620887205235448,
+    "x_mean_train": {
+     "d_baa10": 0.006000000000000001,
+     "lr_us_equity": 0.023456055861465236
+    },
+    "rmse_test": 0.10720383009864004,
+    "r2_test": 0.946454232509125,
+    "n_train": 100,
+    "n_test": 47
+   },
+   "spread_eq_fin": {
+    "x": [
+     "d_baa10",
+     "lr_us_equity",
+     "lr_financials"
+    ],
+    "coef": [
+     0.02060512881430329,
+     1.0066047800500375,
+     -1.4211938726673954,
+     0.5830523600268703
+    ],
+    "sd_e_train": 0.26134225415255335,
+    "x_mean_train": {
+     "d_baa10": 0.006000000000000001,
+     "lr_us_equity": 0.023456055861465236,
+     "lr_financials": 0.02383375794290302
+    },
+    "rmse_test": 0.11340296596630113,
+    "r2_test": 0.9400825432646758,
+    "n_train": 100,
+    "n_test": 47
+   }
+  }
+ },
+ "hist": {
+  "corr_dspread_us_equity": -0.644230176592515,
+  "corr_dgz_us_equity": -0.648815845272783,
+  "span": [
+   "1990-03-31",
+   "2026-09-30"
+  ]
+ },
+ "hist_corr_with_us_equity": {
+  "MAIN": 0.747705648102978,
+  "ARCC": 0.7422004403502983,
+  "CSWC": 0.675150324227529,
+  "EPD": 0.5549106119643494,
+  "MPLX": 0.6244826285041769,
+  "XLG": 0.9596516584797514,
+  "SCHD": 0.761196419000431,
+  "MO": 0.45548465307858554,
+  "BRK.B": 0.4909367406534804,
+  "BME": 0.674260338789959
+ },
+ "credit_link_flag": {
+  "tickers": [
+   "MAIN",
+   "ARCC",
+   "CSWC",
+   "EPD",
+   "MPLX"
+  ],
+  "corr_tolerance": 0.15,
+  "hist_corr_dgz_us_equity": -0.648815845272783,
+  "hist_corr_dspread_us_equity": -0.644230176592515
+ },
+ "decisions": {
+  "2026-11-02": "d_gz bridge: the literal spread_eq formula (D15 default) for every view; the per-view equity centring is withdrawn (review finding 2)."
+ }
+}

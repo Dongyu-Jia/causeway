@@ -27,6 +27,7 @@ const TABS = [
   { group: '未来' },
   { id: 'scenarios', name: '未来情景' },
   { id: 'lab', name: '情景实验室（LLM）' },
+  { id: 'instruments', name: '标的推演' },
   { id: 'portfolio', name: '组合评估' },
   { id: 'withdrawal', name: '提取与破产概率' },
   { group: '说明' },
@@ -38,7 +39,7 @@ const view = document.getElementById('view');
 const title = document.getElementById('page-title');
 let meta = null;
 let current = null;          // the visit being shown: {ctrl}
-let releaseHeight = 0;
+let releaseHold = null;          // ends the scroll hold of the last K-line re-render
 
 function buildNav(active) {
   nav.innerHTML = '';
@@ -68,6 +69,30 @@ function paintScheme() {
   document.body.classList.toggle('kline-cn', s !== 'us');
 }
 
+// A re-render in place (the K-line toggle) keeps the reader where they were. The page comes back in two steps:
+// its controls at once, its results a moment later above the sections below them. Until the page is as tall as it
+// was (or 15 s pass) #view keeps its old height (so the scroll position stays reachable) and opts out of scroll
+// anchoring: the browser would otherwise anchor on a section that sits below the still-empty results and push the
+// reader thousands of pixels down when they arrive.
+function holdPlace(page, height, pageHeight) {
+  if (releaseHold) releaseHold();
+  view.style.minHeight = `${height}px`;
+  view.style.overflowAnchor = 'none';
+  let timer = 0;
+  const ro = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => { if (page.offsetHeight >= pageHeight - 40) release(); }) : null;
+  function release() {
+    ro?.disconnect();
+    clearTimeout(timer);
+    view.style.minHeight = '';
+    view.style.overflowAnchor = '';
+    if (releaseHold === release) releaseHold = null;
+  }
+  ro?.observe(page);
+  timer = setTimeout(release, 15000);
+  releaseHold = release;
+}
+
 // keepScroll: re-render the same page where the reader is (the K-line toggle), instead of from the top.
 async function show(route, { keepScroll = false } = {}) {
   const { id, param } = parseRoute(route);
@@ -77,11 +102,13 @@ async function show(route, { keepScroll = false } = {}) {
   current = visit;
   const alive = () => current === visit && !visit.ctrl.signal.aborted;
   const y = window.scrollY;
+  const height = view.offsetHeight;
+  const pageHeight = view.querySelector(':scope > .page')?.offsetHeight || 0;
   buildNav(tab.id);
   title.textContent = tab.name;
   document.title = `${tab.name} · Causeway`;
-  clearTimeout(releaseHeight);
-  view.style.minHeight = keepScroll ? `${view.offsetHeight}px` : '';    // keep the scroll position reachable
+  if (releaseHold) releaseHold();
+  if (keepScroll) { view.style.minHeight = `${height}px`; view.style.overflowAnchor = 'none'; }   // until holdPlace
   charts.disposeWithin(view);            // every ECharts instance and observer of the previous page
   view.replaceChildren(ui.loading());
   if (!keepScroll) window.scrollTo(0, 0);
@@ -90,18 +117,17 @@ async function show(route, { keepScroll = false } = {}) {
     if (!alive()) return;
     const page = ui.h('div', { class: 'page', 'data-tab': tab.id });
     view.replaceChildren(page);
+    if (keepScroll) holdPlace(page, height, pageHeight);
     const target = await mod.render(page, { api, charts, ui, meta, param, route: tab.id, signal: visit.ctrl.signal, alive, rerender: keepScroll });
     if (!alive()) return;
     if (keepScroll) window.scrollTo(0, y);            // a re-render stays where the reader was
-    else if (target instanceof Element && target.isConnected) target.scrollIntoView({ block: 'start' });
+    else if (target instanceof Element && target.isConnected) ui.pinIntoView(target, { block: 'start' });   // a deep link
   } catch (err) {
     if (!alive()) return;
     console.error(err);
     charts.disposeWithin(view);
     view.replaceChildren(ui.notice(`页面加载失败：${err.message}`, 'error'));
     if (err.status === 404) view.append(ui.buildHint(err));          // the command that builds the missing file
-  } finally {
-    if (current === visit && keepScroll) releaseHeight = setTimeout(() => { view.style.minHeight = ''; }, 2500);
   }
 }
 

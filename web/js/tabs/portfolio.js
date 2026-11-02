@@ -1,13 +1,19 @@
 // Portfolio evaluation: one set of weights run through every scenario's simulated paths, the
 // scenarios mixed by probability (weighted aggregate), next to the worst / best scenario ranked
-// in real terms. Inputs come from _weights.js and are shared with the withdrawal tab.
+// in real terms. The weights may hold asset classes and tickers (标的, _tickers.js); the inputs are
+// shared with the withdrawal tab. Below the portfolio, 标的推演 shows one ticker on every scenario's
+// paths (fans per scenario and mixed, payouts per share, attribution, correlations).
 // Deep links: #portfolio?all_weather, #portfolio?preset=income&rebalance=annual&scenario=ai_bust,
-// #portfolio?w=us_equity:50,gold:50
+// #portfolio?w=us_equity:50,gold:50, #portfolio?w=MAIN:10,QQQI:15,brk.b:5 (any case),
+// #portfolio?preset=income_tickers, #portfolio?ticker=TQQQ (opens 标的推演 on TQQQ), #portfolio?TQQQ
 import {
-  shared, weightsEditor, probEditor, customPicker, statusPill, liveRequest, errorNotice, parseParam,
-  parseWeightsParam, scenarioRows, rangeChart, rowsHeight, rankColor, shortName, fmtMult, weightsLabel, isNum, esc,
-  signOf, plainNote, FALLBACK_PRESETS, injectStyle,
+  shared, probEditor, customPicker, statusPill, liveRequest, errorNotice, parseParam,
+  scenarioRows, rangeChart, rowsHeight, rankColor, shortName, fmtMult, isNum, esc,
+  signOf, plainNote, injectStyle,
 } from './_weights.js';
+import {
+  portfolioEditor, allPresets, loadCatalog, parseLinkWeights, resolveId, isTicker, holdingsCard, projection, weightsText, TK,
+} from './_tickers.js';
 
 const REBALANCE = [
   { value: 'monthly', label: '每月再平衡', help: '每个月末把各资产调回目标权重：纪律最强，组合波动最低。' },
@@ -28,7 +34,7 @@ function labelsOf(per) {
   return Object.fromEntries(per.map(e => [e.id, count[shortName(e.name)] > 1 ? e.name : shortName(e.name)]));
 }
 
-export async function render(root, { api, charts, ui, meta, param }) {
+export async function render(root, { api, charts, ui, meta, param, signal, rerender }) {
   injectStyle();
   const { h, card } = ui;
   const pct = (v, d = 1) => ui.fmtPct(v, d);
@@ -37,33 +43,53 @@ export async function render(root, { api, charts, ui, meta, param }) {
   const take = (pred) => { const i = tokens.findIndex(pred); return i < 0 ? null : tokens.splice(i, 1)[0]; };
   const reb = q.kv.rebalance || take(t => REBALANCE.some(r => r.value === t));
   if (REBALANCE.some(r => r.value === reb)) rebalance = reb;
+  const assetIds = (meta?.assets || []).map(a => a.id);
+  const linkNotes = [];
 
   // `root` (#view) is reused by whichever tab opens next, so "is this page still showing" is
   // checked on a node of our own: the lead paragraph, later the results container.
   const lead = h('p', { class: 'lead' },
     '把同一个组合放进每个情景的全部模拟路径里逐月计算，再按情景概率把所有路径混合成“加权汇总”：',
     '它回答“综合所有可能的未来，这个组合大概会怎样”。最坏 / 最好情景按扣除通胀后的实际年化回报排序，',
-    '因为高通胀情景的名义收益会显得很好看。所有数字都由引擎在同一批路径上算出，改动权重或概率后自动重算。');
+    '因为高通胀情景的名义收益会显得很好看。所有数字都由引擎在同一批路径上算出，改动权重或概率后自动重算。',
+    '组合里可以混合 13 类资产和 16 个标的（QQQ、TQQQ、QQQI、BDC、MLP 等）：标的是作用在同一批路径上的配方，',
+    '在每条路径上与资产类别一致；页面下方的“标的推演”逐个查看标的在各情景里的价格、总回报和分配。');
   root.append(lead);
 
   const defaultsP = api.get('portfolio_default').catch(err => ({ error: err }));
   const scenP = api.get('scenarios').catch(err => ({ error: err }));
-  const presetsOf = (d) => (d && !d.error && Array.isArray(d.presets) && d.presets.length ? d.presets : FALLBACK_PRESETS);
-  // a preset named in the link needs the preset list before the editor starts
-  const defaults = tokens.length || q.kv.preset ? await defaultsP : null;
+  const catP = loadCatalog();
+  // a preset named in the link needs the preset list before the editor starts; the ticker rows need the catalog
+  const [defaults, cat] = await Promise.all([tokens.length || q.kv.preset ? defaultsP : null, catP]);
   if (!lead.isConnected) return;       // the user moved on while the preset list loaded
-  const presetId = q.kv.preset || take(t => presetsOf(defaults).some(p => p.id === t));
-  let initial = presetsOf(defaults).find(p => p.id === presetId)?.weights || null;
-  if (q.kv.w && Object.keys(parseWeightsParam(q.kv.w)).length) initial = parseWeightsParam(q.kv.w);
+  const presets = allPresets(defaults, cat);
+  const presetId = q.kv.preset || take(t => presets.some(p => p.id === t));
+  let initial = presets.find(p => p.id === presetId)?.weights || null;
+  if (q.kv.w && !rerender) {
+    const lw = parseLinkWeights(q.kv.w, assetIds.length ? assetIds : undefined);
+    if (Object.keys(lw.weights).length) initial = lw.weights;
+    if (lw.unknown.length) linkNotes.push(`链接里的权重有无法识别的资产或标的：${lw.unknown.join('、')}`);
+  }
   let focus = q.kv.scenario || null;
+  const tickerOf = (t) => { const id = resolveId(t, assetIds.length ? assetIds : undefined); return id && isTicker(id) ? id : id === 'gold' ? 'GOLD' : null; };
+  let focusTicker = q.kv.ticker ? tickerOf(q.kv.ticker) : null;
+  if (rerender) initial = null;        // the K-line toggle redraws the page: keep the reader's weights and ticker
+  if (q.kv.ticker && !focusTicker) linkNotes.push(`链接里的标的「${String(q.kv.ticker).slice(0, 20)}」不在标的列表里`);
+  if (!focusTicker) { const tk = take(t => !!tickerOf(t)); if (tk) focusTicker = tickerOf(tk); }
 
   // ---- inputs (built before any data arrives)
   let scen = null, probInfo = {};
   const pill = statusPill();
-  const editor = weightsEditor({ assets: meta?.assets, presets: presetsOf(defaults), initial, cls: 'span-2',
+  const editor = portfolioEditor({ assets: meta?.assets, presets, initial, cls: 'span-2',
     onChange: () => refresh() });
-  const probs = probEditor({ onChange: () => refresh() });
-  const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); refresh(); } });
+  editor.setCatalog(cat);
+  // scenario probabilities and custom scenarios: the portfolio and 标的推演 both follow them
+  const contextChanged = () => { refresh(); proj.refresh(); };
+  const probs = probEditor({ onChange: contextChanged });
+  const picker = customPicker({ onChange: () => { probs.setRows(scenarioRows(scen, picker.items()), probInfo); contextChanged(); } });
+  if (focusTicker && !rerender) TK.pj.ticker = focusTicker;
+  const proj = projection({ signal, focus: !!focusTicker && !rerender,
+    getContext: () => ({ include_custom: shared.include, scenario_probs: probs.overrides() }) });
 
   const rebHelp = h('div', { class: 'portfolio-help' });
   const paintReb = () => { rebHelp.textContent = REBALANCE.find(r => r.value === rebalance)?.help || ''; };
@@ -81,14 +107,19 @@ export async function render(root, { api, charts, ui, meta, param }) {
       h('div', { class: 'portfolio-label' }, '情景概率'),
       h('div', { class: 'row' }, probState,
         h('button', { class: 'btn', onclick: () => probs.el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '调整情景概率')),
-      horizonNote)));
+      horizonNote,
+      h('div', { class: 'portfolio-label' }, '标的'),
+      h('div', { class: 'portfolio-help' }, '标的按构建时的默认参数计算（估计型标的的 α 用收缩后的版本，提取页可以切换）；',
+        '情景概率和自定义情景同样用于下方的“标的推演”。'),
+      h('div', { class: 'row', style: { marginTop: '6px' } },
+        h('button', { class: 'btn', onclick: () => proj.el.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '查看标的推演')))));
 
   const errBox = h('div', { class: 'weights-err' });
   const results = h('div', { class: 'weights-results' }, ui.loading('正在用全部情景的路径计算组合…'));
   const alive = () => results.isConnected;
   const notesList = h('ul', { class: 'list' }, h('li', { class: 'muted' }, '计算完成后，这里列出本次结果的计算口径。'));
   const notesStale = h('p', { class: 'muted', style: { display: 'none', margin: 0 } }, '组合权重合计为 0：没有结果，也就没有计算口径。');
-  root.append(errBox, results,
+  root.append(errBox, results, proj.el,
     h('div', { class: 'section-title' }, '调整情景概率'), probs.el,
     h('div', { class: 'section-title' }, '计算口径'), card({}, notesList, notesStale),
     pill.el);
@@ -97,7 +128,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
   let view = null, shown = null, scrolled = false;
   function buildView() {
     const v = {
-      summary: h('div', { class: 'portfolio-summary' }), kpis: h('div', { class: 'grid cols-4' }),
+      summary: h('div', { class: 'portfolio-summary' }), kpis: h('div', { class: 'grid cols-4' }), holdings: h('div', { class: 'tk-holdings-box' }),
       compare: h('div', { class: 'portfolio-compare' }), rank: ui.chartBox('tall'), fan: ui.chartBox('tall'), lines: ui.chartBox('tall'),
       table: h('div', { class: 'portfolio-table' }),
     };
@@ -110,7 +141,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
       sub: '每条线是一个情景的中位数路径，颜色由绿到红 = 实际回报由高到低（与排名图一致），粗黑线是加权中位数，线尾标出最好 / 最差情景、悬停可逐条查看：线与线的距离就是宏观情景对这个组合的影响。' }, v.lines);
     v.linesTitle = linesCard.querySelector('.card-title');
     results.replaceChildren(
-      h('div', { class: 'section-title' }, '加权汇总：按情景概率把全部路径混合'), v.summary, v.kpis,
+      h('div', { class: 'section-title' }, '加权汇总：按情景概率把全部路径混合'), v.summary, v.kpis, v.holdings,
       h('div', { class: 'section-title' }, '最坏 / 最好情景（按实际年化回报排序）'),
       h('div', { class: 'weights-pair' },
         card({ title: '加权平均 vs 等权 vs 最坏 / 最好',
@@ -272,12 +303,15 @@ export async function render(root, { api, charts, ui, meta, param }) {
     const dates = res.dates || [];
     const custom = per.filter(e => e.source === 'custom').length;
     view.summary.textContent = [
-      weightsLabel(res.weights), REBALANCE.find(r => r.value === res.rebalance)?.label || res.rebalance,
+      weightsText(res.weights), REBALANCE.find(r => r.value === res.rebalance)?.label || res.rebalance,
       `${yrs} 年${dates.length ? `（${dates[0]} → ${dates[dates.length - 1]}）` : ''}`,
       `${per.length} 个情景${custom ? `（含 ${custom} 个自定义）` : ''}`,
       adjusted === 'calibrated' ? '按一年期预测校准的概率' : adjusted ? '手动调整的概率' : '模型后验概率',
     ].join(' · ');
     view.kpis.replaceChildren(...kpis(res));
+    const hc = holdingsCard(res, { scenarioYears: yrs, include: shared.include });
+    view.holdings.replaceChildren(...(hc ? [hc] : []));
+    view.holdings.style.marginTop = hc ? '16px' : '';
     view.compare.replaceChildren(...compare(res).filter(Boolean));
     notesList.replaceChildren(...(res.notes || []).map(n => h('li', { class: 'muted' }, plainNote(n))));
     drawTable(res);
@@ -302,7 +336,7 @@ export async function render(root, { api, charts, ui, meta, param }) {
   // cannot evaluate, so the page watches the editor itself: the previous portfolio's numbers are hidden
   // (not shown as if they were this one's) until a valid portfolio is computed, or until the inputs are
   // back to exactly the request whose result is hidden.
-  const ZERO = '组合权重合计为 0：请至少给一个资产设置权重。上一个组合的结果已隐藏，设置权重后会自动重算。';
+  const ZERO = '组合权重合计为 0：请至少给一个资产或标的设置权重。上一个组合的结果已隐藏，设置权重后会自动重算。';
   let stale = false, shownKey = null, pendingKey = null, staleTimer = 0;
   const keyOf = (b) => (b ? JSON.stringify(b) : null);
   function setStale(on) {
@@ -343,7 +377,9 @@ export async function render(root, { api, charts, ui, meta, param }) {
       errBox.replaceChildren();
       setStale(false);
       pill.done('已更新');
-      if (focus && !scrolled) { scrolled = true; view.table.querySelector('.weights-focus')?.scrollIntoView({ block: 'center' }); }
+      // a deep-linked row or section: kept in view while the results above it settle (tables stack a frame later)
+      if (focus && !scrolled) { scrolled = true; const row = view.table.querySelector('.weights-focus'); if (row) ui.pinIntoView(row, { block: 'center' }); }
+      else if (focusTicker && !rerender && !scrolled) { scrolled = true; ui.pinIntoView(proj.el, { block: 'start' }); }
     },
     error: async (err) => {
       if (!alive()) return;
@@ -385,14 +421,17 @@ export async function render(root, { api, charts, ui, meta, param }) {
   scen = s && !s.error ? s : null;
   probInfo = { method: scen?.probability_method, gamma: scen?.probability?.gamma };
   probs.setRows(scenarioRows(scen, items), probInfo);
+  if (scen) proj.setScenarios(scen.scenarios || []);
   if (scen) {
     horizonNote.textContent = `期限 ${Math.round((scen.horizon_months || 180) / 12)} 年（${scen.start || '—'} 起），每个情景 ${scen.n_paths || '—'} 条模拟路径，`
       + '与「未来情景」页是同一批路径。';
     const ids = (scen.scenarios || []).map(x => x.id);
     if (!focus) focus = take(t => ids.includes(t));
   }
-  if (tokens.length) root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id 或 monthly / annual / none）。`, 'info'), errBox);
+  if (tokens.length) root.insertBefore(ui.notice(`无法识别的链接参数：${tokens.join('、')}（可用预设 id、情景 id、标的代码或 monthly / annual / none）。`, 'info'), errBox);
+  if (linkNotes.length) root.insertBefore(ui.notice(`${linkNotes.join('；')}。`, 'info'), errBox);
   refresh();
   const d = defaults || await defaultsP;
-  if (alive() && d && !d.error) editor.setPresets(presetsOf(d));
+  if (alive() && d && !d.error) editor.setPresets(allPresets(d, cat));
+  return focusTicker && !rerender && alive() ? proj.el : undefined;
 }
