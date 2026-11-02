@@ -10,10 +10,12 @@ produces every number.
 Backends (MSL_LLM_BACKEND): "claude_code", the default, runs the local Claude
 Code CLI in print mode on the user's own subscription login (claude_code.py:
 personal local use only, every call counts against the plan's limits);
+"mock" answers with a deterministic, valid spec built from the narrative's
+keywords (mock.py: no model call, no usage; every test runs on it);
 "api" calls the Anthropic Messages API through the SDK, only when set
 explicitly. Answers are cached in data/llm_cache/ by (backend, model, system
-prompt, user message), so rerunning a narrative is free; at most
-MSL_LLM_CONCURRENCY (2) calls run at once.
+prompt, user message), so rerunning a narrative is free (mock answers are
+not cached); at most MSL_LLM_CONCURRENCY (2) calls run at once.
 
     python -m scenariolab.llm.translator "霍尔木兹海峡被封锁半年……" --run
     python -m scenariolab.llm.translator --print-prompt
@@ -45,7 +47,7 @@ from ..scenarios import regime_views
 from ..scenarios.schema import (ASSET_DRIFT_BOUND, MAX_PHASES, MAX_VIEWS_PER_PHASE, SPEC_JSON_SCHEMA,
                                 allowed_variables, drift_factor_ids, factor_drift_bounds, late_start,
                                 slugify, transmission_factors, validate_spec)
-from . import claude_code
+from . import claude_code, mock
 
 try:
     import anthropic
@@ -73,7 +75,8 @@ REFERENCE_FACTORS = ("f_oil", "f_ip", "f_cpi", "f_ff", "f_y10", "f_spread", "f_u
 VALUATION_VARS = ("f_valuation", "s_div_yield", "f_cape", "s_cape")   # views here come close to dictating equity prices
 DEFAULT_OVERRIDE_WHY = "历史样本中没有先例的结构性效应（理由见 narrative）"
 DRIFT_UNITS = {"Δlog": "Δlog/年", "Δpp": "pp/年", "Δ": "点/年"}
-BACKENDS = ("claude_code", "api")
+BACKENDS = ("claude_code", "api", "mock")
+TEXT_BACKENDS = ("claude_code", "mock")             # the schema goes into the prompt (the text path)
 DEFAULT_BACKEND = "claude_code"                      # the local Claude Code CLI on the user's own subscription
 API_LABEL = "Anthropic API（按 API 计费）"
 CACHE_DIR = config.DATA_DIR / "llm_cache"            # <sha256>.json: an answer's text and its metadata only
@@ -101,8 +104,8 @@ def model_id() -> str:
 
 
 def backend_name() -> str:
-    """MSL_LLM_BACKEND: "claude_code" (the default) or "api" (only when set explicitly); another value is
-    returned as given, and status() then reports it as unknown."""
+    """MSL_LLM_BACKEND: "claude_code" (the default), "mock" (no model call) or "api" (only when set explicitly);
+    another value is returned as given, and status() then reports it as unknown."""
     load_dotenv()
     return os.environ.get("MSL_LLM_BACKEND", "").strip().lower().replace("-", "_") or DEFAULT_BACKEND
 
@@ -195,9 +198,12 @@ def status(force: bool = False) -> dict:
     backend, model = backend_name(), model_id()
     if backend == "api":
         return {"backend": "api", "label": API_LABEL, **_api_status(model)}
+    if backend == "mock":
+        return mock.status(model)
     if backend != "claude_code":
         return {"backend": backend, "label": backend, "available": False, "model": model,
-                "reason": f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code（默认，本机 Claude Code）或 api（Anthropic API）。"}
+                "reason": f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code（默认，本机 Claude Code）、"
+                          "mock（模拟后端，不调用模型）或 api（Anthropic API）。"}
     return _claude_code_status(model, force)
 
 
@@ -847,9 +853,9 @@ def schema_section() -> str:
 def system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
                   examples: list[dict] | None = None, backend: str | None = None) -> str:
     """The system prompt as `backend` (default: the configured one) sends it: build_system_prompt, plus the
-    schema section for claude_code."""
+    schema section for the text-path backends (claude_code, mock)."""
     base = build_system_prompt(ctx, horizon_months, examples)
-    return f"{base}\n\n{schema_section()}" if (backend or backend_name()) == "claude_code" else base
+    return f"{base}\n\n{schema_section()}" if (backend or backend_name()) in TEXT_BACKENDS else base
 
 
 def _user_message(narrative: str, horizon_months: int) -> str:
@@ -1051,13 +1057,16 @@ def _slot():
 
 def _ask(backend: str, system: str, user: str, model: str, client=None) -> tuple[str, dict]:
     """One model call on `backend`: (the answer's text, metadata)."""
-    if backend == "claude_code":
+    if backend in TEXT_BACKENDS:
+        run = claude_code.run if backend == "claude_code" else mock.run
+        from . import backend as llm_backend          # one call budget with the agent tree (cli_slot)
         try:
-            return claude_code.run(system, user, model, timeout_s())
+            with llm_backend.cli_slot(timeout=timeout_s()):
+                return run(system, user, model, timeout_s())
         except claude_code.ClaudeCodeError as err:
             raise TranslatorError(str(err)) from err
     if backend != "api":
-        raise TranslatorError(f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code 或 api。")
+        raise TranslatorError(f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code、mock 或 api。")
     if client is None:
         if anthropic is None:
             raise TranslatorError(_api_status(model)["reason"])
@@ -1077,17 +1086,29 @@ def complete(system: str, user: str, model: str, backend: str = DEFAULT_BACKEND,
     object is cached; refresh=True skips the lookup and replaces the entry.
     """
     key = cache_key(backend, model, system, user)
-    if not refresh:
+
+    def cached():
+        if refresh or backend == "mock":
+            return None
         hit = cache_load(key)
-        if hit is not None:
-            try:
-                return parse_spec_text(hit["text"]), {**hit["meta"], "cached": True, "cached_at": hit.get("created")}
-            except TranslatorError:
-                pass                                   # an unreadable entry is asked again and replaced
+        if hit is None:
+            return None
+        try:
+            return parse_spec_text(hit["text"]), {**hit["meta"], "cached": True, "cached_at": hit.get("created")}
+        except TranslatorError:
+            return None                                # an unreadable entry is asked again and replaced
+
+    hit = cached()
+    if hit is not None:
+        return hit
     with _slot():
+        hit = cached()                                 # answered while this request waited for a slot
+        if hit is not None:
+            return hit
         text, meta = _ask(backend, system, user, model, client)
-    raw = parse_spec_text(text)
-    cache_store(key, text, meta)
+        raw = parse_spec_text(text)
+        if backend != "mock":
+            cache_store(key, text, meta)               # inside the slot: a request waiting for it finds the answer
     return raw, {**meta, "cached": False}
 
 
@@ -1096,6 +1117,9 @@ def request_info(backend: str, model: str) -> dict:
     if backend == "api":
         return {"backend": "api", "max_tokens": MAX_TOKENS, "effort": EFFORT, "betas": [FALLBACK_BETA],
                 "fallbacks": "default", "output_format": "json_schema"}
+    if backend == "mock":
+        return {"backend": "mock", "model_call": False, "output_format": "text (schema in the system prompt)",
+                "concurrency": concurrency()}
     if backend != "claude_code":
         return {"backend": backend}
     return {"backend": backend, "argv": claude_code.build_args("claude", model, "<system prompt file>"),

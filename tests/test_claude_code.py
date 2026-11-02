@@ -69,8 +69,11 @@ def test_print_mode_argument_list_without_a_shell(fake_cli):
                     "--strict-mcp-config", "--setting-sources", "project", "--no-session-persistence",
                     "--output-format", "json"]
     assert "--bare" not in args and "--json-schema" not in args
+    assert "--effort" not in args and "--safe-mode" not in args            # the translator's call is unchanged
     assert kw["shell"] is False and kw["input"] == USER and kw["timeout"] == 123
-    assert kw["capture_output"] is True and kw["text"] is True and kw["encoding"] == "utf-8"
+    assert kw["stdin"] == kw["stdout"] == kw["stderr"] == subprocess.PIPE
+    assert kw["text"] is True and kw["encoding"] == "utf-8"
+    assert kw["start_new_session"] is (os.name == "posix")                  # its own process group
     assert all(NARRATIVE not in a and SYSTEM not in a for a in args)       # stdin and a file, never argv
     assert text == fake_cli.result
 
@@ -141,7 +144,10 @@ def test_envelope_text_and_metadata(fake_cli):
     assert meta == {"backend": "claude_code", "model": MODEL, "models": [MODEL], "duration_ms": 41234,
                     "duration_api_ms": 40000, "num_turns": 1, "stop_reason": "end_turn",
                     "usage": {"input_tokens": 12, "output_tokens": 2400, "cache_creation_input_tokens": 9000,
-                              "cache_read_input_tokens": 0}, "wall_s": meta["wall_s"]}
+                              "cache_read_input_tokens": 0},
+                    "usage_by_model": {MODEL: {"inputTokens": 12, "outputTokens": 2400, "cacheReadInputTokens": 0,
+                                               "cacheCreationInputTokens": 9000, "costUSD": 0.42}},
+                    "cost_usd": 0.42, "effort": None, "safe_mode": False, "wall_s": meta["wall_s"]}
     fake_cli.envelope = fake_cli.success(fake_cli.result, modelUsage={
         "claude-haiku-5": {"outputTokens": 30}, "claude-opus-5-5": {"outputTokens": 2400}})
     assert cc.run(SYSTEM, USER, MODEL)[1]["model"] == MODEL                          # the one that answered
@@ -568,3 +574,256 @@ def test_the_llm_step_never_calls_a_model(fake_cli, ctx, tmp_path, monkeypatch):
     assert saved["backend"] == "claude_code" and saved["status"]["auth"] == "Claude Code 登录"
     assert saved["request"]["argv"][:2] == ["claude", "-p"] and saved["request"]["timeout_s"] == 600.0
     assert saved["prompt"]["system"].endswith(tr.schema_section()) and saved["prompt"]["chars"] == len(saved["prompt"]["system"])
+
+
+# ---------------------------------------------------------------- error kinds, flags, in-flight sharing, cancellation
+
+FAILURE_KINDS = ["login", "token", "login", "limit", "limit", "rate", "model", "overloaded", "server", "max_turns",
+                 "failed", "failed", "unparseable", "login", "unparseable", "unparseable", "refusal", "max_tokens",
+                 "empty"]                                       # one per FAILURES row, in order
+
+
+@pytest.mark.parametrize("case, kind", list(zip(FAILURES, FAILURE_KINDS)))
+def test_every_failure_carries_a_machine_readable_kind(fake_cli, monkeypatch, case, kind):
+    envelope, code, stderr, token, _ = case
+    if token:
+        monkeypatch.setenv(cc.TOKEN_VAR, TOKEN)
+    fake_cli.envelope = envelope if isinstance(envelope, str) else fake_cli.success(**{"result": None, **envelope})
+    fake_cli.returncode, fake_cli.stderr = code, stderr
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run(SYSTEM, USER, MODEL)
+    assert err.value.kind == kind and err.value.kind in cc.KINDS
+    assert_clean(err.value.detail)
+    if "|1767225600" in json.dumps(envelope):
+        assert err.value.reset_at == 1767225600.0
+
+
+def test_timeout_cancel_and_start_failures_have_kinds(fake_cli):
+    fake_cli.hang = True
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run(SYSTEM, USER, MODEL, timeout=0.05)
+    assert err.value.kind == "timeout" and fake_cli.kills == 1                 # the hanging call was killed
+    cancel = threading.Event()
+    threading.Timer(0.1, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run(SYSTEM, USER + "c", MODEL, timeout=30, cancel=cancel)
+    assert err.value.kind == "cancelled" and fake_cli.kills == 2 and time.monotonic() - t0 < 5
+    with pytest.raises(cc.ClaudeCodeError) as err:                            # already cancelled: nothing starts
+        cc.run(SYSTEM, USER + "d", MODEL, cancel=cancel)
+    assert err.value.kind == "cancelled" and len(fake_cli.print_calls) == 2
+    fake_cli.hang, fake_cli.error = False, PermissionError(13, "Permission denied")
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run(SYSTEM, USER, MODEL)
+    assert err.value.kind == "cli_missing"
+
+
+def test_effort_and_safe_mode_are_passed_only_when_the_cli_lists_them(fake_cli):
+    text, meta = cc.run(SYSTEM, USER, MODEL, effort="medium", safe_mode=True)
+    args = fake_cli.print_calls[-1][0]
+    assert args[-3:] == ["--effort", "medium", "--safe-mode"] and meta["effort"] == "medium" and meta["safe_mode"]
+    helps = [c for c in fake_cli.calls if c[0][1:] == ["--help"]]
+    assert len(helps) == 1 and helps[0][1]["env"] == cc.child_env()            # probed once, sanitized env
+    cc.run(SYSTEM, USER + "2", MODEL, effort="ultra")                           # a level the help does not list
+    assert "--effort" not in fake_cli.print_calls[-1][0]
+    assert len([c for c in fake_cli.calls if c[0][1:] == ["--help"]]) == 1      # the probe is cached
+    cc._FLAGS.clear()
+    fake_cli.help = "Usage: claude [options]\n  --model <model>  Model\n"
+    text, meta = cc.run(SYSTEM, USER + "3", MODEL, effort="high", safe_mode=True)
+    assert "--effort" not in fake_cli.print_calls[-1][0] and "--safe-mode" not in fake_cli.print_calls[-1][0]
+    assert meta["effort"] is None and meta["safe_mode"] is False and len(meta["flag_notes"]) == 2
+    assert cc.parse_help(FAKE_HELP_2_1_278) == {"effort": True, "effort_levels": ["low", "medium", "high", "xhigh",
+                                                                                   "max"], "safe_mode": True}
+    assert cc.parse_help("") == {"effort": False, "effort_levels": [], "safe_mode": False}
+    assert cc.build_args("claude", MODEL, "f", effort="low", safe_mode=True)[-3:] == ["--effort", "low", "--safe-mode"]
+
+
+FAKE_HELP_2_1_278 = """  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --safe-mode                           Start with all customizations
+"""
+
+
+def test_two_identical_requests_share_one_call(fake_cli):
+    release, started = threading.Event(), threading.Event()
+
+    def busy(args, kw):
+        started.set()
+        release.wait(10)
+
+    fake_cli.on_print = busy
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(cc.run(SYSTEM, USER, MODEL))) for _ in range(3)]
+    for t in threads:
+        t.start()
+    started.wait(5)
+    time.sleep(0.2)
+    release.set()
+    for t in threads:
+        t.join(10)
+    assert len(fake_cli.print_calls) == 1 and len(results) == 3
+    assert sorted(bool(m.get("shared_inflight")) for _, m in results) == [False, True, True]
+    assert len({text for text, _ in results}) == 1 and len(cc._INFLIGHT) == 0
+    cc.run(SYSTEM, USER, MODEL)                                               # not in flight any more: a new call
+    assert len(fake_cli.print_calls) == 2
+
+
+def _until(cond, seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not cond() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+def test_a_cancelled_leader_hands_over_and_other_errors_are_shared():
+    flight = cc.SingleFlight()
+    gate, calls, out = threading.Event(), [], {}
+
+    def leader():
+        calls.append("leader")
+        gate.wait(5)
+        raise cc.ClaudeCodeError(cc.E_CANCELLED, "cancelled")
+
+    t1 = threading.Thread(target=_swallow, args=(flight.do, "k", leader))
+    t1.start()
+    _until(lambda: len(flight) == 1)
+    t2 = threading.Thread(target=lambda: out.update(f=flight.do("k", lambda: calls.append("follower") or ("x", {}))))
+    t2.start()
+    time.sleep(0.1)
+    gate.set()
+    t1.join(5)
+    t2.join(5)
+    assert calls == ["leader", "follower"] and out["f"] == ("x", {})          # the follower asked again itself
+    gate2, seen = threading.Event(), {}
+
+    def failing():
+        gate2.wait(5)
+        raise cc.ClaudeCodeError("繁忙", "overloaded", detail="d")
+
+    def follow():
+        try:
+            flight.do("k2", lambda: seen.setdefault("called", ("never", {})))
+        except cc.ClaudeCodeError as err:
+            seen["err"] = err
+
+    t3 = threading.Thread(target=_swallow, args=(flight.do, "k2", failing))
+    t3.start()
+    _until(lambda: len(flight) == 1)
+    t4 = threading.Thread(target=follow)
+    t4.start()
+    time.sleep(0.1)
+    gate2.set()
+    t3.join(5)
+    t4.join(5)
+    assert seen["err"].kind == "overloaded" and "called" not in seen and len(flight) == 0
+
+
+def _swallow(fn, *args):
+    try:
+        fn(*args)
+    except cc.ClaudeCodeError:
+        pass
+
+
+# ---------------------------------------------------------------- real processes, but of the fake executable only
+
+def test_the_fake_executable_round_trip(fake_claude_bin, monkeypatch, tmp_path):
+    log = tmp_path / "argv.jsonl"
+    monkeypatch.setenv("MSL_FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
+    st = cc.status(MODEL)
+    assert st["available"] and st["version"] == "2.1.278" and st["binary"] == str(fake_claude_bin)
+    flags = cc.supported_flags(str(fake_claude_bin))
+    assert flags["effort"] and flags["safe_mode"] and flags["effort_levels"][-1] == "max"
+    from scenariolab.llm import agent_prompts as P
+    from agent_llm_cases import ctx_root, fed
+    schema = P.actor_output_schema(fed())
+    text, meta = cc.run(P.actor_system(schema), P.actor_user(ctx_root(), fed()), MODEL, timeout=30, effort="medium",
+                        safe_mode=True)
+    assert json.loads(text)["actor"] == "fed" and meta["backend"] == "claude_code" and meta["effort"] == "medium"
+    entries = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()]
+    printed = next(e for e in entries if "-p" in e["argv"])
+    assert printed["argv"][-3:] == ["--effort", "medium", "--safe-mode"] and printed["cwd_listing"] == []
+    assert not any(k.startswith("ANTHROPIC_") for k in printed["env"])         # the API key never reaches the CLI
+    monkeypatch.setenv("MSL_FAKE_CLAUDE_FLAGS", "none")
+    cc._FLAGS.clear()
+    text, meta = cc.run("系统", "用户", MODEL, timeout=30, effort="medium", safe_mode=True)
+    assert "--effort" not in json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["argv"]
+    assert meta["effort"] is None and meta["flag_notes"]
+
+
+@pytest.mark.parametrize("mode, kind", [("limit", "limit"), ("login", "login"), ("nojson", "unparseable"),
+                                        ("exit:3", "unparseable"), ("refusal", "refusal")])
+def test_the_fake_executables_failure_modes(fake_claude_bin, monkeypatch, mode, kind):
+    monkeypatch.setenv("MSL_FAKE_CLAUDE_MODE", mode)
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run("系统", "用户", MODEL, timeout=30)
+    assert err.value.kind == kind
+    if mode == "limit":
+        assert err.value.reset_at and "预计" in str(err.value)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:                                              # a zombie is dead for our purposes
+        out = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False)
+        return bool(out.stdout.strip()) and not out.stdout.strip().startswith("Z")
+    except OSError:
+        return True
+
+
+def _wait_dead(pid: int, seconds: float = 8.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not _alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("how", ["timeout", "cancel"])
+def test_timeout_and_cancel_kill_the_whole_process_group(fake_claude_bin, monkeypatch, tmp_path, how):
+    pidfile = tmp_path / "child.pid"
+    monkeypatch.setenv("MSL_FAKE_CLAUDE_MODE", "sleep:30")
+    monkeypatch.setenv("MSL_FAKE_CLAUDE_CHILD_PIDFILE", str(pidfile))
+    cancel = threading.Event()
+    if how == "cancel":
+        def fire():
+            deadline = time.monotonic() + 10
+            while not pidfile.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            cancel.set()
+        threading.Thread(target=fire, daemon=True).start()
+    t0 = time.monotonic()
+    with pytest.raises(cc.ClaudeCodeError) as err:
+        cc.run("系统", "用户", MODEL, timeout=3.0 if how == "timeout" else 30, cancel=cancel)
+    assert err.value.kind == ("timeout" if how == "timeout" else "cancelled") and time.monotonic() - t0 < 15
+    child = int(pidfile.read_text(encoding="utf-8"))
+    assert _wait_dead(child), "the CLI's own child process outlived the call"
+
+
+def test_a_request_that_waited_for_a_slot_reuses_the_answer_it_waited_for(fake_cli, monkeypatch):
+    monkeypatch.setenv("MSL_LLM_CONCURRENCY", "1")
+    fake_cli.result = json.dumps(SPEC)
+    release, started = threading.Event(), threading.Event()
+
+    def busy(args, kw):
+        started.set()
+        release.wait(10)
+
+    fake_cli.on_print = busy
+    out = []
+    first = threading.Thread(target=lambda: out.append(tr.complete(SYSTEM, USER, MODEL)))
+    first.start()
+    started.wait(5)
+    second = threading.Thread(target=lambda: out.append(tr.complete(SYSTEM, USER, MODEL)))
+    second.start()
+    time.sleep(0.2)                                       # the second request now waits for the only slot
+    release.set()
+    first.join(10)
+    second.join(10)
+    assert len(fake_cli.print_calls) == 1 and sorted(m["cached"] for _, m in out) == [False, True]
