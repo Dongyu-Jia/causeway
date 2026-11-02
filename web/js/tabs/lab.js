@@ -1,7 +1,8 @@
 // LLM scenario lab: narrative -> (LLM) scenario spec -> validate_spec -> engine.
 // The LLM only translates a story into shocks, views, phases and a causal chain; every
 // K-line and annualized return comes from the engine drawing real historical months.
-// Without an API key the spec can still be loaded from a built-in, edited and run, and 载入示例 walks
+// The LLM is the local Claude Code CLI on the user's own subscription by default (MSL_LLM_BACKEND=api: the
+// Anthropic API). Without it the spec can still be loaded from a built-in, edited and run, and 载入示例 walks
 // through narrative -> spec -> engine with a built-in's narrative and its hand-written spec (laid out as
 // the LLM answers, llm_translator.json `examples`), labelled as not a translation.
 // Deep links: #lab?<custom id> opens a saved scenario, #lab?tpl=<built-in id> loads a template.
@@ -343,7 +344,8 @@ export async function render(root, ctx) {
   }
 
   // ---------------------------------------------------------------- actions
-  async function translate() {
+  // refresh: ask the model again instead of reusing data/llm_cache/ (the only way to retranslate the same text)
+  async function translate(refresh = false) {
     const text = narr.value.trim();
     if (!text) { say(transMsg, '请先写一段情景叙事。', 'err'); narr.focus(); return; }
     const months = clampInt(horizon.value, 12, 600, HORIZON);
@@ -351,12 +353,18 @@ export async function render(root, ctx) {
     transBtn.disabled = true;
     const stop = timer(transMsg, 'LLM 正在把叙事翻译成情景规格');
     try {
-      const res = await api.post('llm/translate', { narrative: text, horizon_months: months });
+      const res = await api.post('llm/translate', { narrative: text, horizon_months: months, ...(refresh ? { refresh: true } : {}) });
       stop();
       if (!res?.spec) throw new Error('翻译结果里没有情景规格');
       setEditor(res.spec, 'llm');
       renderReport(res);
-      say(transMsg, `翻译完成，用时 ${isNum(res.elapsed_s) ? res.elapsed_s.toFixed(1) : '—'} 秒；规格已放进第 ② 步。`, 'ok');
+      if (res.cached) {
+        say(transMsg, '翻译完成：这段叙事之前翻译过，直接用了本地缓存（没有调用模型，不消耗额度）；规格已放进第 ② 步。', 'ok');
+        transMsg.append(h('button', { class: 'btn', style: { fontSize: '12px', padding: '2px 10px' },
+          title: '不用缓存，重新调用模型翻译这段叙事（会消耗额度）', onclick: () => translate(true) }, '重新翻译'));
+      } else {
+        say(transMsg, `翻译完成，用时 ${isNum(res.elapsed_s) ? res.elapsed_s.toFixed(1) : '—'} 秒；规格已放进第 ② 步。`, 'ok');
+      }
     } catch (err) {
       stop();
       say(transMsg, `翻译失败：${errorText(err, { notBuilt: false })}`, 'err');
@@ -382,7 +390,7 @@ export async function render(root, ctx) {
       card({ title: `「${res.spec?.name || '未命名'}」`, sub: res.spec?.summary || 'LLM 只给出规格；下面的预览是引擎按这份规格给历史月份赋权的结果，还没有模拟路径。' },
         h('dl', { class: 'kv' },
           h('dt', {}, '模型'), h('dd', {}, res.model || '—', res.requested_model && res.requested_model !== res.model ? `（请求 ${res.requested_model}）` : ''),
-          h('dt', {}, '用时'), h('dd', {}, isNum(res.elapsed_s) ? `${res.elapsed_s.toFixed(1)} 秒` : '—'),
+          h('dt', {}, '用时'), h('dd', {}, isNum(res.elapsed_s) ? `${res.elapsed_s.toFixed(1)} 秒` : '—', res.cached ? '（本地缓存，没有调用模型）' : ''),
           h('dt', {}, 'tokens'), h('dd', {}, tokens, u.fallback_used ? '（使用了备用模型）' : ''),
           h('dt', {}, '情景 id'), h('dd', {}, h('span', { class: 'mono' }, res.spec?.id || '—')))),
       h('div', { style: { height: '16px' } }),
@@ -412,7 +420,7 @@ export async function render(root, ctx) {
     }
   }
 
-  // ---- 载入示例 (no API key needed): a built-in's narrative into ①, its hand-written spec into ②, the LLM's
+  // ---- 载入示例 (no LLM call): a built-in's narrative into ①, its hand-written spec into ②, the LLM's
   // output form when llm_translator.json carries `examples` (the prompt's few-shot examples), otherwise the
   // built-in's validated spec. Always labelled: this is not a translation.
   async function renderDemos(lt) {
@@ -427,7 +435,7 @@ export async function render(root, ctx) {
     }
     if (!alive()) return;
     if (!list.length) { demoRow.remove(); return; }
-    fill(demoRow, h('span', { class: 'muted', style: { fontSize: '12px' } }, '没有 API key？载入示例：'),
+    fill(demoRow, h('span', { class: 'muted', style: { fontSize: '12px' } }, '不用 LLM 也能试：载入示例：'),
       list.map(ex => h('button', { title: `把内置情景「${ex.name}」的叙事和手写规格分别放进第 ① ② 步（不是 LLM 翻译）`,
         onclick: () => loadDemo(ex, form) }, ex.name || ex.id)));
   }
@@ -673,10 +681,30 @@ export async function render(root, ctx) {
 
   function renderStatus(st) {
     llmAvailable = !!st?.available;
+    const local = st?.backend !== 'api';            // the default backend: the local Claude Code CLI
+    const label = st?.label || '本机 Claude Code（使用你的订阅额度）';
     transBtn.disabled = !llmAvailable;
-    transBtn.title = llmAvailable ? '' : '需要先配置 Anthropic API 凭据';
+    transBtn.title = llmAvailable ? '' : local ? '需要先在终端登录 Claude Code（claude auth login）' : '需要先配置 Anthropic API 凭据';
+    if (llmAvailable && local) {
+      fill(statusBox, ui.notice(`LLM 已就绪：${label}，${st.auth || 'Claude Code 登录'}，模型 ${st.model || '—'}${st.version ? `（Claude Code ${st.version}）` : ''}。`
+        + '翻译一段叙事通常需要 20–90 秒，计入你订阅的 5 小时和每周用量；同一段叙事再翻译一次直接用本地缓存，不再消耗额度。', 'info'));
+      return;
+    }
     if (llmAvailable) {
       fill(statusBox, ui.notice(`LLM 已就绪：模型 ${st.model || '—'}（${st.reason || '已配置凭据'}）。翻译一段叙事通常需要 20–90 秒。`, 'info'));
+      return;
+    }
+    if (local) {
+      fill(statusBox, h('div', { class: 'notice' },
+        h('b', {}, 'LLM 翻译暂不可用'), st?.reason ? `：${st.reason}` : '',
+        h('div', { style: { marginTop: '6px' } }, `翻译用的是${label}，只供你自己在本机使用：`),
+        h('ol', {},
+          h('li', {}, '安装 Claude Code；', h('code', {}, 'claude'), ' 不在 PATH 里时，在 ', h('code', {}, '.env'), ' 里用 ', h('code', {}, 'MSL_CLAUDE_BIN'), ' 写它的完整路径；'),
+          h('li', {}, '在终端运行 ', h('code', {}, 'claude auth login'), '，用你自己的 Claude 订阅账号登录（或者运行 ', h('code', {}, 'claude setup-token'),
+            '，把令牌完整地写成 ', h('code', {}, '.env'), ' 里的一行 ', h('code', {}, 'CLAUDE_CODE_OAUTH_TOKEN=…'), '，再重启服务）；'),
+          h('li', {}, '刷新本页。')),
+        h('div', { style: { marginTop: '6px' } }, '不登录也能用：点第 ① 步的“载入示例”，看一遍叙事 → 规格 → 引擎的完整流程（规格是手写的，不是翻译）；',
+          '或者在第 ② 步从内置情景载入模板、手写规格，直接用引擎运行。')));
       return;
     }
     fill(statusBox, h('div', { class: 'notice' },

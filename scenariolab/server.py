@@ -15,7 +15,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,19 @@ BUILD_HINT = {
     "regime_forecast": f"{BUILD} --only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）",
 }
 NO_CACHE_PREFIXES = ("/js/", "/css/")
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}       # the Host a page served by this server sends
+
+
+def local_host(request) -> bool:
+    """Whether the request's Host header names this machine. A page on another site that re-points its DNS
+    name at 127.0.0.1 (DNS rebinding) reaches the server same-origin but still sends its own name, so this
+    is what keeps other people's pages from spending the user's Claude plan through /api/llm/translate."""
+    host = (request.headers.get("host") or "").strip().lower()
+    if host.startswith("["):                              # [::1]:8765
+        host = host[1:host.find("]")] if "]" in host else ""
+    else:
+        host = host.rsplit(":", 1)[0]
+    return host in LOCAL_HOSTS
 
 
 def _warm() -> None:
@@ -305,7 +318,7 @@ def _horizon_months(value) -> int:
 
 
 @app.post("/api/llm/translate")
-def llm_translate(body: dict = Body(...)):
+def llm_translate(request: Request, body: dict = Body(...)):
     from .context import get_context
     from .llm import translator
     narrative = str(body.get("narrative", "")).strip()
@@ -315,11 +328,15 @@ def llm_translate(body: dict = Body(...)):
         raise HTTPException(400, f"叙事过长（{len(narrative)} 字），请控制在 {translator.MAX_NARRATIVE_CHARS} 字以内")
     raw = body.get("horizon_months")
     horizon = _horizon_months(config.HORIZON_MONTHS if raw is None else raw)
-    st = translator.status()
+    if not local_host(request):            # before anything runs: the plan's usage is for this machine's own pages
+        raise HTTPException(403, "翻译只接受本机页面（http://127.0.0.1 或 http://localhost）发来的请求："
+                                 "Claude 订阅额度只供你自己在本机使用。")
+    st = translator.status()               # local checks only (claude --version / auth status): no usage
     if not st.get("available"):
         raise HTTPException(503, st.get("reason") or "LLM 不可用")
     try:
-        return _json(translator.translate(narrative, get_context(), horizon_months=horizon))
+        return _json(translator.translate(narrative, get_context(), horizon_months=horizon,
+                                          refresh=body.get("refresh") is True))
     except translator.TranslatorError as err:
         raise HTTPException(502, str(err)) from err
 

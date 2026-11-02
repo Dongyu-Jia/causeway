@@ -12,12 +12,12 @@
 git clone https://github.com/Dongyu-Jia/causeway.git
 cd causeway
 python3 -m venv .venv && source .venv/bin/activate      # Windows：.venv\Scripts\activate
-pip install -e ".[llm,dev]"                             # llm 是可选的（情景实验室的翻译），dev 是测试和 ruff
+pip install -e ".[llm,dev]"                             # llm 只在 MSL_LLM_BACKEND=api 时需要（默认用本机 Claude Code），dev 是测试和 ruff
 ```
 
 - 网页没有构建步骤：`web/` 是静态文件（ES 模块），由 `python -m scenariolab.server` 直接提供。
 - 图表库 ECharts 5.5.1 已随代码放在 `web/vendor/echarts/`（Apache License 2.0，同目录有 LICENSE 和 NOTICE），不依赖 CDN。升级时从 npm 注册表下载对应版本的 tgz，核对注册表给出的 `dist.integrity`，只保留 `dist/echarts.min.js`、`LICENSE` 和 `NOTICE`，再改 `web/index.html` 里的版本注释和 README。
-- 只有 LLM 翻译需要 API key：`cp .env.example .env` 后填写。**永远不要提交 `.env`**。
+- LLM 翻译默认用本机 Claude Code 和你自己的订阅登录（`claude auth login`），不需要 API key，只供个人在本机使用；只有 `MSL_LLM_BACKEND=api` 时才在 `.env` 里填 `ANTHROPIC_API_KEY`（`cp .env.example .env`）。**永远不要提交 `.env`**。
 
 ## 构建
 
@@ -42,7 +42,7 @@ python -m compileall -q scenariolab
 ```
 
 - 需要本地数据或结果文件的测试在构建之前会自动跳过；新克隆的仓库没有 `data/`，CI（`.github/workflows/ci.yml`，Python 3.10 和 3.12）就在这种状态下运行编译检查、ruff 和测试。
-- 新功能要有测试。测试不下载数据、不调用 API：网络用假的 `requests.get`（见 `tests/test_build.py`），LLM 用假的客户端（见 `tests/test_translator.py`）。
+- 新功能要有测试。测试不下载数据、不调用模型：网络用假的 `requests.get`（见 `tests/test_build.py`），API 用假的客户端（见 `tests/test_translator.py`），Claude Code 用假的 `subprocess.run`（见 `tests/test_claude_code.py`；`tests/conftest.py` 让任何测试都启动不了真正的 claude，也不消耗订阅用量）。
 - 需要数据的测试用 `needs_panel`（或检查它要读的那个结果文件）在缺数据时跳过，而不是失败。
 
 ## 添加一个内置情景
@@ -69,7 +69,7 @@ python -m compileall -q scenariolab
 
 ## 数据不进 git
 
-`data/` 整个目录都在 `.gitignore` 里：下载的原始数据、派生的面板、构建结果、自定义情景和一年期预测的账本（`data/ledger/`，只追加、不覆盖，留在各自的电脑上）都不提交，也不要放进 issue 或 PR。各数据来源有自己的条款，仓库只分发代码。`.env`（API key）同样永远不提交。`docs/screenshots/` 里的界面截图可以提交（每张压缩到 300 KB 以内）。
+`data/` 整个目录都在 `.gitignore` 里：下载的原始数据、派生的面板、构建结果、自定义情景和一年期预测的账本（`data/ledger/`，只追加、不覆盖，留在各自的电脑上）都不提交，也不要放进 issue 或 PR。各数据来源有自己的条款，仓库只分发代码。`.env`（令牌和 key）同样永远不提交；`data/llm_cache/`（翻译缓存）也在 `data/` 里。`docs/screenshots/` 里的界面截图可以提交（每张压缩到 300 KB 以内）。
 
 ## Pull request
 
@@ -78,7 +78,7 @@ python -m compileall -q scenariolab
 
 ## English summary
 
-- **Setup:** Python 3.10+, `pip install -e ".[llm,dev]"` (the `llm` extra is optional). The web UI is static ES modules with no build step; ECharts 5.5.1 (Apache-2.0) is vendored in `web/vendor/echarts/`.
+- **Setup:** Python 3.10+, `pip install -e ".[llm,dev]"` (the `llm` extra is only for `MSL_LLM_BACKEND=api`; by default the translator runs the local Claude Code CLI on your own subscription, for personal local use only). The web UI is static ES modules with no build step; ECharts 5.5.1 (Apache-2.0) is vendored in `web/vendor/echarts/`.
 - **Build:** `python -m scenariolab.build` downloads the public data on first run and writes `data/results/`; use `--skip panel` or `--only <steps>` to rebuild part of it, and restart the server afterwards. The module and JSON contracts are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Tests:** `pytest -q`, `ruff check scenariolab tests`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
 - **New scenario:** copy a YAML spec in `scenariolab/scenarios/specs/`, keep to the rules `tests/test_scenarios.py` checks, then rebuild `--only scenarios forecast valuation portfolio llm meta`.
