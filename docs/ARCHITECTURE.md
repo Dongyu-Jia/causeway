@@ -2052,6 +2052,53 @@ to the results.
   model (tests/test_claude_code.py checks both that build.py passes nothing
   else and that run(ctx) starts no print-mode call).
 
+## Agent tree and snapshots (agents/)
+
+The 智能体推演 tab: actors choose actions each quarter (agents/actors.py, priors.py), the consequence
+synthesizer turns joint actions into consequences (agents/synthesizer.py), and the quarterly model sets
+prices (agents/model_adapter.py; the Gaussian stub until the real model is swapped in). agents/tree.py runs
+the beam search; agents/snapshot.py freezes one run as a snapshot; agents/jobs.py and server.py serve both.
+
+* **Model and effort.** Every agent-tree call (actors, the synthesizer, on-demand branches, snapshot builds,
+  leaf stories) uses `claude-opus-5-5` at effort `medium` (llm_io.DEFAULT_EFFORT). `--effort` is passed only
+  when `claude --help` lists it (2.1.278 does). There is no default model switch at deep levels;
+  `--deep-model` stays an explicit option.
+* **Snapshot defaults.** The first real snapshot is beam 2 × 80 quarters, reviewed before scaling up; beam
+  15 or 30 is an explicit `--beam`:
+
+      python -m scenariolab.agents.snapshot --beam 2 --quarters 80 --dry-run    # the estimate; spends nothing
+      python -m scenariolab.agents.snapshot --beam 2 --quarters 80 --yes        # build with the local CLI
+      python -m scenariolab.agents.snapshot --beam 2 --quarters 80 --resume --yes
+
+  Dry-run estimates (upper bounds: every synthesizer gate passing, 20–60 s a call assumed, Opus 5.5 at
+  medium): beam 2 × 80: 173 calls, 0.5–1.5 h, hard cap 208; beam 15 × 80: 1,225 calls, 2.3–6.9 h, hard cap
+  1,470; beam 30 × 80: 2,425 calls, 4.5–13.5 h, hard cap 2,910.
+* **Budget.** `max_calls` is the soft cap (past it nodes go prior-only; runs default 60, snapshots none).
+  The hard cap (G9) is 1.2 × the estimate: reaching it pauses with reason `budget`, and continuing needs a
+  new confirmation (the cap becomes the calls paid plus 1.2 × the estimate of what is left). Each run folder
+  keeps a paid-calls ledger (`calls_paid.tsv`: cache key, level), so a pause and resume spends and decides
+  exactly as an uninterrupted run, and `calls_paid` / the manifest's `spent_calls` are exact.
+* **Pauses and cancels.** A usage limit pauses the whole level (no other node starts a call); the job
+  manager resumes after the reset only when the CLI names one (`|epoch`, `resets 3pm (zone)`, `resets Mon
+  9am`). Cancel is graceful (calls in flight finish and are cached) unless `force`. All calls of the process
+  share MSL_LLM_CONCURRENCY slots (backend.cli_slot), with the translator too.
+* **Confirmation.** With the real CLI, starting, resuming or extending a run, 假如, 补写叙事 and generating a
+  saved run's 未生成 branch need `confirm: true`; a snapshot's 未生成 branch does not (the user's decision).
+* **Requests.** Every state-changing `/api/agents/*` request must come from this server's own pages (Host,
+  Origin and Sec-Fetch-Site) and carry a JSON body; the server's `agents_guard` middleware refuses the rest
+  with 403 before routing.
+* **Engine invariants.** Every particle's books are stepped with its own options' account actions
+  (accounts.per_particle_actions). A follower's shown probability is the marginal of its reaction rows
+  under the leader's adopted probabilities, and the allocation realizes it. Each consequence branch is split
+  into cells by the discrete state (facts, political state, commitments) of the most consequential columns
+  within a budget (`split_max`; 24 cells at small beams, 4 at beam 30), so minority discrete states such as
+  "the House holds" become children with their own mass; what a cell still misstates is reported per node
+  (`summary.discrete`) and per level (`discrete_misstated`). Children keep their natural particle counts;
+  the level reduction resamples the survivors to N.
+* **UI deviations from AGENT_DESIGN §13.** The comparison card has the three trees' 期末区间, the attribution
+  bars, 各季动作分布, a 分支 × 资产 table and the 8-quarter agent-vs-base-rate KPI; the two-stage sankey is not
+  built (the overview canvas shows the same flow).
+
 ## Web app (web/)
 
 No build step: index.html loads the vendored ECharts 5.5.1

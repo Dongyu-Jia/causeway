@@ -7,6 +7,7 @@
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~5 min, not run by default)
     python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
+    python -m scenariolab.build --only agents_accounts   # the agent tree's root accounts and history priors
     python -m scenariolab.build --all           # every step, the opt-in ones included
 
 Order matters: causality writes the structural shock series that later steps
@@ -25,6 +26,10 @@ scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
 the scenario paths; llm writes what the translator would send the model (it
 never calls a model: its status runs only `claude --version` and `claude auth
 status`, which spend no usage; its regime section reads regimes.json).
+agents_accounts needs no engine context and runs right after the panel: it
+downloads the agent tree's free account sources into data/raw/agents/ (cached;
+SEC only with SEC_USER_AGENT), writes agents_accounts_root.json and re-estimates
+the actors' history priors from local data (agents_priors.json).
 """
 from __future__ import annotations
 
@@ -40,9 +45,10 @@ from .data.panel import load_meta, meta_sources, save_panel
 from .engine.factor_model import ModelSpec
 from .env import load_dotenv
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes", "forecast",
-         "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+STEPS = ["panel", "agents_accounts", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios",
+         "regimes", "forecast", "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
 OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
+NO_CONTEXT = {"panel", "agents_accounts"}  # steps that never read the engine context (it is not loaded for them alone)
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
 
@@ -137,18 +143,20 @@ def main(argv=None) -> int:
             print(f"[build] {name} FAILED", flush=True)
         return None
 
+    needs_ctx = bool(set(steps) - NO_CONTEXT)
     if "panel" in steps:
         step("panel", lambda: save_panel(refresh=args.refresh))
-    elif not config.PANEL_PATH.exists():
+    elif needs_ctx and not config.PANEL_PATH.exists():
         save_panel(refresh=args.refresh)
 
-    ctx = EngineContext.load(selection=False)
+    step("agents_accounts", lambda: _run("agents.accounts", None, refresh=args.refresh))
+    ctx = EngineContext.load(selection=False) if needs_ctx else None
     step("causality", lambda: jsonio.dump(_run("analysis.causality", ctx, refresh=args.refresh),
                                           out / "causality.json"))
-    ctx = EngineContext.load(selection=False)          # merge freshly written shocks
+    ctx = EngineContext.load(selection=False) if needs_ctx else None   # merge freshly written shocks
     step("eras", lambda: jsonio.dump(_run("analysis.eras", ctx), out / "eras.json"))
     step("diagnostics", lambda: jsonio.dump(_run("analysis.diagnostics", ctx), out / "diagnostics.json"))
-    ctx = EngineContext.load(selection=True)           # today's transmission = selected model
+    ctx = EngineContext.load(selection=True) if needs_ctx else None    # today's transmission = selected model
     if "eras" in steps and "diagnostics" in steps and eras_model_stale(out):
         # the walk-forward picked another model than the one eras just attributed with (a fresh clone's first
         # build, a new factor): attribute again, so eras.json and the scenarios use the same transmission

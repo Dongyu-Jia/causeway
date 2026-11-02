@@ -27,6 +27,7 @@ const TABS = [
   { group: '未来' },
   { id: 'scenarios', name: '未来情景' },
   { id: 'lab', name: '情景实验室（LLM）' },
+  { id: 'agents', name: '智能体推演' },
   { id: 'portfolio', name: '组合评估' },
   { id: 'withdrawal', name: '提取与破产概率' },
   { group: '说明' },
