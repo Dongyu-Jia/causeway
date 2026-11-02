@@ -286,5 +286,82 @@
   }
  },
  "frozen_sha256": "256ab646d51e55c8805d7664f720b39e15cc22ba03c5afe59ed66d08600581c2",
- "results": []
+ "results": [
+  {
+   "n": 1,
+   "kind": "status",
+   "started_at": "2026-11-02T08:03:59-08:00",
+   "finished_at": "2026-11-02T08:03:59-08:00",
+   "frozen_sha256": "256ab646d51e55c8805d7664f720b39e15cc22ba03c5afe59ed66d08600581c2",
+   "inputs_check": {
+    "matches": null,
+    "note": "a status entry runs nothing; inputs are not required to match",
+    "differ_now": 0
+   },
+   "result": {
+    "evaluable": false,
+    "switch": false,
+    "missing": [
+     "P7: the narrative test (episode registry and sealed key; the oracle arms O-A, O-B, O-full on both engines; the narrative arms N1-N3 on identical translations; PIT) has not been built or run",
+     "P6: qtable.to_phase_spec (E's statements) does not exist yet",
+     "a real-backend narrative run on the v2 narratives, started by the user (condition 4)"
+    ],
+    "narrative_records_found": [],
+    "conditions": {
+     "1": {
+      "status": "snapshot only (evaluated by P9)",
+      "snapshot": {
+       "available": true,
+       "file": "data/results/qmodel.json",
+       "sha256": "30d800252b221e49a9b124078bd5ba74b38a335d885ad1f9d8c42da6dec33f98",
+       "created": "2026-11-02 07:11",
+       "checks": 77,
+       "passed": 51,
+       "failed": [
+        "1994Q4:F2_cpi_acf4",
+        "1994Q4:F5_corr_dgz_useq",
+        "1994Q4:F5_corr_dspread_useq",
+        "1994Q4:F5_stock_bond_core4_0",
+        "1994Q4:F6_bounds",
+        "1994Q4:F6_tails",
+        "2004Q4:F2_cpi_acf4",
+        "2004Q4:F5_corr_dspread_useq",
+        "2004Q4:F5_stock_bond_core4_0",
+        "2004Q4:F6_bounds",
+        "2004Q4:F6_tails",
+        "2014Q4:F2_cpi_acf4",
+        "2014Q4:F5_corr_dspread_useq",
+        "2014Q4:F5_stock_bond_core4_0",
+        "2014Q4:F6_bounds",
+        "2014Q4:F6_max13_gz",
+        "2014Q4:F6_max13_spread",
+        "2014Q4:F6_tails",
+        "2026Q3:F2_cpi_acf4",
+        "2026Q3:F3_gt6q",
+        "2026Q3:F5_corr_dspread_useq",
+        "2026Q3:F5_stock_bond_core4_0",
+        "2026Q3:F6_bounds",
+        "2026Q3:F6_tails",
+        "2026Q3:F9",
+        "F7"
+       ],
+       "condition_1_would_hold": false
+      }
+     },
+     "2": {
+      "status": "not evaluable (needs P7)"
+     },
+     "3": {
+      "status": "not evaluable (needs P7)"
+     },
+     "4": {
+      "status": "not evaluable (needs P6, P7 and a real run)"
+     }
+    },
+    "consequence": "the monthly engine stays the default; the quarterly stack serves the lab and the agent tree, labelled 试运行",
+    "zh": "切换关 T-S 现在不能评估：叙事检验（P7）还没有建成，也没有运行过。月度引擎仍是默认，季度模型标“试运行”。条件 1（T-F）只记录当前快照，正式评估在 P9。"
+   },
+   "result_sha256": "b10f2d50a21970b174a6a6af6347349fc143260512fab94ae3e30826295c889c"
+  }
+ ]
 }
