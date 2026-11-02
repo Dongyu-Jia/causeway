@@ -1,0 +1,195 @@
+{
+ "schema": "preregistered/1",
+ "record": "TC",
+ "date": "2026-11-02",
+ "title": "T-C：因子层补全的预注册检验",
+ "frozen_at": "2026-11-02T09:58:18-08:00",
+ "frozen": {
+  "record": "TC",
+  "date": "2026-11-02",
+  "frozen_at": "2026-11-02T09:58:18-08:00",
+  "protocol": {
+   "id": "T-C",
+   "revision": 2,
+   "spec": "SIM_DESIGN §3.2, §3.5, §5.7, §5.8; §14 P5",
+   "question": "Choose the completion weight w and decide the regime-dependent covariance on validation; score the completion of unstated factors once on the test; gate: where the model cannot infer, it stays near unconditional.",
+   "implementation": "scenariolab.qmodel.factor_checks.tc(Q, P, seed, scoring='exact'), called once by this runner on the monthly panel P and the quarterly panel Q; qmodel.json's stored T_C is not read for the decision",
+   "validation": {
+    "origins": "1995Q1..2014Q4 (80 quarters)",
+    "refits": "yearly, each January on data to the previous December (fit at (year-1)Q4, anchors fitted to the train end, §5.5)"
+   },
+   "test": {
+    "fit_end": "2014Q4",
+    "origins": "2015Q1..2026Q3 (47 quarters)"
+   },
+   "mode": "step mode (H = 1): the Gaussian conditional moments of the quarter given the origin's state and the stated fields (factors.conditional_moments)",
+   "scoring": "exact",
+   "scoring_text": "every x field is a monotone transform of one linear combination of the stacked quarter, so its predictive mean, CRPS and 80% interval are computed exactly (factor_checks.step_moments: Gaussian closed forms, Gauss-Hermite for the bounded scales, censored-normal means at the floors, the pinball integral on a fixed normal-quantile grid); no Monte Carlo, so the conditional and unconditional sets differ only by the statements and every gate cell's MC standard error is 0",
+   "information": "the origin's state from data published by its start only (factors.initial_state 'published', §3.2: the previous quarter's CPI, IP, unemployment, NIPA, Z.1, profits and the budget are imputed from the joint distribution given what was published)",
+   "patterns": {
+    "a": "a random 50% of the factor layer's x fields stated (rng([seed, year, quarter]))",
+    "b": "only the E0 and E0p fields stated (narrative-like)",
+    "c": "only the financial-conditions fields stated (card fc_role required_one or optional)"
+   },
+   "stated_values": "the realized values, saturated as §3.5 writes it (the gap to the conditional mean at +-4 training sd, factors.saturation); d_ff is not stated in zero-bound quarters (the shadow rate is not observed at the floor)",
+   "metrics": "per unstated field: completion R² against the model's unconditional (state-only) prediction, CRPS, 80% coverage (the exact 10-90% interval)",
+   "w_grid": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0
+   ],
+   "selection_w": "w* = argmin over the grid of the mean CRPS relative to the unconditional CRPS, pattern (b), E1 / E1c / E2 fields, pooled covariance, validation origins",
+   "regime_cov": {
+    "n0": 40,
+    "regimes": "s_zlb, s_core4",
+    "adopt_if": "at w*, pattern (b): the E1-class mean relative CRPS in ZLB quarters is lower with the regime covariance than without, and its change in every other cell (pattern a, c, and b outside the ZLB; ZLB and normal quarters) is at most +0.01"
+   },
+   "gate": "pattern (b) on the test: every E1-class field's completion R² >= -0.02 (exact; MC se 0)",
+   "seed": 20261102,
+   "draws": null,
+   "application": "This run records T-C's selection and gate. It does not change config_q.COMPLETION_W or REGIME_COV: path mode (qmodel.factors.simulate) would follow them while step mode (qmodel.rollout.Stepper) implements neither, so switching them breaks the step / path consistency of §3.7. The lead decides after the run.",
+   "supersedes_because": [
+    "the frozen record's gate was decided by Monte Carlo noise: R² on means of 1,000 draws per origin with independent conditional and unconditional streams (re-scored on 8 draw seeds the gate passed in 3; the probability that the linear E1 satellites pass was about 0.13)",
+    "its initial states used the previous quarter's realized values, which the panel's own release lags mark as unpublished at the origin (38 of 52 stacked variables at a January origin)",
+    "its saturation band was ±4 sd of a 400-path Gaussian prior with the t-weighted Sigma, narrower than §3.5's ±4 training sd"
+   ],
+   "disclosure": [
+    "Seen before this record was frozen: the frozen record's run (2026-11-02_TC.json: w* 0.25, regime covariance not adopted, gate failed with d_tp10 at -0.029) and the statistics review's re-scoring of its test block: exact Gaussian means under the frozen information gave d_tp10 -0.0206 and d_bdlev -0.0304 (both below -0.02); hiding only the 18 unpublished satellites gave d_tp10 -0.0048, d_cpbill 0.0043, d_hpi 0.0222. This record's combination (exact scoring, every unpublished value imputed, §3.5 saturation) had not been run on the test before it was frozen; its plumbing was checked on validation origins only.",
+    "The test decade 2015-26 has been seen by earlier rounds (§4.2 disclosure).",
+    "Nothing else changed: data files, seed, patterns, w grid, selection and regime rules and the gate are the frozen record's. The factor layer's code changed in the same fix round (the bootstrap pool is centred, which step-mode Gaussian scoring does not use; the rarity statistic; the QTable reader)."
+   ],
+   "interpretations": [
+    "'E1 field' in the gate = card endogeneity class E1 (financial markets); the w selection uses E1, E1c and E2 (the classes §3.5 shrinks).",
+    "Completion is scored in step mode (one quarter), as the implementation does."
+   ]
+  },
+  "inputs": {
+   "code": {
+    "digest": "44d73f8791637023e0367a8feabc37b4f6168d3f3241153db3b1ca031e5bed28",
+    "files": {
+     "scenariolab/__init__.py": "1fc5214f23bc2be7281fe01732b0b4a007bb90abd308d17649e00a8c101b2ac3",
+     "scenariolab/config.py": "59ad69af53eb9238f3fc39cfcf1a1af85de18626ccac0d966560c159726ea38d",
+     "scenariolab/context.py": "4670c648ddf03d57be2198339598d1302b4d8e84383f8fe7cec7b9a094a90fc6",
+     "scenariolab/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/data/import_raw.py": "cf7e8274e1dfe9b25314e43c760aabfe3defb6a466651b1098d7f6f35d77df0d",
+     "scenariolab/data/panel.py": "279bef01be841f25ba18a007de5ac8b022a8479fb48a93d511d0174bb6370ddf",
+     "scenariolab/data/sources.py": "b9c03cf8c9e381f3b7ff047931882c51cb2b11b7ec49c32f3b616b61721e6566",
+     "scenariolab/engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/engine/anchors.py": "f8debab60b5ec36f33d92444a2966237259638bc3eabf10409fa1ce8f732206c",
+     "scenariolab/engine/ep.py": "0a0df5788e6cfa2607b4968426f753ed8a66c1bf4b82d734df808cc80d12a275",
+     "scenariolab/engine/factor_model.py": "c78236f0042b707d90dc84b9150927902b26d732fe546ac00c4daf25c2f63cef",
+     "scenariolab/engine/pooling.py": "e000369e42c33f95091bc6027c5b5f874edc63200b8d4522ef8d27fefea9fb94",
+     "scenariolab/engine/regimes.py": "1369b1a9a96d9b6099c642dfe08bab96b9e1550df0d70882f537aded469fc25e",
+     "scenariolab/engine/residuals.py": "8fb7e76c359154185fb1031ba6fff595e423fc03b7d3f17a981c69568a71ba12",
+     "scenariolab/engine/sampler.py": "29a4dddfc34ca6faf03592c98b90a19f3c4deaf827847e3c19b525d1b61ee7fe",
+     "scenariolab/engine/simulate.py": "d07aac0c3f289c071a0a1202947bef51b25e18962c3f40c94c38c1da0348bb0f",
+     "scenariolab/env.py": "11a23abda67057d906785fec417637c8402111499e0c50623062ec287b329c36",
+     "scenariolab/evaluation/__init__.py": "f3e74986a68b5eb3d5128f9b9a415802cce8e44fff696f1309ce1bac5e8c92ed",
+     "scenariolab/evaluation/harness.py": "25b1c3a8b42f7d32144c846bac84d391497ac13a6ef39cf1262aac14e02ac281",
+     "scenariolab/evaluation/protocol.py": "c29699e09ef1a1bc2da97bda45c97234fc2b5f3c05a849a9c73d309b88835ebe",
+     "scenariolab/jsonio.py": "e05c7ec2c64013f3f2af84a9afed5fed354b0531efd09bf88014ae0885234e1e",
+     "scenariolab/qmodel/__init__.py": "5723fe91dc7844b3e989e13c6515fb93110eb53d6bd8f93c76f3105632836651",
+     "scenariolab/qmodel/assets.py": "9067dc478c94bd50eff412638cbf74a27dce7e14716fa766ee96c8dd1e518542",
+     "scenariolab/qmodel/card.py": "408b95d61be942c6f8ece4c1d30b65aabbcc8e576104df3d4213004b9ca42385",
+     "scenariolab/qmodel/config_q.py": "4b8e4948fc382c5020ee90480bb422376fe60d7529e04086d303dc9d29f80b78",
+     "scenariolab/qmodel/factor_checks.py": "e1746221cff04cd318c34d821a2ce32adc60c92efef703c6862e0e745c2fe467",
+     "scenariolab/qmodel/factors.py": "7fc55e55329a70dcc99dce962e1b52a1e5413970149c7f4a6d4ffef7e5c2c8ae",
+     "scenariolab/qmodel/panel.py": "e661ac85d3a8b9b2725436305b886eaf456732669f242ad69ffebb66fbe2ab95",
+     "scenariolab/qmodel/policy.py": "edac39942a49bb53d25bfa1c0ae0e089203c288b1b9f830aa644c3354566dbb2",
+     "scenariolab/qmodel/sources_q.py": "5a189be62127f5078371e63c94a442fd9a86e91941513a4575d7533e320808fc",
+     "scenariolab/qmodel/spec.py": "788f59ad3d7caa40422b30322ca5d7a9c5bb6b2eb4eb3ee914ffb7faf7b3e31c",
+     "scenariolab/qmodel/valuation.py": "34fef641c1c1798611a79641a6feb026941d8d02ecae880b82d6a5fdeaef7ca4",
+     "tools/run_preregistered.py": "5f755a32487eee79094eec07072c962157dd37d482db038ecaf4686bce054a44"
+    }
+   },
+   "card": {
+    "digest": "e9b7da41c489fcf47946f7c6b4cd7c2bc9e83ea1255dd8125955ee2198a0cfe3",
+    "files": {
+     "scenariolab/qmodel/card.json": "37bfde1d1b3e47d7f989a25cbaa35406d852e9d7e0a8cf14a0102105e03b4273",
+     "scenariolab/qmodel/schema.json": "435daadc14af7cef3854f5c0a79825af41f2196e05661d7345690379bfd953cf",
+     "scenariolab/qmodel/schema_view.json": "5f8690f1b63fdcf1e7c8dcc19323827c45adccdf4734ba07dfffd2bdb03b38cc"
+    }
+   },
+   "data": {
+    "digest": "e701b51075918ab0a5938da1f4d98b5f3077d38f8be9b04652d6f3417ee977f2",
+    "files": {
+     "data/processed/panel_monthly.csv": "3fc40ffbe1dddf759062cf32839435568c9687e41ee2b7faedbb5daa7b474aa2",
+     "data/processed/panel_meta.json": "7fea5c0a27368a533cf7e338c86e08cc3513b4ebb860f2b5073cbe652f444d75",
+     "data/processed/panel_quarterly.csv": "45353cea730bd53503197672edb1854cb61627d81b6a150cbaf676ff7a7c0ace",
+     "data/processed/panel_quarterly_meta.json": "d2ce0d686f1a986b91356f06b38433ea33b341d31fc1e2f05383bc59a09220f2",
+     "data/processed/structural_shocks.csv": "b0a4e5063c4123d2972d7b0b13a0207498e37b3f1be1c5f5bb88ef3598fc6953",
+     "data/results/model_selection.json": "240042c77561e5197a216901eaf8068495a66d49622002a7ab24db899479c3ae",
+     "data/raw/shiller/ie_data.xls": "98a54927942e842ec07ffe73000998e793953708c345b6b27bb363e9ada8366a"
+    },
+    "panel_quarterly_info": {
+     "today": "2026Q4",
+     "last_data_quarter": "2026Q3",
+     "inputs_digest": "2bac1b1dd4202e30148a52ed63fbeca9ae9ad04c7f120e94738db5553e61af76",
+     "card_digest": "37bfde1d1b3e47d7f989a25cbaa35406d852e9d7e0a8cf14a0102105e03b4273"
+    }
+   }
+  },
+  "environment": {
+   "python": "3.12.4",
+   "numpy": "2.5.4",
+   "pandas": "3.1.0",
+   "scipy": "1.18.1",
+   "platform": "macOS-26.3-x86_64-i386-64bit",
+   "git_head": "784b2b1127ce36d603052f8ff6338da3c2ee1901",
+   "git_branch": "feat/quarterly-model",
+   "git_dirty_entries": 32,
+   "code_commit": {
+    "head": "784b2b1127ce36d603052f8ff6338da3c2ee1901",
+    "closure_files": 33,
+    "closure_clean": false,
+    "dirty_closure_files": [
+     "scenariolab/data/import_raw.py",
+     "scenariolab/data/panel.py",
+     "scenariolab/data/sources.py",
+     "scenariolab/engine/anchors.py",
+     "scenariolab/engine/simulate.py",
+     "scenariolab/evaluation/__init__.py",
+     "scenariolab/evaluation/harness.py",
+     "scenariolab/evaluation/protocol.py",
+     "scenariolab/qmodel/__init__.py",
+     "scenariolab/qmodel/assets.py",
+     "scenariolab/qmodel/card.py",
+     "scenariolab/qmodel/config_q.py",
+     "scenariolab/qmodel/factor_checks.py",
+     "scenariolab/qmodel/factors.py",
+     "scenariolab/qmodel/panel.py",
+     "scenariolab/qmodel/policy.py",
+     "scenariolab/qmodel/sources_q.py",
+     "scenariolab/qmodel/spec.py",
+     "scenariolab/qmodel/valuation.py",
+     "tools/run_preregistered.py"
+    ],
+    "rule": "commit the code before freezing; reproduction = git checkout <head> (no squash merge of the record commits)"
+   },
+   "llm": "none (no model is called)",
+   "downloads": "none"
+  },
+  "rules": {
+   "append_only": "results are appended; the frozen part never changes",
+   "runs": "exactly once",
+   "inputs_must_match": true,
+   "supersede": "a protocol change is a new dated record that names this one"
+  },
+  "supersedes": {
+   "record": "2026-11-02_TC.json",
+   "frozen_sha256": "5b8cced35e670082b1a22cdc6913e6c26645130cedefa890ce902d4266f87690",
+   "frozen_at": "2026-11-02T07:59:39-08:00",
+   "results": [
+    [
+     1,
+     "run",
+     "2c6f6ca732d933a17303416d1c5f13d3097d82763ec12db00f141a2ba6132022"
+    ]
+   ]
+  }
+ },
+ "frozen_sha256": "9cc0a94442ce36175506ccfd46240b97cd53e50b94a5b0560ae69dd8a4813ef5",
+ "results": []
+}

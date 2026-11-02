@@ -1,0 +1,405 @@
+{
+ "schema": "preregistered/1",
+ "record": "TA",
+ "date": "2026-11-02",
+ "title": "T-A：资产层候选项的预注册检验",
+ "frozen_at": "2026-11-02T07:59:39-08:00",
+ "frozen": {
+  "record": "TA",
+  "date": "2026-11-02",
+  "frozen_at": "2026-11-02T07:59:39-08:00",
+  "protocol": {
+   "id": "T-A",
+   "spec": "SIM_DESIGN §4.2 (protocol), §4.3 (the NN row), §14 P5",
+   "question": "Does a registered addition to the asset layer L0 improve the oracle-macro fit of the 10 risk assets enough to be adopted? If T-A fails or has not run, the asset layer is L0.",
+   "baseline": {
+    "model": "L0q",
+    "definition": "scenariolab.qmodel.assets.AssetLayer: the factor round's F (data/results/model_selection.json; monthly OLS on price returns refitted at every train end) applied to the quarter's factor sums from the quarterly fields; tp10_x_core4 switched at the quarter's start; mechanical assets by identity; 13-asset residual vectors in 2-quarter blocks scaled by s_vol; 200 block-bootstrap refits of F (12-month blocks), one per path"
+   },
+   "candidates": {
+    "C1": {
+     "zh": "F 之外的一级字段",
+     "kind": "fields",
+     "mode": "quarter",
+     "terms": [
+      "d_igrea",
+      "x_supply_chain",
+      "d_bdlev",
+      "d_epu",
+      "d_tp10",
+      "d_oil_sup"
+     ],
+     "scoped": {
+      "d_corptax": [
+       "healthcare",
+       "energy",
+       "us_equity"
+      ],
+      "d_sent": [
+       "financials"
+      ],
+      "d_usd_em": [
+       "industrials",
+       "us_equity",
+       "energy"
+      ],
+      "d_natgas": [
+       "utilities",
+       "energy"
+      ],
+      "d_lprod": [
+       "nasdaq",
+       "us_equity",
+       "healthcare"
+      ],
+      "d_tips10": [
+       "gold",
+       "utilities"
+      ]
+     },
+     "first": {
+      "d_tips10": "2003Q2"
+     },
+     "selected_on": "the schema tiers, chosen with all three decades (admitted)"
+    },
+    "C2": {
+     "zh": "状态与交互项",
+     "kind": "states",
+     "mode": "quarter",
+     "terms": [
+      "s_vol",
+      "s_zlb",
+      "s_core4",
+      "y10_x_pd",
+      "oil_x_zlb"
+     ],
+     "selected_on": "the research qmodel (q03/q04), chosen on the test decades"
+    },
+    "C3": {
+     "zh": "下一季的工业产出与失业率（只在路径模式）",
+     "kind": "lead",
+     "mode": "path",
+     "terms": [
+      "d_ip_lead",
+      "d_unrate_lead"
+     ],
+     "selected_on": "the layers report, full-sample lead-lag evidence (E21)"
+    }
+   },
+   "candidate_fit": "per risk asset, a ridge on the candidate's terms fitted to the L0 training residuals (terms standardized on the training quarters and saturated at +-4 sd; lambda = g x n by blocked 5-fold CV, g in {0.01, 0.03, 0.1, 0.3, 1, 3, 10}); L0's coefficients are unchanged. Several candidates together are ONE ridge on the union of their terms (tools/run_preregistered.JointCandidateLayer; for one candidate it equals qmodel.assets.AssetLayer). Systematic part with C2 (states rolled by the path): the mean of 200 paths (seed 0), as qmodel's harness adapter does.",
+   "c3_scoring": "C3 is a path-mode candidate (next-quarter d_ip and d_unrate). Under the harness rule (no factor data after the window) the realized leads are used inside the window and the window's last quarter's lead is set to the lead's training mean (the model's unconditional value); at 1Q C3 therefore has no lead information. C3[lead_oracle] reads the realized lead of the quarter after the window (the research evidence's form): selection period only, report-only.",
+   "report_only": {
+    "G_app": "L0q + C1 + C2 in one ridge: the research qmodel's G additions (tier-1 fields beyond F; states and interactions) in the app's form. Not the research's structured Gaussian G (not ported). The NN rule's comparator; never adopted here (its parts go through the gate one by one).",
+    "NN": {
+     "what": "port of the research qcore.MaskedNN onto the app's quarterly panel (this runner)",
+     "inputs": "[s, x * m, m]: s = 17 states + the 13 assets' last-quarter and 4-quarter returns; x = the 52 card fields with x_oil_cause carried by d_oil_sup, + the 5 policy shocks u_* of qmodel.policy fitted to the train end; m = the mask (1 where measured)",
+     "outputs": "13 asset log returns + y_mult, and x",
+     "config": {
+      "hidden": 24,
+      "alphas": [
+       0.03,
+       0.1,
+       0.3,
+       1.0,
+       3.0
+      ],
+      "K": 8,
+      "w_x": 0.5,
+      "maxiter": 300,
+      "n_seeds": 4,
+      "val_share": 0.8,
+      "clip": 4.0,
+      "inflate_bounds": [
+       1.0,
+       2.0
+      ],
+      "train_start": "1973Q2",
+      "seed": 0,
+      "min_obs": 12,
+      "n_sim": 300,
+      "pool_seed": 99,
+      "val_mask_seed": 321
+     },
+     "architecture": "one tanh layer of 24 units + a linear skip from [s, x * m]; standardized inputs saturated at +-4 sd; loss = MSE on returns + 0.5 x MSE on masked-but-measured x + alpha/2 ||W||^2; 8 copies of each training quarter (1 unmasked, 7 with random masks: iid at a random rate, or E1/E1c/E2 or E1/E2 masked); L-BFGS-B, 300 iterations; alpha by time-ordered validation (first 80% / last 20% of the training quarters; full, half-masked and O-A inputs); 4 seeds",
+     "band": "the ensemble's training residual vectors drawn iid, scaled by h(s_vol) and by the out-of-time / in-sample error ratio (clipped to [1, 2])",
+     "windows": "1Q: the mean on the origin's start states and the quarter's realized x. 4Q: recursive as the research harness adapter (qeval.path_block): the realized x and macro states of every quarter, the asset-derived states (P/D, CAPE, FCF yield, s_vol, momentum) rolled with each of 300 simulated paths; s_ecyc held at the origin (the app's y_mult is the CAPE multiple, so Δlog Ê is not an output); after the origin u_def and u_ptax are recomputed from each path's simulated equity returns (their systematic parts read the previous four quarters' returns; the research adapter read the realized ones, a leak under the harness rule)"
+    },
+    "NN-res": {
+     "run": false,
+     "reason": "its backbone is the research's structured Gaussian G with masked completion, which is not ported; the app's asset layer takes complete fields, so NN-res cannot be built as specified. Report-only (§4.3); in the research it stayed within +-0.05 of G and was never significant."
+    },
+    "C4": {
+     "run": false,
+     "reason": "V-AGG needs 8 sector-group return equations; the asset layer carries 6 sectors (s_w has 8 weights). Report-only (§4.2); not implemented (P2 registered it as unavailable)."
+    },
+    "C3[lead_oracle]": "see c3_scoring"
+   },
+   "selection": {
+    "protocol": "rolling (harness): origins at quarter starts 1990-01..2014-10 (100), refitted every January on data to the previous December (train ends 1989-12..2013-12: 25 fits)",
+    "data_cut": "the monthly panel to 2014-12 and the quarterly panel to 2014Q4 before any fit or score: no selection step can read the test decade",
+    "roll_first": "1990-01",
+    "roll_last": "2014-10",
+    "refit_months": 12,
+    "data_end": "2014-12",
+    "horizons_q": [
+     1,
+     4
+    ],
+    "spans": {
+     "1990-1994": [
+      "1990-01",
+      "1994-12"
+     ],
+     "1995-2004": [
+      "1995-01",
+      "2004-12"
+     ],
+     "2005-2014": [
+      "2005-01",
+      "2014-12"
+     ],
+     "1990-2014": [
+      "1990-01",
+      "2014-12"
+     ]
+    },
+    "gate_decades": [
+     "1995-2004",
+     "2005-2014"
+    ],
+    "gate_horizon_q": 1,
+    "cells": "a cell holds the windows whose origin and end lie in its span (overlapping windows at 4Q)",
+    "models": [
+     "L0q",
+     "L0q+C1",
+     "L0q+C2",
+     "L0q+C3",
+     "L0q+C3[lead_oracle]",
+     "G_app",
+     "NN"
+    ]
+   },
+   "gate": {
+    "horizon_q": 1,
+    "decades": [
+     "1995-2004",
+     "2005-2014"
+    ],
+    "min_gain": 0.005,
+    "floor": -0.02,
+    "lb_above": 0.0,
+    "statistic": "gain = mean10 R² (mean over the 10 risk assets of R² against the training-mean drift) of L0 + candidate minus L0, on the cell's common windows; 90% interval by a moving-block bootstrap of windows (blocks of 4, 2000 draws, the same resampled windows for both models)",
+    "rule": "pass if the gain is >= +0.005 in both 1995-2004 and 2005-2014, > -0.02 in both, and its 90% lower bound is > 0 in at least one of them",
+    "4q": "computed and reported (gate_4q); not decisive"
+   },
+   "test": {
+    "protocol": "split (harness): one fit on data to 2014-12, scored on 2015-01..2026-09",
+    "train_end": "2014-12",
+    "first": "2015-01",
+    "last": "2026-09",
+    "group": "2015-2026",
+    "horizons_q": [
+     1,
+     4
+    ],
+    "n_1q": 47,
+    "n_4q_nonoverlap": 11,
+    "windows": {
+     "1q": "the 47 quarters 2015Q1..2026Q3",
+     "4q": "the 11 non-overlapping calendar years 2015..2025 (origins each January); the 44 overlapping 4Q windows are reported"
+    },
+    "models": "L0q; the union of the candidates that passed the gate (if any), as one model; the report-only rows G_app and NN",
+    "not_scored": "candidates that fail the gate; C3[lead_oracle]"
+   },
+   "test_rule": {
+    "lb_1q_above": 0.0,
+    "lb_4q_above": -0.02,
+    "cov80_1q": [
+     0.75,
+     0.88
+    ],
+    "adopt_if": [
+     "ΔR²(1Q) against L0 (47 quarters): 90% lower bound > 0 (moving blocks of 4 quarters, 2000 draws)",
+     "ΔR²(4Q) against L0 on the 11 non-overlapping windows: 90% lower bound > -0.02 (blocks of one window = 4 quarters, 2000 draws)",
+     "80% coverage of the 1Q band (mean over the 10 risk assets) within [0.75, 0.88]"
+    ],
+    "union": "the selected candidates are tested together as one model; no subset is tried after the test"
+   },
+   "decision_rule": [
+    "no candidate passes the gate, or the union fails any test condition: the asset layer stays L0, config_q.TA_DEFAULT = ()",
+    "otherwise config_q.TA_DEFAULT = the selected candidates (id order); fields outside F reach assets only through the factor layer until then (§4.2 item 4)"
+   ],
+   "nn_reentry_rule": "report-only (§4.3, D4, U-10). The NN qualifies for re-entry only if it beats both G_app and L0 with a 90% lower bound > 0 at 1Q and at 4Q in both gate decades and in the test. Qualifying does not adopt it: the asset layer has no NN path; adoption would need a new decision and record.",
+   "harness": {
+    "n_paths": 500,
+    "seed": 11,
+    "band": [
+     0.1,
+     0.9
+    ],
+    "cma": "historical",
+    "n_boot_params": 200,
+    "fit_seed": 0,
+    "resid_block": 2,
+    "metrics": "scenariolab.evaluation.harness (R² vs the training-mean drift, its 90% block interval, CRPSS against the drift's distribution, 80% coverage, PIT)",
+    "price_returns": "cumulative log price returns of the 10 risk assets; mechanical assets are not scored"
+   },
+   "bootstrap": {
+    "n_boot": 2000,
+    "block_1q": 4,
+    "block_4q_nonoverlap": 1,
+    "metrics_n_boot": 1000,
+    "metrics_seed": 0
+   },
+   "seeds": {
+    "conditional_paths": 11,
+    "asset_layer_param_refits": 0,
+    "candidate_systematic_mean": 0,
+    "paired_bootstrap": 20261102,
+    "metrics_bootstrap": 0,
+    "nn": {
+     "fit": 0,
+     "validation_masks": 321,
+     "window_mean": "7 + 12 x year + month of the origin",
+     "band": "the harness window seed"
+    }
+   },
+   "disclosure": [
+    "2015-26 has been seen by every earlier round: the factor round's test was used for its choice, the schema tiers used it, and the qmodel scored its variants on it. This is a pre-registered re-test, not a fresh holdout. The only clean holdout is the prospective ledger from 2026Q4 (§9).",
+    "F's 1995-2004 was its validation period (GZ was selected with 1995-2004 as validation): L0 itself is not clean in that decade.",
+    "Before this record no implementation round scored a T-A candidate: P2's tests compute C1-C3 predictions on 2015Q1-2016Q4 only to check plumbing. L0's own split and rolling scores, including 2015-26, were computed by P2 (scratch x13) and P2 reported the quarterly L0's gap to the research L0.",
+    "The NN port is new: the research NN's scores (§4.3) are from the research panel; this run is the app's first NN score.",
+    "Before freezing, the runner's plumbing was checked on data cut at the end of 2014 (selection windows 2012-14, a stand-in test year 2014, a forced union) and on 1999-2000 (joint layer = AssetLayer for one candidate; the C3 lead rule; NN fit and finite predictions); no score was printed or read."
+   ],
+   "interpretations": [
+    "The gate is evaluated at 1Q (the schema's tier rule is a same-quarter increment); 4Q is reported.",
+    "Selection origins 1990Q1-1994Q4 are scored and reported (cells 1990-1994 and 1990-2014) but are not in the gate, which names two decades.",
+    "The test's 4Q statistic uses the 11 non-overlapping calendar-year windows; its bootstrap resamples whole windows.",
+    "Coverage at 1Q = the mean over the 10 risk assets of the share of the 47 test quarters inside the 10-90% band.",
+    "C3 under the harness rule: see c3_scoring.",
+    "A union of selected candidates is fitted jointly (one ridge).",
+    "G is G_app (L0 + C1 + C2), not the research's structured Gaussian.",
+    "CMA 'historical' for every model (walk-forward drift; R² against the training-mean drift)."
+   ]
+  },
+  "inputs": {
+   "code": {
+    "digest": "daef7e6b06dc4656d2d9da71441585aeaab50a2bbfb7036cd6b3a6607ce89a32",
+    "files": {
+     "scenariolab/__init__.py": "1fc5214f23bc2be7281fe01732b0b4a007bb90abd308d17649e00a8c101b2ac3",
+     "scenariolab/analysis/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/analysis/ablation.py": "29ccaeab48037f452f85a594f7a46133fdfe96145be23486acbb33370c98b7fa",
+     "scenariolab/analysis/backtest.py": "5106651be938715472b39d53e8e1b9cfb31257eef8d371388d32ea5b0724f53e",
+     "scenariolab/analysis/causality.py": "a27d7868456b86cc51e2b3c00146d16ddf36eb853362c39e21f44efb5c262ce6",
+     "scenariolab/analysis/diagnostics.py": "12a4ad84706d127c8123a0343a58b2248178816bc492821b3d69fd0e4f88d421",
+     "scenariolab/analysis/eras.py": "3fd9437e715ba5549c269f9c93bb2f1f80f3b4bcbc50eed65f511b072fd07db6",
+     "scenariolab/analysis/factor_audit.py": "a08f98bd6f5d280d10ef5366bf809683af1ebec2163521528ca48eea036fbd43",
+     "scenariolab/analysis/factor_tests.py": "072715c5ccd463a1ade8ce9db992c6a1e866d6116c6e01d74c6eb97b6a30036c",
+     "scenariolab/analysis/forecast.py": "7193852779935a49edbd13f18f3a30effc46d74b49b9be40936df427fec73b01",
+     "scenariolab/analysis/regime_forecast.py": "c77c18821c74d16f3840623c8ab8bfacc6bd4f5716de7327758f29411fda2a5a",
+     "scenariolab/analysis/regimes.py": "c58d280db0303e74b0e575f76881e30996743c7c8f1183dfdf3cc40e9ee26b8c",
+     "scenariolab/analysis/valuation.py": "36292dca63d456bb5aec562236c2eb1c45eb25bbb328739d5686794012a2ef4e",
+     "scenariolab/analysis/walkforward.py": "0bdfdaf7f5c96f8c16474f9c2062409e3c665054212fffc7b857de98fe5350bb",
+     "scenariolab/build.py": "b2567911d30b9029a5f56767f7f7f01abf4394c09e9002d5e2a8b43254313add",
+     "scenariolab/config.py": "59ad69af53eb9238f3fc39cfcf1a1af85de18626ccac0d966560c159726ea38d",
+     "scenariolab/context.py": "4670c648ddf03d57be2198339598d1302b4d8e84383f8fe7cec7b9a094a90fc6",
+     "scenariolab/data/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/data/import_raw.py": "cf7e8274e1dfe9b25314e43c760aabfe3defb6a466651b1098d7f6f35d77df0d",
+     "scenariolab/data/panel.py": "279bef01be841f25ba18a007de5ac8b022a8479fb48a93d511d0174bb6370ddf",
+     "scenariolab/data/sources.py": "bfd96d47dad021c94c8c180d7a87cee461a1ca84b6ba319780c73e15abefbae6",
+     "scenariolab/engine/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/engine/anchors.py": "f8debab60b5ec36f33d92444a2966237259638bc3eabf10409fa1ce8f732206c",
+     "scenariolab/engine/ep.py": "0a0df5788e6cfa2607b4968426f753ed8a66c1bf4b82d734df808cc80d12a275",
+     "scenariolab/engine/factor_model.py": "c78236f0042b707d90dc84b9150927902b26d732fe546ac00c4daf25c2f63cef",
+     "scenariolab/engine/pooling.py": "e000369e42c33f95091bc6027c5b5f874edc63200b8d4522ef8d27fefea9fb94",
+     "scenariolab/engine/regimes.py": "1369b1a9a96d9b6099c642dfe08bab96b9e1550df0d70882f537aded469fc25e",
+     "scenariolab/engine/residuals.py": "8fb7e76c359154185fb1031ba6fff595e423fc03b7d3f17a981c69568a71ba12",
+     "scenariolab/engine/sampler.py": "29a4dddfc34ca6faf03592c98b90a19f3c4deaf827847e3c19b525d1b61ee7fe",
+     "scenariolab/engine/simulate.py": "d07aac0c3f289c071a0a1202947bef51b25e18962c3f40c94c38c1da0348bb0f",
+     "scenariolab/engine/summary.py": "85410254aa51d14c8db0bb66f81b3a78c45323047ac324bc6837b98a02146d23",
+     "scenariolab/env.py": "11a23abda67057d906785fec417637c8402111499e0c50623062ec287b329c36",
+     "scenariolab/evaluation/__init__.py": "f3e74986a68b5eb3d5128f9b9a415802cce8e44fff696f1309ce1bac5e8c92ed",
+     "scenariolab/evaluation/harness.py": "25b1c3a8b42f7d32144c846bac84d391497ac13a6ef39cf1262aac14e02ac281",
+     "scenariolab/jsonio.py": "e05c7ec2c64013f3f2af84a9afed5fed354b0531efd09bf88014ae0885234e1e",
+     "scenariolab/llm/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/llm/claude_code.py": "4b2da599b788cf31c8fb5cc7c482b48ebd8efb39725410061780aa0b3050ccda",
+     "scenariolab/llm/translator.py": "d01e5b198f9429a0fbba86bf3dcd104d64622c6c6460f885ec07392ce0942a67",
+     "scenariolab/portfolio/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/portfolio/metrics.py": "759003c15d8cd50f845550fd8b8955580a1955b18c60805b57e1221dc85ddcea",
+     "scenariolab/portfolio/service.py": "6cd0996978e7ace067c6db78534234ef9dd79399153a5495466543ef941347e8",
+     "scenariolab/portfolio/withdrawal.py": "d37e81271af9a7c28b7af9bcc56fd03d681d8e9227540cbaaef54f0074a54691",
+     "scenariolab/qmodel/__init__.py": "5723fe91dc7844b3e989e13c6515fb93110eb53d6bd8f93c76f3105632836651",
+     "scenariolab/qmodel/adapter.py": "7823c2940874516780c051a471a3d44940a577f19bd2528ec59d7040c37419b3",
+     "scenariolab/qmodel/api.py": "48be74b457ac6c9a56f92c0ea56843df212728c633297155173c391434ab1ee7",
+     "scenariolab/qmodel/assets.py": "468229014a06aa58b20cbccd03745815d834ec2715cd1572f8a7ee446c25363b",
+     "scenariolab/qmodel/card.py": "408b95d61be942c6f8ece4c1d30b65aabbcc8e576104df3d4213004b9ca42385",
+     "scenariolab/qmodel/config_q.py": "ef411b7e3151fe69a2585ca68ef987222b93cc7a31c56e3b27a4ddb29e867cf1",
+     "scenariolab/qmodel/factor_checks.py": "fb412344c47d16cb9326f67a7027bf47f13f027bc0abc2aa5f6338810cfd9f4b",
+     "scenariolab/qmodel/factors.py": "1e5543d4d289119ca3dc2270de291d8660688bb6f98a63359ffc66073e07c010",
+     "scenariolab/qmodel/panel.py": "e291dcba194b58608415550c164d8538611c3368d8433d8e575b605cbdce02a8",
+     "scenariolab/qmodel/policy.py": "edac39942a49bb53d25bfa1c0ae0e089203c288b1b9f830aa644c3354566dbb2",
+     "scenariolab/qmodel/rollout.py": "07a6301fd9fccda12766495652600a8154b06dc225bdea78cb87a5b3b123e13f",
+     "scenariolab/qmodel/sources_q.py": "50e3feaa0d1763e00c581d4f0b233828c1518b289a14a8bf91461b13f32f253c",
+     "scenariolab/qmodel/valuation.py": "34fef641c1c1798611a79641a6feb026941d8d02ecae880b82d6a5fdeaef7ca4",
+     "scenariolab/scenarios/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+     "scenariolab/scenarios/calibrate.py": "dc525792bcd0404e964f0c4a35dd86dbe226d9f69f04836570a84be06782bf05",
+     "scenariolab/scenarios/library.py": "52624f4d5cfcf4e73fc341b8b2302e707af1c6e6ddfdfea910d5b26e029ba81b",
+     "scenariolab/scenarios/probabilities.py": "52810d01aa85368388aa70a23430754f4287133250ee3cc7fc9559083e1b19f4",
+     "scenariolab/scenarios/regime_views.py": "9af289017187dcc61396469ead431265db4e53f0a21c32e2aecb81460bbe4304",
+     "scenariolab/scenarios/runner.py": "fe63ffff4fc63cd7e3ee1ff5e8c6ef4c02dbe06eccc35f7fb6de06d3d5e2737a",
+     "scenariolab/scenarios/schema.py": "897f2709e5a1aed7f9a032a3c610cf5cd01f1ecfc30c2a9dada15d3fa2b1b073",
+     "scenariolab/server.py": "d022cd95b8c6f7a0f739b9267ad86de3295a38bb05dacc43e6adc26877fee9f5",
+     "tools/build_model_card.py": "87676132176104273c299a8f51ea71ede8bd6eaf8c16eed0da323b7e78bb0640",
+     "tools/run_preregistered.py": "ae6955862e3045f1236dc4f92dc2a405657e085eba133a6e69c52884331c215e",
+     "tools/schema_view.py": "3febfc34bfc925fb825ce28b5501d6732a8b212c8f7080152402ebcb765bd3c0"
+    }
+   },
+   "card": {
+    "digest": "e9b7da41c489fcf47946f7c6b4cd7c2bc9e83ea1255dd8125955ee2198a0cfe3",
+    "files": {
+     "scenariolab/qmodel/card.json": "37bfde1d1b3e47d7f989a25cbaa35406d852e9d7e0a8cf14a0102105e03b4273",
+     "scenariolab/qmodel/schema.json": "435daadc14af7cef3854f5c0a79825af41f2196e05661d7345690379bfd953cf",
+     "scenariolab/qmodel/schema_view.json": "5f8690f1b63fdcf1e7c8dcc19323827c45adccdf4734ba07dfffd2bdb03b38cc"
+    }
+   },
+   "data": {
+    "digest": "5339a3afb1dd649e109b56ff6de31a924245b019e6f76617c26b67edb4372527",
+    "files": {
+     "data/processed/panel_monthly.csv": "3fc40ffbe1dddf759062cf32839435568c9687e41ee2b7faedbb5daa7b474aa2",
+     "data/processed/panel_meta.json": "7fea5c0a27368a533cf7e338c86e08cc3513b4ebb860f2b5073cbe652f444d75",
+     "data/processed/panel_quarterly.csv": "45353cea730bd53503197672edb1854cb61627d81b6a150cbaf676ff7a7c0ace",
+     "data/processed/panel_quarterly_meta.json": "d6e4ff271fea1f882e21aff15d0cac54ebb6462b8d8a80c20bde3c1f89febc37",
+     "data/processed/structural_shocks.csv": "b0a4e5063c4123d2972d7b0b13a0207498e37b3f1be1c5f5bb88ef3598fc6953",
+     "data/results/model_selection.json": "240042c77561e5197a216901eaf8068495a66d49622002a7ab24db899479c3ae",
+     "data/raw/shiller/ie_data.xls": "98a54927942e842ec07ffe73000998e793953708c345b6b27bb363e9ada8366a"
+    },
+    "panel_quarterly_info": {
+     "today": "2026Q4",
+     "last_data_quarter": "2026Q3",
+     "inputs_digest": "fc3b09e37c6ba1c11f08a21e76d820d57d50488e31f15f4e9b4fe07d724a4edd",
+     "card_digest": "37bfde1d1b3e47d7f989a25cbaa35406d852e9d7e0a8cf14a0102105e03b4273"
+    }
+   }
+  },
+  "environment": {
+   "python": "3.12.4",
+   "numpy": "2.5.4",
+   "pandas": "3.1.0",
+   "scipy": "1.18.1",
+   "platform": "macOS-26.3-x86_64-i386-64bit",
+   "git_head": "784b2b1127ce36d603052f8ff6338da3c2ee1901",
+   "git_branch": "feat/quarterly-model",
+   "git_dirty_entries": 24,
+   "llm": "none (no model is called)",
+   "downloads": "none"
+  },
+  "rules": {
+   "append_only": "results are appended; the frozen part never changes",
+   "runs": "exactly once",
+   "inputs_must_match": true,
+   "supersede": "a protocol change is a new dated record that names this one"
+  }
+ },
+ "frozen_sha256": "85ab11fc80e41ceb41792cc4e41d28c18ec5be4569f6f06121614133b0791b63",
+ "results": []
+}
