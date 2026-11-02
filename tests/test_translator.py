@@ -21,8 +21,11 @@ NARRATIVE = "中东战争升级，霍尔木兹海峡航运受阻半年，油价�
 
 @pytest.fixture(autouse=True)
 def hermetic_env(monkeypatch):
+    """No .env, the default model and backend. These tests inject SDK clients, which means the api backend;
+    tests/test_claude_code.py covers the default claude_code backend."""
     monkeypatch.setattr(tr, "load_dotenv", lambda *a, **k: None)
     monkeypatch.delenv("MSL_LLM_MODEL", raising=False)
+    monkeypatch.delenv("MSL_LLM_BACKEND", raising=False)
 
 
 @pytest.fixture(scope="module")
@@ -173,11 +176,14 @@ def test_sdk_errors_map_to_chinese_messages(ctx):
 
 
 def test_status_requires_credentials(monkeypatch, ctx):
+    """The api backend (only when MSL_LLM_BACKEND=api): credentials checked locally, never a network call."""
     for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("MSL_LLM_BACKEND", "api")
     monkeypatch.setattr(tr, "_profile_configured", lambda: False)
     st = tr.status()
-    assert st == {"available": False, "model": tr.DEFAULT_MODEL, "reason": st["reason"]}
+    assert st == {"backend": "api", "label": tr.API_LABEL, "available": False, "model": tr.DEFAULT_MODEL,
+                  "reason": st["reason"]}
     assert "ANTHROPIC_API_KEY" in st["reason"]
     with pytest.raises(tr.TranslatorError, match="ANTHROPIC_API_KEY"):
         tr.translate(NARRATIVE, ctx)                                    # no client, no key: no network call
@@ -406,7 +412,11 @@ def test_run_writes_reference_file(ctx, tmp_path, monkeypatch):
     saved = json.loads((tmp_path / "llm_translator.json").read_text(encoding="utf-8"))
     assert saved["prompt"]["sha256"] == out["prompt"]["sha256"] and saved["translation"] is None
     assert len(saved["variables"]) == len(allowed_variables(ctx.db.frame))
-    assert saved["schema"] == SPEC_JSON_SCHEMA and saved["request"]["fallbacks"] == "default"
+    assert saved["schema"] == SPEC_JSON_SCHEMA and saved["backend"] == "claude_code"       # the default backend
+    assert saved["request"]["argv"][:2] == ["claude", "-p"] and saved["prompt"]["system"].endswith(tr.schema_section())
+    monkeypatch.setenv("MSL_LLM_BACKEND", "api")
+    api = tr.run(ctx, write=False)
+    assert api["request"]["fallbacks"] == "default" and api["prompt"]["system"] == tr.build_system_prompt(ctx)
     assert "cash" not in saved["asset_drift"]["assets"]
     assert [e["id"] for e in saved["examples"]] == saved["prompt"]["examples"]     # the lab's 载入示例
     with_translation = tr.run(ctx, NARRATIVE, client=FakeClient(message(spec_json())), write=False)
@@ -425,6 +435,7 @@ def test_cli(ctx, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(context.EngineContext, "load", classmethod(lambda cls, **k: ctx))
     assert tr.main(["--print-prompt"]) == 0
     assert "## 可用变量" in capsys.readouterr().out
+    monkeypatch.setenv("MSL_LLM_BACKEND", "api")                       # the SDK path, with a fake client below
     monkeypatch.setattr(tr, "status", lambda: {"available": False, "model": "m", "reason": "未配置凭据"})
     assert tr.main([NARRATIVE]) == 1
     assert "未配置凭据" in capsys.readouterr().err

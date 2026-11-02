@@ -7,6 +7,14 @@ K-lines. validate_spec clips the spec to the historical support and the
 engine (EP over 6-month blocks -> block bootstrap -> factor transmission)
 produces every number.
 
+Backends (MSL_LLM_BACKEND): "claude_code", the default, runs the local Claude
+Code CLI in print mode on the user's own subscription login (claude_code.py:
+personal local use only, every call counts against the plan's limits);
+"api" calls the Anthropic Messages API through the SDK, only when set
+explicitly. Answers are cached in data/llm_cache/ by (backend, model, system
+prompt, user message), so rerunning a narrative is free; at most
+MSL_LLM_CONCURRENCY (2) calls run at once.
+
     python -m scenariolab.llm.translator "霍尔木兹海峡被封锁半年……" --run
     python -m scenariolab.llm.translator --print-prompt
 """
@@ -17,9 +25,13 @@ import copy
 import hashlib
 import inspect
 import json
+import math
 import os
+import re
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,10 +40,11 @@ import numpy as np
 from .. import config, jsonio
 from ..engine.factor_model import STRUCTURAL_ASSETS, base_columns
 from ..engine.simulate import DEFAULT_REVERSION
-from ..env import load_dotenv
+from ..env import dotenv_problems, load_dotenv
 from ..scenarios import regime_views
 from ..scenarios.schema import (ASSET_DRIFT_BOUND, MAX_PHASES, MAX_VIEWS_PER_PHASE, SPEC_JSON_SCHEMA,
                                 allowed_variables, factor_drift_bounds, slugify, validate_spec)
+from . import claude_code
 
 try:
     import anthropic
@@ -59,6 +72,13 @@ REFERENCE_FACTORS = ("f_oil", "f_ip", "f_cpi", "f_ff", "f_y10", "f_spread", "f_u
 VALUATION_VARS = ("f_valuation", "s_div_yield", "f_cape", "s_cape")   # views here come close to dictating equity prices
 DEFAULT_OVERRIDE_WHY = "历史样本中没有先例的结构性效应（理由见 narrative）"
 DRIFT_UNITS = {"Δlog": "Δlog/年", "Δpp": "pp/年", "Δ": "点/年"}
+BACKENDS = ("claude_code", "api")
+DEFAULT_BACKEND = "claude_code"                      # the local Claude Code CLI on the user's own subscription
+API_LABEL = "Anthropic API（按 API 计费）"
+CACHE_DIR = config.DATA_DIR / "llm_cache"            # <sha256>.json: an answer's text and its metadata only
+DEFAULT_CONCURRENCY = 2                              # MSL_LLM_CONCURRENCY: model calls at once
+STATUS_TTL_S = 60.0                                  # claude_code status: how long an answer is reused
+STATUS_RETRY_S = 5.0                                 # ... when it is "unavailable" (a fresh login shows at once)
 
 
 class TranslatorError(Exception):
@@ -72,6 +92,34 @@ def model_id() -> str:
     return os.environ.get("MSL_LLM_MODEL", "").strip() or DEFAULT_MODEL
 
 
+def backend_name() -> str:
+    """MSL_LLM_BACKEND: "claude_code" (the default) or "api" (only when set explicitly); another value is
+    returned as given, and status() then reports it as unknown."""
+    load_dotenv()
+    return os.environ.get("MSL_LLM_BACKEND", "").strip().lower().replace("-", "_") or DEFAULT_BACKEND
+
+
+def _env_number(name: str, default, cast, minimum):
+    """A numeric setting from the environment / .env; a missing, malformed or too small value gives the default."""
+    load_dotenv()
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = cast(raw) if raw else default
+    except ValueError:
+        return default
+    return value if math.isfinite(value) and value >= minimum else default
+
+
+def timeout_s() -> float:
+    """MSL_LLM_TIMEOUT: seconds one Claude Code call may take (the CLI has no timeout flag)."""
+    return float(_env_number("MSL_LLM_TIMEOUT", claude_code.DEFAULT_TIMEOUT_S, float, 1.0))
+
+
+def concurrency() -> int:
+    """MSL_LLM_CONCURRENCY: model calls that may run at once (the rest wait for a slot)."""
+    return int(_env_number("MSL_LLM_CONCURRENCY", DEFAULT_CONCURRENCY, int, 1))
+
+
 def _profile_configured() -> bool:
     """Whether the SDK would auto-discover an `ant auth login` profile or workload identity."""
     try:
@@ -81,9 +129,7 @@ def _profile_configured() -> bool:
         return False
 
 
-def status() -> dict:
-    """{"available", "model", "reason"}; local checks only, no network call."""
-    model = model_id()
+def _api_status(model: str) -> dict:
     if anthropic is None:
         return {"available": False, "model": model,
                 "reason": "未安装 anthropic Python 包：在项目目录运行 pip install -e \".[llm]\" 后重启。"}
@@ -94,6 +140,57 @@ def status() -> dict:
         return {"available": True, "model": model, "reason": "使用 ant CLI 登录配置（profile）中的凭据"}
     return {"available": False, "model": model,
             "reason": "未配置 Anthropic API 凭据：把 .env.example 复制为 .env 并填写 ANTHROPIC_API_KEY，然后重启服务。"}
+
+
+def _token_problem(token: str) -> str | None:
+    """Why CLAUDE_CODE_OAUTH_TOKEN cannot be a whole `claude setup-token` token (never quoting it), or None."""
+    if not token.strip():
+        return None
+    if any(c.isspace() for c in token.strip()):
+        return "CLAUDE_CODE_OAUTH_TOKEN 里有空格或换行：把 claude setup-token 生成的令牌完整地写成一行后重启服务。"
+    for line, key in dotenv_problems():
+        if key == claude_code.TOKEN_VAR:
+            return (f"CLAUDE_CODE_OAUTH_TOKEN 在 .env 里被换行拆成了两行（第 {line} 行没有被读取，只读到了令牌的前半段）："
+                    "把令牌合并成一行后重启服务。")
+    return None
+
+
+_STATUS: dict = {}                     # (model, MSL_CLAUDE_BIN, token set?) -> (_now() of the check, status)
+_STATUS_LOCK = threading.Lock()
+_now = time.monotonic
+
+
+def _claude_code_status(model: str, force: bool = False) -> dict:
+    token = os.environ.get(claude_code.TOKEN_VAR, "")
+    key = (model, os.environ.get("MSL_CLAUDE_BIN", ""), bool(token.strip()))
+    with _STATUS_LOCK:
+        hit = _STATUS.get(key)
+        if hit is not None and not force:
+            at, st = hit
+            if _now() - at < (STATUS_TTL_S if st["available"] else STATUS_RETRY_S):
+                return dict(st)
+        st = claude_code.status(model)
+        problem = _token_problem(token) if st["available"] and st.get("auth") == claude_code.AUTH_TOKEN else None
+        if problem:
+            st.update(available=False, reason=problem)
+        _STATUS[key] = (_now(), st)
+        return dict(st)
+
+
+def status(force: bool = False) -> dict:
+    """{"backend", "label", "available", "model", "reason", ...}: local checks only, never a model call (no usage).
+
+    claude_code adds binary, version and auth ("Claude Code 登录" / "CLAUDE_CODE_OAUTH_TOKEN" / "未登录"), from
+    `claude --version` and `claude auth status --json` run with the call's own sanitized environment; the
+    answer is reused for STATUS_TTL_S (an unavailable one for STATUS_RETRY_S) unless force=True.
+    """
+    backend, model = backend_name(), model_id()
+    if backend == "api":
+        return {"backend": "api", "label": API_LABEL, **_api_status(model)}
+    if backend != "claude_code":
+        return {"backend": backend, "label": backend, "available": False, "model": model,
+                "reason": f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code（默认，本机 Claude Code）或 api（Anthropic API）。"}
+    return _claude_code_status(model, force)
 
 
 # ---------------------------------------------------------------- prompt pieces
@@ -604,6 +701,22 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
     return "\n".join(lines)
 
 
+def schema_section() -> str:
+    """The output format for the claude_code backend, which answers in plain text: the JSON schema that the
+    API path passes as output_config.format instead (compact, one line)."""
+    return "\n".join(["## 输出格式（JSON schema）", "",
+                      "回答只有一个 JSON 对象，符合下面的 JSON schema：不要放进 ```json 代码块，前后不要写任何其他文字。", "",
+                      json.dumps(SPEC_JSON_SCHEMA, ensure_ascii=False, separators=(",", ":"))])
+
+
+def system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
+                  examples: list[dict] | None = None, backend: str | None = None) -> str:
+    """The system prompt as `backend` (default: the configured one) sends it: build_system_prompt, plus the
+    schema section for claude_code."""
+    base = build_system_prompt(ctx, horizon_months, examples)
+    return f"{base}\n\n{schema_section()}" if (backend or backend_name()) == "claude_code" else base
+
+
 def _user_message(narrative: str, horizon_months: int) -> str:
     return f"请把下面的叙事翻译成 {horizon_months} 个月的情景规格。\n\n<narrative>\n{narrative}\n</narrative>"
 
@@ -678,6 +791,11 @@ def _call(client, model: str, system: str, user: str):
 
 def parse_response(response) -> dict:
     """Spec dict from a Messages response; refusal / truncation / non-JSON raise TranslatorError."""
+    return parse_spec_text(response_text(response))
+
+
+def response_text(response) -> str:
+    """The text of a Messages response; refusal / truncation / no text raise TranslatorError."""
     stop = getattr(response, "stop_reason", None)
     if stop == "refusal":
         details = getattr(response, "stop_details", None)
@@ -697,9 +815,31 @@ def parse_response(response) -> dict:
     text = next((b.text for b in getattr(response, "content", None) or [] if getattr(b, "type", None) == "text"), "")
     if not text.strip():
         raise TranslatorError("模型没有返回情景规格（响应中没有文本）。")
+    return text
+
+
+FENCE_RE = re.compile(r"```[A-Za-z]*[ \t]*\n(.*?)```", re.S)
+
+
+def parse_spec_text(text) -> dict:
+    """The spec object in an answer's text: the whole text as JSON, else the first ``` block or the outermost
+    {...} that is a JSON object (a plain-text answer may wrap it despite the prompt); TranslatorError otherwise."""
+    s = str(text or "").strip()
+    if not s:
+        raise TranslatorError("模型没有返回情景规格（响应中没有文本）。")
     try:
-        raw = json.loads(text)
+        raw = json.loads(s)
     except json.JSONDecodeError as err:
+        candidates = [m.group(1) for m in FENCE_RE.finditer(s)]
+        if 0 <= s.find("{") < s.rfind("}"):
+            candidates.append(s[s.find("{"):s.rfind("}") + 1])
+        for c in candidates:
+            try:
+                raw = json.loads(c)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(raw, dict):
+                return raw
         raise TranslatorError(f"模型输出不是合法的 JSON（第 {err.lineno} 行第 {err.colno} 列）。") from err
     if not isinstance(raw, dict):
         raise TranslatorError("模型输出的 JSON 不是对象。")
@@ -717,6 +857,117 @@ def usage_dict(response) -> dict:
     if iterations:
         out["fallback_used"] = any(getattr(i, "type", None) == "fallback_message" for i in iterations)
     return out
+
+
+# ---------------------------------------------------------------- backends, response cache, concurrency
+
+def cache_key(backend: str, model: str, system: str, user: str) -> str:
+    """sha256 of (backend, model, system prompt, user message): the response cache's file name."""
+    blob = json.dumps([backend, model, system, user], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8", "surrogatepass")).hexdigest()     # a lone surrogate never raises
+
+
+def cache_load(key: str) -> dict | None:
+    """The cached {"text", "meta", "created"} for a key, or None (missing or unreadable)."""
+    try:
+        entry = json.loads((CACHE_DIR / f"{key}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entry, dict) or not isinstance(entry.get("text"), str) or not isinstance(entry.get("meta"), dict):
+        return None
+    return entry
+
+
+def cache_store(key: str, text: str, meta: dict) -> None:
+    """data/llm_cache/<key>.json: the answer's text (verbatim) and its metadata, nothing else (no prompt, no
+    narrative, no credentials), written atomically. A failed write (a full disk, text no encoder takes) only means
+    the next rerun calls again."""
+    path = CACHE_DIR / f"{key}.json"
+    entry = {"created": time.strftime("%Y-%m-%d %H:%M:%S"), "text": text, "meta": meta}
+    tmp = path.with_name(f".{key}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(entry, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+_SLOTS: dict[int, threading.BoundedSemaphore] = {}
+_SLOTS_LOCK = threading.Lock()
+
+
+@contextmanager
+def _slot():
+    """One of MSL_LLM_CONCURRENCY call slots, waiting up to MSL_LLM_TIMEOUT for one to free up."""
+    n, wait = concurrency(), timeout_s()
+    with _SLOTS_LOCK:
+        sem = _SLOTS.setdefault(n, threading.BoundedSemaphore(n))
+    if not sem.acquire(timeout=wait):
+        raise TranslatorError(f"已有 {n} 个翻译在进行（MSL_LLM_CONCURRENCY={n}），等了 {wait:g} 秒仍没有空位，请稍后重试。")
+    try:
+        yield
+    finally:
+        sem.release()
+
+
+def _ask(backend: str, system: str, user: str, model: str, client=None) -> tuple[str, dict]:
+    """One model call on `backend`: (the answer's text, metadata)."""
+    if backend == "claude_code":
+        try:
+            return claude_code.run(system, user, model, timeout_s())
+        except claude_code.ClaudeCodeError as err:
+            raise TranslatorError(str(err)) from err
+    if backend != "api":
+        raise TranslatorError(f"MSL_LLM_BACKEND={backend} 不认识：可用 claude_code 或 api。")
+    if client is None:
+        if anthropic is None:
+            raise TranslatorError(_api_status(model)["reason"])
+        client = anthropic.Anthropic()
+    response = _call(client, model, system, user)
+    text = response_text(response)
+    return text, {"backend": "api", "model": getattr(response, "model", None) or model,
+                  "usage": usage_dict(response), "stop_reason": getattr(response, "stop_reason", None)}
+
+
+def complete(system: str, user: str, model: str, backend: str = DEFAULT_BACKEND, client=None,
+             refresh: bool = False) -> tuple[dict, dict]:
+    """The spec object the model answers for (system, user) and the call's metadata.
+
+    From data/llm_cache/ when this exact request was answered before (no call, no usage; meta["cached"]),
+    else one call on `backend`, at most MSL_LLM_CONCURRENCY at once. Only an answer that parses as a JSON
+    object is cached; refresh=True skips the lookup and replaces the entry.
+    """
+    key = cache_key(backend, model, system, user)
+    if not refresh:
+        hit = cache_load(key)
+        if hit is not None:
+            try:
+                return parse_spec_text(hit["text"]), {**hit["meta"], "cached": True, "cached_at": hit.get("created")}
+            except TranslatorError:
+                pass                                   # an unreadable entry is asked again and replaced
+    with _slot():
+        text, meta = _ask(backend, system, user, model, client)
+    raw = parse_spec_text(text)
+    cache_store(key, text, meta)
+    return raw, {**meta, "cached": False}
+
+
+def request_info(backend: str, model: str) -> dict:
+    """What one translation call sends, for llm_translator.json (no credentials)."""
+    if backend == "api":
+        return {"backend": "api", "max_tokens": MAX_TOKENS, "effort": EFFORT, "betas": [FALLBACK_BETA],
+                "fallbacks": "default", "output_format": "json_schema"}
+    if backend != "claude_code":
+        return {"backend": backend}
+    return {"backend": backend, "argv": claude_code.build_args("claude", model, "<system prompt file>"),
+            "stdin": "user message", "cwd": "empty temporary directory", "timeout_s": timeout_s(),
+            "concurrency": concurrency(), "output_format": "text (schema in the system prompt)",
+            "env_removed": "ANTHROPIC_*, CLAUDECODE, CLAUDE_*, credential-named (*_API_KEY, *_TOKEN, *_SECRET, *_PASSWORD, ...) "
+                           "(kept: CLAUDE_CONFIG_DIR, a non-empty CLAUDE_CODE_OAUTH_TOKEN)"}
 
 
 # ---------------------------------------------------------------- repair + validation
@@ -837,14 +1088,16 @@ def preview(ctx: "EngineContext", spec: dict, warnings: list[str], clipped=()) -
 
 
 def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config.HORIZON_MONTHS,
-              client=None, model: str | None = None) -> dict:
-    """Narrative -> {"spec", "validation", "model", "usage", "raw", "elapsed_s", ...}.
+              client=None, model: str | None = None, refresh: bool = False) -> dict:
+    """Narrative -> {"spec", "validation", "model", "usage", "raw", "elapsed_s", "backend", "cached", "meta", ...}.
 
-    `spec` is the validated, clipped spec (ready for runner.run_spec); `raw` is what
-    the model returned. `client` may be injected (tests); otherwise credentials from
-    the environment / .env are required.
+    `spec` is the validated, clipped spec (ready for runner.run_spec); `raw` is what the model returned;
+    `meta` records the call (model, duration, turns, usage; `cached` when it came from data/llm_cache/).
+    The backend is MSL_LLM_BACKEND (claude_code by default); an injected SDK `client` (tests) means the
+    api backend. refresh=True asks the model again instead of reusing a cached answer.
     """
-    text = str(narrative or "").strip()
+    # a lone surrogate (valid JSON: "\ud800", from a half-pasted emoji) fails every UTF-8 encoder downstream
+    text = str(narrative or "").strip().encode("utf-8", "replace").decode("utf-8")
     if not text:
         raise TranslatorError("叙事不能为空。")
     if len(text) > MAX_NARRATIVE_CHARS:
@@ -856,17 +1109,16 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
     if not HORIZON_BOUNDS[0] <= horizon <= HORIZON_BOUNDS[1]:
         raise TranslatorError(f"情景时长必须在 {HORIZON_BOUNDS[0]}–{HORIZON_BOUNDS[1]} 个月之间。")
     model = model or model_id()
+    backend = "api" if client is not None else backend_name()
     if client is None:
         st = status()
         if not st["available"]:
             raise TranslatorError(st["reason"])
-        client = anthropic.Anthropic()
 
-    system = build_system_prompt(ctx, horizon)
+    system = system_prompt(ctx, horizon, backend=backend)
     t0 = time.perf_counter()
-    response = _call(client, model, system, _user_message(text, horizon))
+    raw, meta = complete(system, _user_message(text, horizon), model, backend, client=client, refresh=refresh)
     elapsed = time.perf_counter() - t0
-    raw = parse_response(response)
 
     spec, notes = repair(raw)
     clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)    # the engine always runs the full horizon
@@ -880,9 +1132,10 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
     except (ValueError, KeyError, TypeError, np.linalg.LinAlgError) as err:
         phases_preview = []
         report["warnings"].append(f"无法预览各阶段的历史月份权重：{err}")
-    return {"spec": clean, "validation": report, "model": getattr(response, "model", None) or model,
-            "requested_model": model, "usage": usage_dict(response), "raw": raw,
-            "elapsed_s": round(elapsed, 2), "preview": phases_preview}
+    return {"spec": clean, "validation": report, "model": meta.get("model") or model,
+            "requested_model": model, "usage": meta.get("usage") or {}, "raw": raw,
+            "elapsed_s": round(elapsed, 2), "preview": phases_preview,
+            "backend": backend, "cached": bool(meta.get("cached")), "meta": meta}
 
 
 # ---------------------------------------------------------------- module run + CLI
@@ -892,15 +1145,16 @@ def run(ctx: "EngineContext", narrative: str | None = None, horizon_months: int 
     """What the LLM sees (prompt, schema, variable support, bounds) + status -> results/llm_translator.json.
 
     `examples` holds the prompt's few-shot examples with whole narratives (lab_examples: the lab's
-    载入示例). With a narrative (and credentials or an injected client) the translation is included.
+    载入示例). Without a narrative (the build's llm step) it never calls a model: status() only runs
+    `claude --version` and `claude auth status`, which spend no usage. With a narrative (and an available
+    backend or an injected client) the translation is included.
     """
     examples = few_shot_examples(ctx, horizon_months)
-    system = build_system_prompt(ctx, horizon_months, examples)
     st = status()
+    system = system_prompt(ctx, horizon_months, examples, backend=st["backend"])
     out = {
-        "status": st, "model": st["model"], "horizon_months": horizon_months, "today": ctx.anchor.date,
-        "request": {"max_tokens": MAX_TOKENS, "effort": EFFORT, "betas": [FALLBACK_BETA], "fallbacks": "default",
-                    "output_format": "json_schema"},
+        "status": st, "backend": st["backend"], "model": st["model"], "horizon_months": horizon_months,
+        "today": ctx.anchor.date, "request": request_info(st["backend"], st["model"]),
         "prompt": {"system": system, "chars": len(system),
                    "sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
                    "examples": [e["id"] for e in examples]},
@@ -944,7 +1198,8 @@ def _print_headline(detail: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m scenariolab.llm.translator",
-                                description="用 Claude 把叙事翻译成情景规格，可选直接交给引擎运行。")
+                                description="用 Claude 把叙事翻译成情景规格，可选直接交给引擎运行。默认用本机 Claude Code"
+                                            "（你自己的订阅登录，计入订阅用量）；MSL_LLM_BACKEND=api 时改用 Anthropic API。")
     p.add_argument("narrative", nargs="?", help="情景叙事；'-' 表示从标准输入读取")
     p.add_argument("--yaml", metavar="OUT", help="把校验后的规格写成 YAML（与内置情景同一格式）")
     p.add_argument("--run", action="store_true",
@@ -952,26 +1207,31 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--horizon", type=int, default=config.HORIZON_MONTHS, help="情景总月数")
     p.add_argument("--paths", type=int, default=600, help="--run 时的模拟路径数")
     p.add_argument("--model", help="覆盖 MSL_LLM_MODEL")
-    p.add_argument("--print-prompt", action="store_true", help="只打印系统提示词，不调用 API")
+    p.add_argument("--refresh", action="store_true", help="不用 data/llm_cache/ 里的缓存，重新调用模型")
+    p.add_argument("--print-prompt", action="store_true", help="只打印系统提示词，不调用模型")
     args = p.parse_args(argv)
 
     from ..context import EngineContext
 
     ctx = EngineContext.load(selection=True)
     if args.print_prompt:
-        print(build_system_prompt(ctx, args.horizon))
+        print(system_prompt(ctx, args.horizon))
         return 0
     if not args.narrative:
         p.error("需要提供叙事（或使用 --print-prompt）")
     narrative = sys.stdin.read() if args.narrative == "-" else args.narrative
     try:
-        result = translate(narrative, ctx, args.horizon, model=args.model)
+        result = translate(narrative, ctx, args.horizon, model=args.model, refresh=args.refresh)
     except TranslatorError as err:
         print(f"翻译失败：{err}", file=sys.stderr)
         return 1
     print(json.dumps(jsonio.clean(result["spec"]), ensure_ascii=False, indent=2))
     v = result["validation"]
-    print(f"\n模型 {result['model']}，用时 {result['elapsed_s']} 秒，tokens {result['usage']}")
+    meta = result.get("meta") or {}
+    turns = f"，{meta['num_turns']} 轮" if meta.get("num_turns") else ""
+    cached = "（来自 data/llm_cache/ 的缓存，没有调用模型；--refresh 重新调用）" if result.get("cached") else ""
+    print(f"\n模型 {result['model']}，后端 {result['backend']}，用时 {result['elapsed_s']} 秒{turns}{cached}，"
+          f"tokens {result['usage']}")
     print(f"校验：{'通过' if v['ok'] else '有错误'}，{len(v['warnings'])} 条提示，{len(v['clipped'])} 处截断")
     for line in v["errors"] + v["warnings"]:
         print(f"  - {line}")

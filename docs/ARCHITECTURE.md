@@ -15,7 +15,8 @@ scenariolab/
   config.py                shared ids and engine settings: paths, MODEL_START, HORIZON_MONTHS, BLOCK_MONTHS,
                            RARE_MONTHS, RESIDUALS, EXOGENOUS_SHOCKS, ERAS, ASSETS, FACTORS, STATES, VALUATION,
                            REGIMES
-  env.py                   minimal .env loader (KEY=VALUE lines; never overrides a variable that is already set)
+  env.py                   minimal .env loader (KEY=VALUE lines; never overrides a variable that is already set);
+                           dotenv_problems() finds lines it cannot read (a value wrapped onto a second line)
   jsonio.py                JSON I/O: numpy/pandas-safe, NaN/inf -> null, floats to 6 decimals, atomic writes
   context.py               EngineContext (panel + selected model + MonthDB + Anchor + CMA); get_context()
   build.py                 CLI: python -m scenariolab.build (see "The build")
@@ -62,7 +63,10 @@ scenariolab/
   portfolio/withdrawal.py  three withdrawal strategies, ruin, critical (safe) withdrawal rates
   portfolio/service.py     evaluate_portfolio(), evaluate_withdrawal() for the API; build step ->
                            portfolio_default.json + continuation_paths.npz (withdrawal years 16-40)
-  llm/translator.py        narrative -> scenario spec via Claude (structured output); build step -> llm_translator.json
+  llm/translator.py        narrative -> scenario spec via Claude: backend selection, status, response cache
+                           (data/llm_cache/), concurrency; build step -> llm_translator.json
+  llm/claude_code.py       the default backend: the local Claude Code CLI in print mode on the user's own
+                           subscription (arguments, sanitized environment, output envelope, errors, status)
 web/
   index.html               shell: sidebar nav, K-line colour select, vendor/echarts/echarts.min.js, js/app.js
   vendor/echarts/          Apache ECharts 5.5.1 (echarts.min.js, LICENSE, NOTICE; Apache-2.0), from the npm
@@ -74,13 +78,14 @@ web/
   js/charts.js             ECharts helpers and their lifecycle, K-line colours
   js/tabs/<id>.js          one module per tab (13, see "Web app")
   js/tabs/_scenario_detail.js, js/tabs/_weights.js   shared helpers (a leading underscore = not a tab)
-tests/                     pytest suite (18 files, see "Testing")
+tests/                     pytest suite (19 files and conftest.py, see "Testing")
 data/                      raw/, processed/, results/, ledger/ (git-ignored, built locally; ledger/ is the
                            append-only record of live one-year forecasts, see "Forecast ledger")
 docs/                      ARCHITECTURE.md (this file), screenshots/ (the README's four PNGs)
 .github/workflows/ci.yml   CI on every push and pull request (see "Testing")
 CONTRIBUTING.md            setup, build, tests, adding a scenario or a data source (Chinese + English summary)
-.env.example               template for .env: ANTHROPIC_API_KEY, MSL_LLM_MODEL, MSL_PORT
+.env.example               template for .env: MSL_LLM_BACKEND, CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY (api only),
+                           MSL_LLM_MODEL, MSL_CLAUDE_BIN, MSL_LLM_TIMEOUT, MSL_LLM_CONCURRENCY, MSL_PORT
 ```
 
 ## Conventions
@@ -864,7 +869,7 @@ analysis file also carries its own `units` and `notes`. Shapes below use
        gold: {real_drift_hist, real_gap_log, reversion_term},
        pd_now, pd_median, rerating_tailwind, reversion_term, market_adjustment, target_price_drift: {asset}},
  notes: [str], sources: {name: url}, asset_start: {asset: "YYYY-MM-DD"},
- llm: {available, model, reason}}
+ llm: translator.status(): {backend, label, available, model, reason; claude_code: binary, version, auth}}
 ```
 
 Drifts and adjustments are annual decimals, P/D values multiples. The
@@ -1650,9 +1655,14 @@ path per row instead of 600 shared ones, the comparison with history).
 ### llm_translator.json (llm/translator.py run)
 
 ```text
-{status: {available, model, reason}, model, horizon_months, today,
- request: {max_tokens: 16000, effort: "high", betas: ["server-side-fallback-2026-07-01"], fallbacks: "default",
-           output_format: "json_schema"},
+{status: translator.status(), backend: "claude_code" | "api", model, horizon_months, today,
+ request: claude_code: {backend, argv: ["claude", "-p", "--model", <id>, "--system-prompt-file", "<system prompt file>",
+                        "--tools", "", "--strict-mcp-config", "--setting-sources", "project",
+                        "--no-session-persistence", "--output-format", "json"], stdin: "user message",
+                        cwd: "empty temporary directory", timeout_s: 600, concurrency: 2,
+                        output_format: "text (schema in the system prompt)", env_removed}
+          api: {backend, max_tokens: 16000, effort: "high", betas: ["server-side-fallback-2026-07-01"],
+                fallbacks: "default", output_format: "json_schema"},
  prompt: {system, chars, sha256, examples: ["oil_war", "k_shaped"]},
  variables: [{var, name, kind: state | factor | shock, unit, p2, median, p98, mean, sd,
               block_p2, block_p98, block_sd, asset_driver, today, today_date, outside_support | last12_mean}],
@@ -1661,7 +1671,10 @@ path per row instead of 600 shared ones, the comparison with history).
  schema: SPEC_JSON_SCHEMA, examples: [LLM-form spec], translation: null}
 ```
 
-What the translator would send the model, built without an API key. p2 /
+What the translator would send the model on the configured backend (the
+claude_code prompt ends with the JSON schema section), built without any model
+call: the status only runs `claude --version` and `claude auth status --json`,
+which spend no usage. p2 /
 median / p98 / sd describe single months, block_* the means of 6-month runs
 (what a phase's views can reach). `examples` are the prompt's few-shot
 built-ins (oil_war, k_shaped) in the LLM form with their whole narratives
@@ -1809,8 +1822,8 @@ are fast; a failure of one part only makes its first request slower.
 | POST | `/api/portfolio/evaluate` | the keyword arguments of `evaluate_portfolio` (`weights` required) -> its result |
 | POST | `/api/withdrawal/evaluate` | the keyword arguments of `evaluate_withdrawal` (`weights` required; `horizon_years` 10..40, default 30) -> its result |
 | POST | `/api/backtest/run` | `{train_end "YYYY-MM", months 12..180, n_paths 100..400 = 200, seed = 11}` -> one custom holdout window: the `run_window` JSON (id "custom", name "自选窗口") + `label`, `custom`, `shocks`, `elapsed_s` (see backtest.json) |
-| GET | `/api/llm/status` | `{available, model, reason}` (local checks only, no network call) |
-| POST | `/api/llm/translate` | `{narrative (<= 20000 chars), horizon_months = 180 (12..600)}` -> `{spec, validation, model, requested_model, usage, raw, elapsed_s, preview}` |
+| GET | `/api/llm/status` | `translator.status()`: `{backend, label, available, model, reason}`, plus `binary, version, auth` for claude_code (local checks only, never a model call; cached 60 s, an unavailable answer 5 s) |
+| POST | `/api/llm/translate` | `{narrative (<= 20000 chars), horizon_months = 180 (12..600), refresh = false}` -> `{spec, validation, model, requested_model, usage, raw, elapsed_s, preview, backend, cached, meta}`; `refresh: true` (exactly) skips data/llm_cache/; only a Host of 127.0.0.1 / localhost / [::1] is served (else 403) |
 
 `/api/backtest/run` is a plain def, so FastAPI runs it in its threadpool and
 the server stays responsive. Finished windows are cached in memory by
@@ -1839,15 +1852,16 @@ Errors are JSON `{"detail": "<Chinese text>"}`:
 | 400 | translate: empty narrative / longer than 20000 characters / horizon_months not an integer in 12..600 (checked before the credentials; null means 180) | narrative 不能为空 / 叙事过长（… 字），请控制在 20000 字以内 / horizon_months 必须是 12 到 600 之间的整数（情景总月数）… |
 | 400 | backtest/run: unknown or missing parameters; train_end not YYYY-MM or outside the panel (a year pandas cannot format, such as 0000, included); fewer than 15 training years (earliest 1987-12); a test past the last panel month (the message gives the room left); months / n_paths / seed out of range or not integers; a training sample the model cannot be fitted on | 不认识的参数：… / 缺少参数：months（…） / train_end … 不在数据范围内（1947-01 至 2026-09） / 训练期至少需要 15 年：… 最早可选 1987-12 / 测试期会到 …，超出数据的最后一个月 …：… / months 必须是 12 到 180 之间的整数（测试期月数），收到 … / 这个窗口无法回测：… |
 | 400 | withdrawal: horizon_years not a whole number in 10..40 | 期限（horizon_years）必须是 10 到 40 之间的整数年（收到 …） / 期限（horizon_years）必须是数字 |
+| 403 | translate: the Host header is not 127.0.0.1, localhost or [::1] (another site's page reaching the server by DNS rebinding; checked after the 400s, before the status check or any call) | 翻译只接受本机页面（http://127.0.0.1 或 http://localhost）发来的请求：Claude 订阅额度只供你自己在本机使用。 |
 | 404 | a result file is missing | `<file> 还没有生成：请在项目根目录运行 python -m scenariolab.build（或只补这一步：python -m scenariolab.build --only <step>）`; ablation.json names `--only ablation（引擎消融约需 5 分钟，默认构建不包含这一步）`, regime_forecast.json `--only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）` |
 | 404 | unknown result name | 没有名为「…」的结果 |
 | 404 | built-in scenario not built / unknown scenario / unknown custom id on delete | the build hint with `--only scenarios` / 没有找到情景「…」：… / 没有找到自定义情景「…」（可能已被删除） |
 | 404 / 405 | unknown path / wrong method | 找不到这个地址：<path> / 这个地址不支持该请求方法：<path> |
 | 500 | backtest/run: an unexpected engine error | 回测出错：<type>: <message> |
-| 502 | translate: the API call failed (401, 403, 404 model, 429, 5xx, timeout, refusal, max_tokens, invalid JSON) | the translator's Chinese message |
+| 502 | translate: the model call failed (claude_code: not signed in or an invalid token, the plan's usage limit, a bad model, 429 / 529 / 5xx, the MSL_LLM_TIMEOUT timeout, a refusal, truncation, an unreadable envelope; api: 401, 403, 404 model, 429, 5xx, timeout, refusal, max_tokens; either: invalid JSON) | the translator's Chinese message (never a token or the environment) |
 | 503 | evaluate: the path files are missing or being rewritten | 无法读取 scenario_paths.npz（可能正在重新生成，请稍后重试）… / scenario_paths.npz 还没有生成… |
 | 503 | withdrawal past 15 years: continuation_paths.npz missing, stale (another start month or length, other assets) or in the old format | 期限 … 年超过情景路径的 15 年，需要无条件续抽路径：…（names `python -m scenariolab.build --only portfolio`） |
-| 503 | translate: no credentials or no anthropic package | the status reason (copy .env.example to .env, set ANTHROPIC_API_KEY, restart) |
+| 503 | translate: the backend is not available (claude_code: no claude binary, not signed in, an API-key or third-party login, a token split over two .env lines; api: no credentials or no anthropic package; an unknown MSL_LLM_BACKEND) | the status reason (claude_code: run `claude auth login`, or put a `claude setup-token` token in CLAUDE_CODE_OAUTH_TOKEN; api: set ANTHROPIC_API_KEY, restart) |
 
 The build hint in a 404 is what the UI shows under a failed page
 (`ui.buildHint`).
@@ -1860,17 +1874,90 @@ overrides, causal chain); `validate_spec` clips it to the historical support,
 and the engine produces every number. The UI shows the validation report next
 to the results.
 
-* Credentials: `status()` is available when the `anthropic` package is
-  installed and ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set (in the
-  environment or .env), or an `ant` CLI profile is found. The model is
-  `MSL_LLM_MODEL`, default `claude-opus-5-5`. Never commit .env (it is in
-  .gitignore).
-* Request: `client.beta.messages.create(model, max_tokens=16000, system=[the
+* Backends (`MSL_LLM_BACKEND`): `claude_code`, the default, is the local
+  Claude Code CLI on the user's own subscription login (本机 Claude Code（使用你的订阅额度）,
+  llm/claude_code.py); `api` is the Anthropic Messages API through the SDK,
+  used only when set explicitly (an ANTHROPIC_API_KEY alone never selects
+  it; an injected SDK `client`, as in the tests, does). Another value is
+  reported as unknown. The model is `MSL_LLM_MODEL`, default
+  `claude-opus-5-5`, for both. Never commit .env (it is in .gitignore).
+* Personal local use only: the server binds to 127.0.0.1 and each user runs
+  their own signed-in Claude Code; the app never proxies requests for anyone
+  else and never stores or forwards credentials. `/api/llm/translate` also
+  refuses (403) a request whose Host is not 127.0.0.1, localhost or [::1]
+  (`server.local_host`): another site's page that re-points its DNS name at
+  127.0.0.1 (DNS rebinding) reaches the server same-origin but sends its own
+  name, so it cannot spend the plan. Every claude_code call counts against
+  the plan's five-hour and weekly limits.
+* claude_code call (`claude_code.run`): `claude -p --model <id>
+  --system-prompt-file <file> --tools "" --strict-mcp-config
+  --setting-sources project --no-session-persistence --output-format json`,
+  an argument list without a shell; the user message on stdin, the system
+  prompt in a temporary file beside a fresh empty temporary working
+  directory (so no project CLAUDE.md, hooks, settings or .mcp.json load);
+  subprocess timeout `MSL_LLM_TIMEOUT` (600 s; the CLI has no timeout flag).
+  `--bare` is not used: it never reads the subscription login. The binary is
+  `MSL_CLAUDE_BIN`, else `claude` on PATH, else ~/.local/bin/claude.
+* claude_code environment (`claude_code.child_env`): the server's, minus every
+  `ANTHROPIC_*` variable (in print mode an ANTHROPIC_API_KEY or
+  ANTHROPIC_AUTH_TOKEN always wins and bills the API), every variable of a
+  parent Claude Code session (`CLAUDECODE`, `CLAUDE_*`, for a server started
+  from inside Claude Code; CLAUDE_CODE_SIMPLE there would mean --bare) and
+  every other credential-named variable (`claude_code.SECRET_NAME`: *_API_KEY,
+  *_TOKEN, *_SECRET, *_PASSWORD, …, such as the .env's FRED_API_KEY, which
+  the CLI never needs), keeping `CLAUDE_CONFIG_DIR` and a non-empty
+  `CLAUDE_CODE_OAUTH_TOKEN` (a `claude setup-token` token). The status checks
+  run with the same environment.
+* claude_code output: the JSON envelope's `result` text (keys type, subtype,
+  is_error, result, num_turns, duration_ms, usage, modelUsage,
+  api_error_status, stop_reason, …). A non-zero exit, `is_error`, a subtype
+  other than success, a refusal or truncation, an empty result or a timeout
+  raise `TranslatorError` with a Chinese message (not signed in, invalid
+  CLAUDE_CODE_OAUTH_TOKEN, the plan's usage limit with its reset time, a bad
+  model, 429 / 529 / 5xx, …); quoted CLI text (stderr, and stdout when it
+  holds no envelope) is redacted (the values of the credential-named
+  variables and anything token-shaped become ***), so a message never holds
+  a token, a key or the environment. The translation's `meta` records the
+  model (the modelUsage entry with the most output tokens), duration_ms,
+  duration_api_ms, num_turns, stop_reason and token usage.
+* Text path, not `--json-schema`: SPEC_JSON_SCHEMA uses only keywords the CLI
+  accepts and `--json-schema` would return a validated `structured_output`,
+  but Claude Code does structured output as a tool call that it validates and
+  retries on a mismatch (subtype error_max_structured_output_retries): more
+  requests, and so more plan usage, per translation than one text answer, and
+  it could not be checked without spending usage. So `system_prompt(ctx,
+  backend="claude_code")` appends `schema_section()` (the compact schema) to
+  `build_system_prompt`, and `parse_spec_text` reads the answer (the whole
+  text, else a ``` block or the outermost {...}); repair and validate_spec
+  then run exactly as for the API (the schema holds no numeric bounds: the
+  validator is the guard rail either way).
+* claude_code status (`claude_code.status`, cached `STATUS_TTL_S` = 60 s, an
+  unavailable answer `STATUS_RETRY_S` = 5 s so a fresh `claude auth login`
+  shows at once): `claude --version` and `claude auth status --json` (exit 1
+  with loggedIn false when signed out), never a model call. `auth` is
+  "Claude Code 登录", "CLAUDE_CODE_OAUTH_TOKEN" or "未登录"; an API-key login
+  or a third-party provider is reported as not available (it would not use
+  the subscription). A token is only checked by the first call (`auth status`
+  does not contact the server), but one with whitespace, or one whose .env
+  line wrapped onto a second line (`env.dotenv_problems`), is flagged.
+* Response cache (`complete`): data/llm_cache/<sha256 of backend, model,
+  system prompt, user message>.json holds only the answer's text (verbatim)
+  and the call's metadata, written atomically after the text parses as a JSON
+  object (a failure is never cached). A rerun of the same narrative is free
+  (`cached: true`, `cached_at`); `refresh=True` (the lab's 重新翻译 button,
+  CLI `--refresh`, POST body `"refresh": true`) asks again and replaces the
+  entry. A narrative's lone surrogates (valid JSON escapes) become "?" in
+  `translate` before anything encodes it.
+* Concurrency: at most `MSL_LLM_CONCURRENCY` (2) model calls at once, on
+  either backend; the rest wait up to MSL_LLM_TIMEOUT for a slot.
+* api request: `client.beta.messages.create(model, max_tokens=16000, system=[the
   prompt, cache_control ephemeral], messages=[narrative],
   betas=["server-side-fallback-2026-07-01"], fallbacks="default",
   output_config={effort: "high", format: {type: "json_schema", schema:
   SPEC_JSON_SCHEMA}})`; parameters the installed SDK does not name go through
-  `extra_body` / `extra_headers`.
+  `extra_body` / `extra_headers`. Credentials: the `anthropic` package plus
+  ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN (environment or .env), or an `ant`
+  CLI profile.
 * `build_system_prompt(ctx)` is deterministic for a build (no timestamps,
   fixed ordering) so prompt caching hits: the engine's semantics (6-month
   block pooling, the shrink lambda, level scaling and reversion targets with
@@ -1906,20 +1993,26 @@ to the results.
   llm_translator.json `examples` (the lab's 载入示例).
 * validate_spec warns when a posted spec carries a `calibration` block: only
   the built-in library resolves it into views and drifts.
-* `translate(narrative, ctx, horizon_months)`: narrative <= 20000 chars,
+* `translate(narrative, ctx, horizon_months, refresh=False)`: narrative <= 20000 chars,
   horizon 12..600 months (the engine always simulates 180: a shorter horizon
   gets a view-free tail phase and a warning, a longer spec is trimmed from the
-  back); `parse_response` turns refusals,
+  back); an unavailable backend raises its status reason before anything
+  else; `complete` returns the cached or freshly answered spec object
+  (`parse_response` / `parse_spec_text` turn refusals,
   max_tokens, an exceeded context window and invalid JSON into Chinese
-  `TranslatorError`s; then `repair` -> validate_spec -> `preview` (per phase:
+  `TranslatorError`s); then `repair` -> validate_spec -> `preview` (per phase:
   ens, shrink, era weights, top months, and every view's `drawn_mean`, the
   exact expectation over simulate()'s draws, with `realized_share` = (drawn -
   prior) / (target - prior)), which appends the regime checks W8-W11 to the
   validation warnings.
 * CLI: `python -m scenariolab.llm.translator "叙事" --run` prints the spec,
-  the validation and the engine's headline; `--yaml OUT` writes it in the
-  built-in format; `--print-prompt` prints the system prompt without calling
-  the API.
+  the validation, the backend, turns, whether it came from the cache and the
+  engine's headline; `--yaml OUT` writes it in the built-in format;
+  `--refresh` skips the cache; `--print-prompt` prints the system prompt (as
+  the configured backend sends it) without calling a model.
+* The build's llm step is `run(ctx)` with no narrative: it never calls a
+  model (tests/test_claude_code.py checks both that build.py passes nothing
+  else and that run(ctx) starts no print-mode call).
 
 ## Web app (web/)
 
@@ -2124,36 +2217,59 @@ index.html and the README.
 * **情景实验室**: 载入示例 puts a built-in's narrative in ① and its hand-written
   spec in the LLM form in ② (llm_translator.json `examples`, else
   scenarios/{id}), labelled 「这不是 LLM 的实时翻译，也没有调用任何 API」, with a
-  per-phase table and a button that runs it through the engine; no API key
-  needed.
+  per-phase table and a button that runs it through the engine; no LLM
+  needed. The status box names the backend: for claude_code
+  「LLM 已就绪：本机 Claude Code（使用你的订阅额度），<auth>，模型 …」, or, when it is
+  unavailable, the status reason and the steps (install Claude Code /
+  MSL_CLAUDE_BIN, `claude auth login` or a `claude setup-token` token in
+  CLAUDE_CODE_OAUTH_TOKEN, reload); the api backend keeps the API-key steps. A
+  translation served from data/llm_cache/ says so (本地缓存，没有调用模型) and
+  offers 重新翻译, which posts the same narrative with `refresh: true`.
 
 ## Testing
 
-`.venv/bin/python -m pytest -q` runs the whole suite: 412 tests in 18 files
-at the time of writing, about 3 minutes (412 passed in 167 s after the full
-build of 2026-11-02, none skipped). Tests that need local data skip themselves until
+`.venv/bin/python -m pytest -q` runs the whole suite: 463 tests in 19 files
+(plus conftest.py) at the time of writing, about 3 minutes. No test ever
+starts the real Claude Code CLI or spends plan usage (conftest.py, below).
+Tests that need local data skip themselves until
 it exists: `needs_panel` / an inline check skip without
 data/processed/panel_monthly.csv; test_server.py's `needs_build` skips
 without data/results/meta.json; others check the specific result file they
 read (backtest.json, ablation.json, scenario_paths.npz, continuation_paths.npz
 for the real-data portfolio tests). test_translator.py
 needs the `anthropic` package (the llm extra) and never calls the API: it
-injects fake clients and checks that the system prompt is deterministic.
+injects fake clients (so the api backend) and checks that the system prompt
+is deterministic. test_claude_code.py covers the default claude_code backend
+with neither data nor the llm extra (two end-to-end tests need the panel): a
+fake `subprocess.run` (conftest.FakeCLI) checks the exact argument list (no
+shell, `--tools ""` and the isolation flags), the sanitized environment, the
+fresh empty temporary cwd, the envelope and its metadata, every failure
+(is_error, exit codes, the usage limit, timeouts, plain text on stdout;
+never a token, an API key or another environment value in a message, and
+a login token that is not in the environment or a short credential value
+is redacted too), the response cache (a hit starts no process, a failure
+is never cached, a lone surrogate in a narrative is not a crash), the
+MSL_LLM_CONCURRENCY limit, status parsing and its 60 s / 5 s cache,
+backend selection, the server's pass-through of `refresh` and its Host
+check (403 for another site's name), and that the build's llm step makes
+no call. conftest.py's autouse `no_live_llm` makes every Claude Code process
+fail as if the CLI were not installed and gives each test its own response
+and status caches; the `fake_cli` fixture is the only way back.
 test_build.py covers the build steps and the sources with the network mocked.
 The server tests that run a custom scenario write into data/results/custom (and
-delete it) or into a temporary directory. A fresh clone (no data/) runs 253
-passed / 159 skipped with the llm extra and 248 passed / 140 skipped without it
+delete it) or into a temporary directory. A fresh clone (no data/) runs 301
+passed / 162 skipped with the llm extra and 296 passed / 143 skipped without it
 (about 30 s). The exact check-value tests of the regime layer skip unless
 panel_meta.json ends in 2026-09 (`CHECK_MONTH` in tests/test_regimes.py), so a
 data update skips them instead of failing.
 
-Files: test_ablation, test_attribution (bit-identity of simulate and run_spec
+Files: conftest (no live Claude Code, FakeCLI), test_ablation, test_attribution (bit-identity of simulate and run_spec
 with and without the attribution, additivity, the reconciliation, a pure oil
 shock, the structural assets, the lagged-spec fallback, the valuation pull, and
 that the factor terms use the simulated, not the drawn, factor changes),
 test_backtest (incl. the custom windows: validation, no look-ahead, the setup
 cache), test_build (incl. the STEPS order and OPT_IN), test_causality,
-test_diagnostics, test_engine, test_eras (incl. era_attribution on synthetic
+test_claude_code, test_diagnostics, test_engine, test_eras (incl. era_attribution on synthetic
 and real data), test_forecast (incl. the ledger: append-only, refusals,
 duplicates, scoring on stored quantiles; the skill rule and the calibration;
 a flat kernel equals uncond bit for bit, every share reachable, the claim

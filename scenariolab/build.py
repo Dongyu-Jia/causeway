@@ -16,8 +16,9 @@ after --only scenarios); forecast scores rolling one-year-ahead forecasts and
 needs the scenario paths; valuation tests the valuation state on the backtest
 windows and the forecast and checks itself against backtest.json,
 scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
-the scenario paths; llm writes what the translator would send the model (no
-API key needed; its regime section reads regimes.json).
+the scenario paths; llm writes what the translator would send the model (it
+never calls a model: its status runs only `claude --version` and `claude auth
+status`, which spend no usage; its regime section reads regimes.json).
 """
 from __future__ import annotations
 

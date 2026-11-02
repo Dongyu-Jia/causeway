@@ -32,7 +32,7 @@
 | | 诊断与迭代 | 预测为什么不准：缺因子、缺传导机制、要调参、要神经网络？走步迭代：诊断 → 改进 → 在未触碰的时段上检验；引擎消融的结果（可选） |
 | | 估值与盈利 | 标普 500 / 纳指的市盈率、ROIC、自由现金流要不要当宏观因子：今天的 P/D 与公允值、公允值回归与稳定性、拉力速度 κ、估值状态变体的回测、外生候选因子、各情景隐含的 15 年后 P/D |
 | 未来 | 未来情景 | 13 个内置情景按后验概率排序：因果链、分阶段视图与抽中的历史月份、**宏观体制**（每个阶段的模拟路径、抽中月份和引擎无条件抽样各是什么体制，第 1 年出现收缩的路径占比对照历史基准）、月线 / 年线 K 线、名义与实际扇形图、宏观路径（含 P/D）、后验相关性、收入分配计算器、校验报告；跨情景对比；**传导归因**：每个阶段、每类资产的年化回报来自哪些因子（瀑布图，因果链的连线上标出引擎算出的数字） |
-| | 情景实验室（LLM） | 输入一段文字叙事 → Claude 翻译成情景规格（可编辑的 JSON，阶段可以用 regime 字段要求多抽某种宏观体制的历史月份，并检查历史上能不能做到）→ 校验截断 → 引擎模拟并保存；没有 API key 时也能“载入示例”（内置情景的叙事和手写规格，看一遍完整流程），或载入内置情景当模板、编辑后运行 |
+| | 情景实验室（LLM） | 输入一段文字叙事 → 本机 Claude Code（使用你的订阅额度）翻译成情景规格（可编辑的 JSON，阶段可以用 regime 字段要求多抽某种宏观体制的历史月份，并检查历史上能不能做到）→ 校验截断 → 引擎模拟并保存；不调用 LLM 也能“载入示例”（内置情景的叙事和手写规格，看一遍完整流程），或载入内置情景当模板、编辑后运行 |
 | | 组合评估 | 任意 13 类资产权重和再平衡方式：每个情景及概率加权 / 等权 / 最差 / 最好情景下的 CAGR、波动、夏普、Sortino、最大回撤、CVaR；可以调整情景概率、纳入自定义情景；**情景概率校准**：概率可选模型后验、按一年期预测校准或手动（校准只用通过检验的宏观变量，目前没有变量通过，这个选项暂时不可用） |
 | | 提取与破产概率 | 三种提取方式：按比例、先用股息再按比例、先用股息再按当年收益从高到低卖；破产概率、存活曲线、安全提取率、期末实际财富；**30 年提取**：期限 10–40 年（默认 30 年），前 15 年是情景路径，第 16 年起按历史月份无条件续抽，15 年与所选期限的结果并列 |
 | 说明 | 方法与数据 | 引擎每一步怎么做、当前的估值锚定参数、数据来源与局限 |
@@ -63,16 +63,23 @@ python -m scenariolab.server     # 打开 http://127.0.0.1:8765
   - `--all`：连同默认不跑的引擎消融（ablation，约 5 分钟）和宏观体制的一年期预测检验（regime_forecast，约 2 分钟）一起跑；也可以单独运行 `--only ablation` 或 `--only regime_forecast`。
 - 重新构建之后重启服务器：自定义情景、自选回测窗口和 LLM 翻译用的是服务器启动时载入的引擎。换端口：`MSL_PORT=9000 python -m scenariolab.server`。
 - 页面的图表库 [Apache ECharts](https://echarts.apache.org) 5.5.1 随代码放在 `web/vendor/echarts/`（Apache License 2.0，许可证和 NOTICE 在同一目录），不依赖 CDN，断网也能打开；页面只访问本机的服务器。
-- 测试：`pytest -q`（写作时共 412 个测试，约 3 分钟；需要数据或结果文件的测试在构建之前会自动跳过，默认构建之后只剩引擎消融的测试跳过，跑过 `--only ablation` 才会执行）。GitHub Actions 在 Python 3.10 和 3.12 上对每次推送和 PR 运行编译检查、`ruff check scenariolab tests` 和全部测试（新克隆没有数据，依赖数据的测试跳过：不装 llm 扩展时 248 个通过、140 个跳过）。
+- 测试：`pytest -q`（写作时共 463 个测试，约 3 分钟；测试从不启动真正的 Claude Code，也不消耗订阅用量；需要数据或结果文件的测试在构建之前会自动跳过，默认构建之后只剩引擎消融的测试跳过，跑过 `--only ablation` 才会执行）。GitHub Actions 在 Python 3.10 和 3.12 上对每次推送和 PR 运行编译检查、`ruff check scenariolab tests` 和全部测试（新克隆没有数据，依赖数据的测试跳过：不装 llm 扩展时 296 个通过、143 个跳过）。
 - 想参与开发、添加情景或数据源：见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-### LLM 情景实验室的 API key
+### LLM 情景实验室：本机 Claude Code（使用你的订阅额度）
 
-1. `cp .env.example .env`
-2. 在 `.env` 里填入 `ANTHROPIC_API_KEY=你的 key`（可选：`MSL_LLM_MODEL` 换模型，默认 `claude-opus-5-5`）。
-3. 重启 `python -m scenariolab.server`。
+翻译默认交给本机的 Claude Code 命令行（`claude -p`，非交互模式），用的是你自己的 Claude 订阅登录（例如 Max），不需要 API key，也不按 API 计费。
 
-没有 key 时其余功能全部照常可用；实验室的“载入示例”会把一个内置情景的叙事和它手写的规格（按 LLM 的输出格式排列，标明不是实时翻译）分别放进第 ① ② 步，可以直接交给引擎运行，看一遍“叙事 → 规格 → 引擎”的完整流程；也可以载入内置情景当模板、编辑规格后运行，只是不能把自己的文字翻译成规格。**`.env` 已经写进 `.gitignore`，永远不要提交它。** 命令行也可以翻译：`python -m scenariolab.llm.translator "霍尔木兹海峡被封锁半年……" --run`。
+1. 安装 Claude Code，在终端运行 `claude auth login`，用你自己的 Claude 订阅账号登录（`claude auth status` 可以确认）。也可以运行 `claude setup-token`，把生成的令牌写进 `.env` 的 `CLAUDE_CODE_OAUTH_TOKEN=`：整个令牌写在一行里（终端把它折成两行时要先合并），然后重启服务。
+2. 可选：`cp .env.example .env`。`MSL_LLM_BACKEND=claude_code` 是默认值；`claude` 不在 PATH 里时用 `MSL_CLAUDE_BIN` 写它的完整路径（否则依次找 PATH 和 `~/.local/bin/claude`）；`MSL_LLM_MODEL` 换模型（默认 `claude-opus-5-5`）；`MSL_LLM_TIMEOUT` 是每次翻译最多等多少秒（默认 600），`MSL_LLM_CONCURRENCY` 是同时最多几次调用（默认 2）。
+3. 打开情景实验室：状态栏写着“本机 Claude Code（使用你的订阅额度）”和登录方式（Claude Code 登录 / CLAUDE_CODE_OAUTH_TOKEN / 未登录）；未登录时按提示运行 `claude auth login` 后刷新页面即可，不用重启服务。
+
+- **用量**：每次翻译都计入你订阅的 5 小时和每周用量上限。查询状态只运行 `claude --version` 和 `claude auth status --json`，不消耗用量；构建（`python -m scenariolab.build`）从不调用模型。同一段叙事（同一后端、模型和提示词）的翻译结果缓存在 `data/llm_cache/`（只存模型回答的文本和用时、轮数、token 数，不存提示词、叙事或凭据），再翻译一次直接读缓存、不消耗额度；要重新翻译，在实验室里点翻译结果旁边的“重新翻译”，命令行加 `--refresh`，或在 `POST /api/llm/translate` 的请求体里加 `"refresh": true`。
+- **隔离**：Claude Code 在一个空的临时目录里运行，不给它任何工具（`--tools ""`），不加载 MCP 服务器、用户设置、钩子和 CLAUDE.md，也不保存会话；它的环境里去掉了所有 `ANTHROPIC_*` 变量（`ANTHROPIC_API_KEY` 或 `ANTHROPIC_AUTH_TOKEN` 在非交互模式下总是优先，会改成按 API 计费）、上层 Claude Code 会话的 `CLAUDE*` 变量和其他名字像凭据的变量（`…_API_KEY`、`…_TOKEN`、`…_SECRET`、`…_PASSWORD`，例如 `.env` 里的 `FRED_API_KEY`），只保留 `CLAUDE_CONFIG_DIR` 和非空的 `CLAUDE_CODE_OAUTH_TOKEN`。
+- **只供个人在本机使用**：服务只监听 127.0.0.1，翻译接口只接受 Host 是 127.0.0.1 或 localhost 的请求（别的网站把自己的域名解析到 127.0.0.1，也就是 DNS rebinding，会得到 403，用不了你的订阅额度）；每个人用自己电脑上、自己登录的 Claude Code。程序不替别人转发请求，也不保存或转发任何人的凭据。不要把它部署成给别人用的服务。
+- 想改用 Anthropic API（按 API 计费）：在 `.env` 里写 `MSL_LLM_BACKEND=api` 和 `ANTHROPIC_API_KEY=…`，安装可选依赖 `pip install -e ".[llm]"`，再重启服务。只有明确设置 `MSL_LLM_BACKEND=api` 时才会用 API。
+
+不调用 LLM 时其余功能全部照常可用；实验室的“载入示例”会把一个内置情景的叙事和它手写的规格（按 LLM 的输出格式排列，标明不是实时翻译）分别放进第 ① ② 步，可以直接交给引擎运行，看一遍“叙事 → 规格 → 引擎”的完整流程；也可以载入内置情景当模板、编辑规格后运行，只是不能把自己的文字翻译成规格。**`.env` 已经写进 `.gitignore`，永远不要提交它。** 命令行也可以翻译：`python -m scenariolab.llm.translator "霍尔木兹海峡被封锁半年……" --run`（`--refresh` 不用缓存）。
 
 ## 工作原理
 
