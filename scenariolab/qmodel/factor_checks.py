@@ -901,7 +901,7 @@ def _fit_summary(m: F.FactorModel) -> dict:
     keep = ("sample", "T", "lambda", "nu", "logml", "rejected_draws", "rejection_rate", "max_root_mean",
             "cycle_root_mean", "root_limit", "draw_fallbacks", "transform", "cycle_center", "cycle_shift_mean",
             "pool_winsorized", "steady_state", "zlb_quarters", "cpi_weights", "satellites", "satellites_excluded",
-            "sat_cov", "smallest_weights", "anchors")
+            "sat_cov", "smallest_weights", "anchors", "identification", "irf_rule", "irf_rule_acceptance")
     out = {k: m.info.get(k) for k in keep}
     sh = pd.Series(m.core.Y[:, F.IDX["rff"]] + 0.0, index=m.core.dates)
     miss = m.core.missing[:, F.IDX["rff"]]

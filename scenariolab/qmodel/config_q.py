@@ -249,6 +249,19 @@ GIBBS_SWEEPS = 60
 RARITY_WARN_PCT = 0.99                      # "这个组合在历史上极少见" above the 99th percentile of the same statistic
                                             # under the simulator's own pool draws (not a chi-square, fix round)
 POLICY_DO = {"u_ff": "rff", "u_def": "d_deficit", "u_tr": "d_transfers", "u_ptax": "d_perstax", "u_bs": "d_bs"}
+# the identification of u_ff (the uff round, 2026-11-02, pre-registered in its scratch folder): the structural impact
+# matrix is the Cholesky factor of the joint innovation covariance in the do-operator's within-quarter order, and the
+# u_ff column depends only on what is ordered before rff. FACTOR_DO_ORDER names the variables moved ahead of rff in that
+# order only (their endogeneity class, the satellites' same-quarter terms, completion and the reduced-form model are
+# unchanged): "recursive" is the order of §5.3 ([E0] -> [E0p] rff -> [E1c] ro -> ...); "oil_first" ranks real oil
+# with E0 (the Fed sees same-quarter oil; the commodity-price fix); "oil_expectations_first" adds the Michigan 1-year
+# expectations satellite. FACTOR_IRF_RULE "no_price_puzzle" (the round's candidate a) keeps only the posterior draws
+# whose u_ff response of core CPI y/y is <= 0 from quarter 8 and < 0 from quarter 12 (factors.price_puzzle_free).
+FACTOR_DO_ORDERS = {"recursive": (), "oil_first": ("ro",), "oil_expectations_first": ("ro", "d_infexp1")}
+FACTOR_DO_ORDER = "recursive"
+FACTOR_IRF_RULE = None                      # None or "no_price_puzzle"
+FACTOR_IRF_RULE_TRIES = 4000                # proposals per draw under the response rule (the stability rule: 400)
+FACTOR_IRF_HORIZONS = {"le0_from": 8, "lt0_from": 12, "to": 16}   # core y/y response <= 0 from q8, < 0 from q12
 # cycle module C' (§5.6): in quarters that state nothing about growth, IP growth from 2-quarter blocks of the
 # training quarters' IP growth (equal weights; entropy-tilted to stated regime odds), imposed as a soft statement
 # with sd = 0.5 x the training quarterly IP sd; the pre-registered alternative is 8-quarter blocks of whitened

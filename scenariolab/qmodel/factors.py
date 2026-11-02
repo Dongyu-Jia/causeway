@@ -61,8 +61,13 @@ stated level outside the bounds is delivered just inside them; a stated
 policy-rate change is met on the observed rate, with the floor handled by an active set (level and kink forms) per
 path. The do-operator: a stated u_* is a
 structural shock of its policy equation under the recursive order, so same-quarter E0 macro is not moved by it, E1 /
-E2 respond on impact and E0 with the lags; a stated raw policy field is a reduced-form observation. The cycle module
-(§5.6, C') draws IP growth from 2-quarter blocks of training IP growth in quarters that state nothing about growth
+E2 respond on impact and E0 with the lags; a stated raw policy field is a reduced-form observation. The order is
+config_q.FACTOR_DO_ORDER (do_order_of; it moves variables ahead of rff in P only, never their class or the reduced
+form); config_q.FACTOR_IRF_RULE can restrict the posterior draws by their u_ff response (price_puzzle_free). The uff
+round (2026-11-02, pre-registered) tried real oil ahead of rff, oil and Michigan expectations, and that restriction:
+none passed every rule, so the default is §5.3's recursive order, whose u_ff raises core CPI y/y about 0.09 pp at
+quarters 5-8 after +50bp (the price puzzle sits in the lag coefficients; the agent tree's overlay corrects it).
+The cycle module (§5.6, C') draws IP growth from 2-quarter blocks of training IP growth in quarters that state nothing about growth
 (soft, sd = 0.5 x the quarterly IP sd; the other variables co-move through the innovation covariance; applied
 quarter by quarter, one-sided, so a statement-free quarter never reshapes the past). Saturation (§3.5): a stated
 value's gap to its conditional mean saturates at +-4 training sd (d_oil and d_y10 pass through). Completion shrinkage
@@ -995,6 +1000,113 @@ class InitState:
     information: str = "available"        # "published" (release lags at the origin's start) or "available"
 
 
+# ================================================================ the identification of the policy shocks
+
+AHEAD_RANK = 0.5                          # FACTOR_DO_ORDER's variables: after E0, before rff (E0p)
+
+
+def identification_ahead(identification: str | None = None) -> tuple:
+    """The variables ordered ahead of rff besides E0 (config_q.FACTOR_DO_ORDERS[identification], default
+    config_q.FACTOR_DO_ORDER)."""
+    ident = cq.FACTOR_DO_ORDER if identification is None else identification
+    if ident not in cq.FACTOR_DO_ORDERS:
+        raise ValueError(f"identification={ident!r}: one of {sorted(cq.FACTOR_DO_ORDERS)}")
+    return tuple(cq.FACTOR_DO_ORDERS[ident])
+
+
+def stacked_classes(sats: "Satellites") -> list[str]:
+    """The endogeneity class of every stacked variable (core, then satellites); d_bs is "last"."""
+    cls = [CORE_CLASS[v] for v in CORE] + list(sats.classes)
+    return ["last" if nm == cq.POLICY_DO["u_bs"] else c for nm, c in zip(CORE + list(sats.fields), cls)]
+
+
+def do_order_of(names: list, classes: list, identification: str | None = None) -> np.ndarray:
+    """Stacked positions in the do-operator's within-quarter order: E0 -> [identification_ahead] -> E0p -> E1c / E1 /
+    E2 -> d_bs ("last"), by class rank and then stacked position. Only the order moves: a variable moved ahead of rff
+    keeps its class (the satellites' same-quarter terms, completion shrinkage and the E0 checks read the class)."""
+    ahead = set(identification_ahead(identification))
+    rank = [AHEAD_RANK if nm in ahead else RANK[c] for nm, c in zip(names, classes)]
+    return np.array(sorted(range(len(names)), key=lambda i: (rank[i], i)))
+
+
+def joint_system(A: list, c: np.ndarray, Sk: np.ndarray, sats: "Satellites", order: np.ndarray,
+                 Sw: np.ndarray | None = None) -> dict:
+    """The stacked [core; satellites] system of one core parameter set: C (n,), Phi = [Phi_1, Phi_2], Sigma_u, L_u
+    (its Cholesky) and P, the structural impact matrix: the Cholesky factor of Sigma_u in `order`, mapped back to
+    stacked positions (P P' = Sigma_u; column j is variable j's recursive structural shock)."""
+    s = sats
+    Sw = s.Sigma if Sw is None else Sw
+    S = len(s.fields)
+    n = NC + S
+    G0, G1 = s.G0, s.G1
+    C = np.concatenate([c, s.d + G0 @ c])
+    P1 = np.zeros((n, n))
+    P2 = np.zeros((n, n))
+    P1[:NC, :NC] = A[0]
+    P1[NC:, :NC] = G0 @ A[0] + G1
+    P1[NC:, NC:] = np.diag(s.rho)
+    P2[:NC, :NC] = A[1]
+    P2[NC:, :NC] = G0 @ A[1]
+    Su = np.zeros((n, n))
+    Su[:NC, :NC] = Sk
+    Su[:NC, NC:] = Sk @ G0.T
+    Su[NC:, :NC] = G0 @ Sk
+    Su[NC:, NC:] = G0 @ Sk @ G0.T + Sw
+    Su = 0.5 * (Su + Su.T)
+    Lk = np.linalg.cholesky(Sk)
+    Lw = np.linalg.cholesky(Sw + 1e-12 * np.eye(S)) if S else np.zeros((0, 0))
+    Lu = np.zeros((n, n))
+    Lu[:NC, :NC] = Lk
+    Lu[NC:, :NC] = G0 @ Lk
+    Lu[NC:, NC:] = Lw
+    Pd = np.linalg.cholesky(Su[np.ix_(order, order)])
+    P = np.zeros((n, n))
+    P[np.ix_(order, order)] = Pd
+    return {"C": C, "Phi": [P1, P2], "Sigma": Su, "L": Lu, "P": P, "order": order}
+
+
+def shock_response(sysm: dict, pos: int, H: int, size: float = 1.0, cycle: bool = False) -> np.ndarray:
+    """(H, n) linear response of the stacked system to variable `pos`'s structural shock, scaled so that `pos` moves
+    by `size` on impact (quarter 1 is row 0). cycle: the dynamics the cycle module simulates in statement-free
+    quarters (IP set to its target, the rest along their innovation regression on IP: M Phi, M = I - k e_ip', the
+    stacked analogue of cycle_A), which is what step mode's IRF follows when nothing states growth."""
+    P1, P2 = sysm["Phi"]
+    if cycle:
+        Su = sysm["Sigma"]
+        ip = IDX["ip"]
+        k = Su[:, ip] / Su[ip, ip]
+        M = np.eye(len(Su))
+        M[:, ip] -= k
+        P1, P2 = M @ P1, M @ P2
+    r = np.zeros((H, P1.shape[0]))
+    r[0] = sysm["P"][:, pos] * (size / sysm["P"][pos, pos])
+    for h in range(1, H):
+        r[h] = P1 @ r[h - 1] + (P2 @ r[h - 2] if h >= 2 else 0.0)
+    return r
+
+
+def core_yoy_response(r: np.ndarray, j_core: int) -> np.ndarray:
+    """Core CPI y/y's linear response (pp) from the stacked response of d_core (annualized quarterly rates): the
+    mean of the last four quarters' responses (100 (exp(sum / 400) - 1) to first order)."""
+    x = r[:, j_core]
+    cs = np.concatenate([[0.0], np.cumsum(x)])
+    lo = np.maximum(np.arange(1, len(x) + 1) - 4, 0)
+    return (cs[1:] - cs[lo]) / 4.0
+
+
+def price_puzzle_free(sysm: dict, names: list, horizons: dict | None = None) -> bool:
+    """FACTOR_IRF_RULE "no_price_puzzle": the u_ff response of core CPI y/y is <= 0 at every quarter from
+    FACTOR_IRF_HORIZONS["le0_from"] to ["to"] and < 0 from ["lt0_from"], under both the VAR's dynamics and the cycle
+    module's (the two systems the draw rule tests)."""
+    hz = cq.FACTOR_IRF_HORIZONS if horizons is None else horizons
+    pos, jc = names.index(cq.POLICY_DO["u_ff"]), names.index("d_core")
+    for cyc in (False, True):
+        y = core_yoy_response(shock_response(sysm, pos, int(hz["to"]), 1.0, cycle=cyc), jc)
+        if np.any(y[int(hz["le0_from"]) - 1:] > 0.0) or np.any(y[int(hz["lt0_from"]) - 1:] >= 0.0):
+            return False
+    return True
+
+
 # ================================================================ the model
 
 @dataclass
@@ -1026,6 +1138,7 @@ class FactorModel:
     pool_C: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))  # covariance of the (centred) pool rows
     train_frame: pd.DataFrame | None = None   # training-quarter series of every statement observable (saturation)
     shock_sd: dict = field(default_factory=dict)  # training sd of each policy shock (policy.shock_sd)
+    identification: str = "recursive"      # the do-operator's order (config_q.FACTOR_DO_ORDERS) the model was fitted with
     _sd_cache: dict = field(default_factory=dict, repr=False)
 
     # ---------------------------------------------------------------- the simulator's own innovation covariance
@@ -1059,18 +1172,19 @@ class FactorModel:
 
     @property
     def classes(self) -> list[str]:
-        cls = [CORE_CLASS[v] for v in CORE] + list(self.sats.classes)
-        return ["last" if nm == cq.POLICY_DO["u_bs"] else c for nm, c in zip(self.names, cls)]
+        return stacked_classes(self.sats)
 
-    def do_order(self) -> np.ndarray:
-        """Stacked positions in the do-operator's recursive order: E0 -> E0p -> E1c / E1 / E2 -> d_bs."""
-        cls = self.classes
-        return np.array(sorted(range(self.n), key=lambda i: (RANK[cls[i]], i)))
+    def do_order(self, identification: str | None = None) -> np.ndarray:
+        """Stacked positions in the do-operator's within-quarter order (the model's identification, or
+        `identification`): E0 -> [the variables moved ahead of rff] -> E0p -> E1c / E1 / E2 -> d_bs."""
+        ident = self.identification if identification is None else identification
+        return do_order_of(self.names, self.classes, ident)
 
     # ---------------------------------------------------------------- the joint system of one parameter draw
-    def system(self, draw: int | None = None, regime: str | None = None) -> dict:
+    def system(self, draw: int | None = None, regime: str | None = None, identification: str | None = None) -> dict:
         """C (n,), Phi = [Phi_1, Phi_2], Sigma_u, L_u (its Cholesky), P (structural impact matrix in stacked order:
-        columns are the recursive structural shocks, P P' = Sigma_u) for the posterior mean (draw None) or a draw."""
+        columns are the recursive structural shocks, P P' = Sigma_u) for the posterior mean (draw None) or a draw;
+        identification overrides the model's (P and order only: the reduced form does not depend on it)."""
         A, c, Sk = (self.A, self.c, self.Sigma) if draw is None else self.draws[draw]
         if regime and regime in self.regime_sigma:
             Sk_r, Sw_r, nr = self.regime_sigma[regime]
@@ -1079,35 +1193,7 @@ class FactorModel:
             Sw = (nr * Sw_r + n0 * self.sats.Sigma) / (nr + n0)
         else:
             Sw = self.sats.Sigma
-        s = self.sats
-        S = len(s.fields)
-        n = NC + S
-        G0, G1 = s.G0, s.G1
-        C = np.concatenate([c, s.d + G0 @ c])
-        P1 = np.zeros((n, n))
-        P2 = np.zeros((n, n))
-        P1[:NC, :NC] = A[0]
-        P1[NC:, :NC] = G0 @ A[0] + G1
-        P1[NC:, NC:] = np.diag(s.rho)
-        P2[:NC, :NC] = A[1]
-        P2[NC:, :NC] = G0 @ A[1]
-        Su = np.zeros((n, n))
-        Su[:NC, :NC] = Sk
-        Su[:NC, NC:] = Sk @ G0.T
-        Su[NC:, :NC] = G0 @ Sk
-        Su[NC:, NC:] = G0 @ Sk @ G0.T + Sw
-        Su = 0.5 * (Su + Su.T)
-        Lk = np.linalg.cholesky(Sk)
-        Lw = np.linalg.cholesky(Sw + 1e-12 * np.eye(S)) if S else np.zeros((0, 0))
-        Lu = np.zeros((n, n))
-        Lu[:NC, :NC] = Lk
-        Lu[NC:, :NC] = G0 @ Lk
-        Lu[NC:, NC:] = Lw
-        order = self.do_order()
-        Pd = np.linalg.cholesky(Su[np.ix_(order, order)])
-        P = np.zeros((n, n))
-        P[np.ix_(order, order)] = Pd
-        return {"C": C, "Phi": [P1, P2], "Sigma": Su, "L": Lu, "P": P, "order": order}
+        return joint_system(A, c, Sk, self.sats, self.do_order(identification), Sw)
 
     # ---------------------------------------------------------------- initial state at an origin
     def initial_state(self, Q: pd.DataFrame, origin, information: str = "auto") -> InitState:
@@ -1414,12 +1500,17 @@ def stable(A: list[np.ndarray], Sig: np.ndarray, limit: float = cq.FACTOR_MAX_RO
 def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataFrame | None = None, seed: int = 0,
         n_draws: int = cq.FACTOR_DRAWS, nu_grid=cq.FACTOR_NU_GRID, lam_grid=cq.FACTOR_LAMBDA_GRID, soc: bool = True,
         satellites: bool = True, steady: bool = True, shadow: str = cq.FACTOR_SHADOW,
-        transform: str | None = None, bounds: str | None = None) -> FactorModel:
+        transform: str | None = None, bounds: str | None = None, identification: str | None = None,
+        irf_rule: str | None = "default") -> FactorModel:
     """Fit the factor layer on quarters FIRST_QUARTER .. train_end only. anchors 'train_end' (backtests, §5.5) or
     'forward' (scenarios, §3.8). shadow 'missing' (§5.4 default: zero-bound quarters' shadow rate is missing data in
     the EM) or 'censored' (the pre-registered alternative: imputed at or below the bound). transform 'logit' (default,
     config_q.FACTOR_TRANSFORM: unemployment and the spreads on bounded scales) or 'log' (P3's log(level - lo), the
-    pre-registered alternative of §15 Q5)."""
+    pre-registered alternative of §15 Q5). identification: the do-operator's order (config_q.FACTOR_DO_ORDERS; default
+    FACTOR_DO_ORDER), kept on the model. irf_rule: the draw rule's response restriction ("default":
+    config_q.FACTOR_IRF_RULE; None: off; "no_price_puzzle")."""
+    identification = cq.FACTOR_DO_ORDER if identification is None else identification
+    identification_ahead(identification)                      # validates the name
     te = pd.Period(train_end, "Q")
     tf = transforms(transform, bound_ceilings(Q, te, bounds))
     D = core_frame(Q, tf).loc[:te]
@@ -1440,16 +1531,29 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
     rng = np.random.default_rng(np.random.SeedSequence([seed, 7]))
     k = NC * P_LAGS + 1
     Lx = np.linalg.cholesky(np.linalg.inv(core.X1X1))
-    draws, rej, fallback, mu_ip = [], 0, 0, []
+    sats = fit_satellites(Q, core, str(te), seed=seed) if satellites else _no_satellites()   # no shared random numbers
+    rule = cq.FACTOR_IRF_RULE if irf_rule == "default" else irf_rule
+    if rule not in (None, "no_price_puzzle"):
+        raise ValueError(f"irf_rule={rule!r}: None or 'no_price_puzzle'")
+    rsats = sats if (satellites or not rule) else fit_satellites(Q, core, str(te), seed=seed)  # the rule reads d_core
+    if rule and "d_core" not in rsats.fields:
+        raise ValueError("irf_rule 'no_price_puzzle' needs the d_core satellite")
+    names = CORE + list(rsats.fields)
+    order = do_order_of(names, stacked_classes(rsats), identification)
+    tries = cq.FACTOR_IRF_RULE_TRIES if rule else cq.FACTOR_DRAW_TRIES
+    draws, rej, fallback, mu_ip, rej_irf, stable_n = [], 0, 0, [], 0, 0
     while len(draws) < n_draws:
         ok = False
-        for _ in range(cq.FACTOR_DRAW_TRIES):
+        for _ in range(tries):
             Sd = invwishart.rvs(df=core.T1 - k, scale=core.S1, random_state=rng)
             Bd = core.B + Lx @ rng.standard_normal((k, NC)) @ np.linalg.cholesky(Sd).T
             Ad, _ = split_B(Bd, NC, P_LAGS)
             if stable(Ad, Sd):
-                ok = True
-                break
+                stable_n += 1
+                if not rule or price_puzzle_free(joint_system(Ad, np.zeros(NC), Sd, rsats, order), names):
+                    ok = True
+                    break
+                rej_irf += 1
             rej += 1
         if not ok:
             Ad, Sd = A, core.Sigma
@@ -1457,7 +1561,6 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
         mud, cd = steady_state(Ad, Sd, core.Y, w, mu_star, mu_sd, rng)
         draws.append((Ad, cd, Sd))
         mu_ip.append(float(mud[IDX["ip"]]))
-    sats = fit_satellites(Q, core, str(te), seed=seed) if satellites else _no_satellites()
     wg, ws = cpi_weights(Q, te)
     if P is None:
         from ..data import panel as monthly_panel
@@ -1468,7 +1571,7 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
                         Sigma=core.Sigma, draws=draws, rejected=rej, wg=wg, ws=ws, mu_star=mu_star, mu_sd=mu_sd,
                         pool=np.zeros((0, 0)), pool_labels=np.array([]), ip_hist=ipq.to_numpy(float),
                         ip_contraction=contr.reindex(ipq.index).fillna(0.0).to_numpy(float), seed=seed, tf=tf,
-                        draw_mu_ip=np.array(mu_ip))
+                        draw_mu_ip=np.array(mu_ip), identification=identification)
     pool_info = _build_pool(model, seed)
     _regime_sigmas(model, Q)
     model.train_frame = train_frame(Q, te)
@@ -1476,7 +1579,10 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
     model.info = {"version": VERSION, "train_end": str(te), "sample": [str(D.index[0]), str(te)],
                   "T": int(len(D)), "lambda": core.lam, "nu": core.nu, "logml": core.logml,
                   "rejected_draws": rej, "rejection_rate": rej / (rej + n_draws), "n_draws": n_draws,
-                  "draw_fallbacks": fallback, "max_root_mean": max_root(A),
+                  "draw_fallbacks": fallback, "identification": identification, "irf_rule": rule,
+                  "irf_rule_rejected": rej_irf, "stable_proposals": stable_n,
+                  "irf_rule_acceptance": ((n_draws - fallback) / stable_n) if (rule and stable_n) else None,
+                  "max_root_mean": max_root(A),
                   "cycle_root_mean": max_root(cycle_A(A, core.Sigma)), "root_limit": cq.FACTOR_MAX_ROOT,
                   "root_rule": "VAR 与周期模块下的系统：每个根 < 上限（每个模态在最长模拟期内至少衰减一半）",
                   "transform": tf.summary(), "cycle_center": cq.CYCLE_CENTER,

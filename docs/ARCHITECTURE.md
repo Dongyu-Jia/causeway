@@ -2195,6 +2195,26 @@ an earlier engine can be browsed, but an unsaved branch of theirs is not replaye
   result goes into the manifest and run.json (`transmission`), `/api/agents/config`, the CLI estimate (传导：…) and
   the honesty card. It also measures the policy rate's own response: a +50bp "do" raises core CPI y/y by +0.08 over
   quarters 4–8 and unemployment +0.09 at quarter 12, a price puzzle the card discloses.
+* **The price puzzle: re-identification tried, not adopted (the uff round, 2026-11-02).** u_ff is the rff column of
+  P = chol(Σ_u) in the do-operator's within-quarter order (`factors.do_order_of`). `config_q.FACTOR_DO_ORDER` can
+  move variables ahead of rff in that order only: their class, the satellites' same-quarter terms, completion and
+  the reduced form stay as they are. `config_q.FACTOR_IRF_RULE = "no_price_puzzle"` keeps only posterior draws whose
+  u_ff response of core y/y is ≤ 0 from q8 and < 0 from q12 (`factors.price_puzzle_free`, on the VAR and the
+  cycle-module system).
+  - **Pre-registration.** A frozen markdown with its sha256: the protocol module's records are TA/TC/TS only. The
+    rules were: core y/y ≤ 0 from q8 and < 0 from q12; unemployment peaking in q4–12; the hawk-minus-passive spiral
+    ≤ 0 at q20 with no non-finite particle by q80; T-F/T-C not worse; F9's signs; the tree's puzzle flag false.
+  - **Ordering candidates.** Real oil first (`oil_first`) and oil plus Michigan 1-year expectations
+    (`oil_expectations_first`) change nothing that matters. The u_ff innovation is almost uncorrelated with oil's (corr 0.015),
+    and a +50bp u_ff moves Michigan's by only −0.007 pp on impact, so core y/y stays +0.096 at q5 and +0.060 at q12. Only P-reading
+    quantities move: T-C and every posterior predictive check are identical, and F1 and F9 move. The Michigan
+    variant also shifts the fiscal shocks' impact columns 7–24%.
+  - **The response rule.** It keeps 1.4% of the stable draws: the puzzle sits in the lag coefficients (the sum of
+    rff's lags in headline CPI's equation is +0.26, sd 0.07). It removes the puzzle (core −0.02 at q8, −0.06 at q12),
+    the spiral (−0.18 at q20) and the tree's flag. It fails the unemployment rule: the peak is at q16 (today's
+    identification: q22). T-F also loses one check (Okun at the forward fit: 50 of 77). In step mode the C′ cycle module holds IP growth at its block draw in quarters that state
+    no growth, so a policy shock never moves IP after impact, and unemployment follows only its own slow lags.
+  - **Default.** The default stays `recursive` with the rule off, and the overlay stays on.
 * **The Fed in the model's units.** The schema's s_ff is the monthly average of the quarter's last month and d_ff the
   change between two such averages (panel lvl_ff; the stub was fitted on the same definition), while the Fed's
   options are the quarter's total target move. Each quarter's first meeting falls in its first or second month, the

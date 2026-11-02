@@ -710,3 +710,83 @@ def test_qmodel_json_names_the_code_and_data_it_was_computed_from():
     assert fl.get("version") == F.VERSION
     assert fl.get("identity") == fc.identity(), ("data/results/qmodel.json is stale: rebuild it (python -m "
                                                 "scenariolab.build --only qmodel)")
+
+
+# ================================================================ the identification of u_ff (the uff round)
+
+def test_the_do_order_moves_only_the_named_variables_ahead_of_rff():
+    """config_q.FACTOR_DO_ORDER moves variables ahead of rff in the do-operator's order only (their class is kept);
+    today's recursive identification is the default and the response rule is off."""
+    names = F.CORE + ["d_core", "d_deficit", "d_infexp1", "d_y2", "d_bs"]
+    classes = [F.CORE_CLASS[v] for v in F.CORE] + ["E0", "E0p", "E2", "E1", "last"]
+    rec = [names[i] for i in F.do_order_of(names, classes, "recursive")]
+    assert rec == ["pc", "ps", "ip", "lu", "d_core", "rff", "d_deficit", "ro", "ry10", "sp", "gz", "usd", "d_infexp1",
+                   "d_y2", "d_bs"]
+    oil = [names[i] for i in F.do_order_of(names, classes, "oil_first")]
+    assert oil.index("d_core") < oil.index("ro") < oil.index("rff")
+    assert [v for v in oil if v != "ro"] == [v for v in rec if v != "ro"]
+    exp = [names[i] for i in F.do_order_of(names, classes, "oil_expectations_first")]
+    assert exp.index("ro") < exp.index("rff") and exp.index("d_infexp1") < exp.index("rff")
+    assert cq.FACTOR_DO_ORDER == "recursive" and cq.FACTOR_IRF_RULE is None
+    with pytest.raises(ValueError):
+        F.do_order_of(names, classes, "nope")
+
+
+def test_the_response_helpers_on_a_toy_system():
+    """shock_response scales the impact to `size` and runs the lags; core y/y's response is the mean of the last
+    four quarterly (annualized) responses."""
+    r = np.zeros((6, 2))
+    r[:, 1] = [4.0, 4.0, 4.0, 4.0, 0.0, 0.0]
+    assert np.allclose(F.core_yoy_response(r, 1), [1.0, 2.0, 3.0, 4.0, 3.0, 2.0])
+    Pm = np.array([[2.0, 0.0], [1.0, 1.0]])
+    sysm = {"Phi": [np.array([[0.5, 0.0], [0.2, 0.5]]), np.zeros((2, 2))], "P": Pm, "Sigma": Pm @ Pm.T}
+    out = F.shock_response(sysm, 0, 3, size=1.0)
+    assert np.allclose(out[0], [1.0, 0.5]) and np.allclose(out[1], [0.5, 0.45])
+
+
+@needs_qpanel
+def test_the_identification_switch_moves_only_the_structural_impact(model, init):
+    """Moving real oil ahead of rff changes P only: Sigma_u, Phi and every reduced-form simulation stay the same, the
+    u_ff column no longer moves oil on impact, and the fiscal shocks' columns do not change. A stated u_ff then leaves
+    same-quarter real oil unmoved, as it leaves E0 macro."""
+    import dataclasses
+    s0, s1 = model.system(), model.system(identification="oil_first")
+    assert np.array_equal(s0["Sigma"], s1["Sigma"]) and all(np.array_equal(a, b) for a, b in zip(s0["Phi"], s1["Phi"]))
+    for sm in (s0, s1):
+        assert np.allclose(sm["P"] @ sm["P"].T, sm["Sigma"], atol=1e-8)
+    rff, ro = F.IDX["rff"], F.IDX["ro"]
+    assert abs(s1["P"][ro, rff]) < 1e-12 < abs(s0["P"][ro, rff])
+    j = model.names.index("d_deficit")
+    assert np.allclose(s0["P"][:, j], s1["P"][:, j], atol=1e-10)
+    m1 = dataclasses.replace(model, identification="oil_first", _sd_cache={})
+    for stmts in ((), [S("d_ip", (1,), 0.5), S("d_cpi", (1, 2), 3.0), S("d_gz", (3,), 0.3, sd=0.1)]):
+        a = F.simulate(model, init, 6, n_paths=200, seed=4, statements=stmts)
+        b = F.simulate(m1, init, 6, n_paths=200, seed=4, statements=stmts)
+        assert all(np.array_equal(a.x[f], b.x[f]) for f in a.x)
+    kw = dict(n_paths=200, seed=4, cycle=False)
+    base = F.simulate(m1, init, 4, **kw)
+    hike = F.simulate(m1, init, 4, statements=[S("u_ff", (1,), 0.5)], **kw)
+    assert np.max(np.abs(hike.x["d_oil"][:, 0] - base.x["d_oil"][:, 0])) < 1e-9
+    assert np.max(np.abs(hike.x["d_y2"][:, 0] - base.x["d_y2"][:, 0])) > 1e-3
+
+
+@needs_qpanel
+def test_the_u_ff_response_at_the_forward_fit_and_the_response_rule(model, Q, P):
+    """The uff round's finding at the forward fit: today's identification has the price puzzle in its lag
+    coefficients (core CPI y/y rises after a +50bp u_ff, and ordering oil first does not change it), with the right
+    impact signs (the 2-year yield and the dollar rise, same-quarter E0 macro does not move). The pre-registered
+    response rule (FACTOR_IRF_RULE 'no_price_puzzle', the round's candidate a, not adopted) keeps only puzzle-free
+    draws and leaves the point model alone."""
+    pos, jc = model.names.index("rff"), model.names.index("d_core")
+    for ident in ("recursive", "oil_first"):
+        r = F.shock_response(model.system(identification=ident), pos, 16, 0.5)
+        c = F.core_yoy_response(r, jc)
+        assert abs(c[0]) < 1e-12 and c[7] > 0.0                       # the puzzle the agent tree's overlay corrects
+        assert r[0, model.names.index("d_y2")] > 0 and r[0, F.IDX["usd"]] > 0
+        assert np.allclose(r[0, [F.IDX[v] for v in ("pc", "ps", "ip", "lu")]], 0.0, atol=1e-12)
+    assert not F.price_puzzle_free(model.system(), model.names)
+    ma = F.fit(Q, "2026Q3", anchors="forward", P=P, seed=0, n_draws=6, irf_rule="no_price_puzzle")
+    assert ma.info["irf_rule"] == "no_price_puzzle" and ma.info["draw_fallbacks"] == 0
+    assert 0 < ma.info["irf_rule_acceptance"] < 0.2
+    assert all(F.price_puzzle_free(ma.system(d), ma.names) for d in range(len(ma.draws)))
+    assert np.array_equal(ma.A[0], model.A[0]) and np.array_equal(ma.Sigma, model.Sigma)
