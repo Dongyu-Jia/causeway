@@ -176,6 +176,10 @@ def test_run_on_real_panel_small():
         assert abs(ls[0] + 1.0) < 1e-6                                # scaled to a 1% decline on impact
     b = out["asset_betas"]
     assert np.asarray(b["beta_std"]["full"]).shape == (len(b["assets"]), len(b["factors"]))
+    # the base model's betas, named as such (the page compares it with the scenarios' selected model)
+    from scenariolab.engine.factor_model import ModelSpec
+    assert b["model"]["base"] is True and b["model"]["describe"] == ModelSpec().describe()
+    assert b["factors"] == list(ModelSpec().factors)
     assert b["r2"]["full"]["energy"] > 0.2
     assert len(out["chains"]) == 5
     for ch in out["chains"]:

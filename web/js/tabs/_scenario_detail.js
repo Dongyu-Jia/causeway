@@ -271,12 +271,38 @@ export function regimeVarName(v) {
   return `${rt ? '实时' : ''}${isLabel ? '体制' : '体制标记'}：${regimeName(id)}`;
 }
 
-// A phase's `regime` request ({id: share}, or the LLM list form [{id, share}]) as {id: share}; null without one.
+// The names a phase's `regime` key accepts besides the ids (scenarios/regime_views.ALIASES) and what it may ask
+// for: the six labels and the two flags 收缩 / 高通胀 (regime_views.IDS).
+const REGIME_ALIASES = { 扩张: 'expansion', 金发姑娘: 'expansion', 软着陆: 'expansion', 通胀: 'inflation', 过热: 'inflation',
+  通缩: 'deflation', 物价负增长: 'deflation', 衰退: 'recession', 萧条: 'depression', 深度衰退: 'depression', 滞胀: 'stagflation',
+  收缩: 'contraction', 高通胀: 'high_infl' };
+const REQUEST_FLAGS = ['contraction', 'high_infl'];
+const requestId = (k) => {
+  const s = String(k ?? '').trim();
+  const id = REGIME_ALIASES[s] || s.toLowerCase();
+  return REGIME_LABELS.some(l => l.id === id) || REQUEST_FLAGS.includes(id) ? id : null;
+};
+
+// A phase's `regime` request ({id or alias: share}, or the LLM list form [{id, share}]) as {id: share}, the way
+// validate_spec reads it (aliases resolved, unknown names dropped, the first entry of an id wins); null without one.
 export function regimeRequest(x) {
   const out = {};
-  if (Array.isArray(x)) { for (const d of x) if (d && d.id && isNum(Number(d.share))) out[d.id] = Number(d.share); }
-  else if (x && typeof x === 'object') { for (const [k, v] of Object.entries(x)) if (isNum(Number(v))) out[k] = Number(v); }
+  const put = (k, v) => { const id = requestId(k); if (id && !(id in out) && isNum(Number(v))) out[id] = Number(v); };
+  if (Array.isArray(x)) { for (const d of x) if (d && d.id) put(d.id, d.share); }
+  else if (x && typeof x === 'object') { for (const [k, v] of Object.entries(x)) put(k, v); }
   return Object.keys(out).length ? out : null;
+}
+
+// A regime request {id: share} as chips: the labels in their colours (largest first), then the flags in grey.
+export function regimeRequestMix(req, labels = REGIME_LABELS) {
+  const items = [
+    ...regimeLabels(labels).filter(l => isNum(req?.[l.id])).map(l => ({ name: l.name, color: l.color, v: req[l.id] }))
+      .sort((a, b) => b.v - a.v),
+    ...REQUEST_FLAGS.filter(id => isNum(req?.[id])).map(id => ({ name: REGIME_FLAGS[id], color: '#868e96', v: req[id], flag: true })),
+  ];
+  if (!items.length) return h('span', { class: 'muted' }, '—');
+  return h('div', { class: 'scenarios-rg' }, items.map(x => h('span', { title: `${x.flag ? '体制标记：' : ''}${x.name} ${pct(x.v, 1)}` },
+    h('i', { style: { background: x.color } }), `${x.name} ${pct(x.v, 0)}`)));
 }
 
 // A mix {id: share} that sums to 1 as whole percents that sum to 100 (largest remainder: 1.7 / 65.8 / 32.5 ->
@@ -544,7 +570,7 @@ export function phaseCard(ph, k, { labels = [], startYm = null } = {}) {
     h('div', { class: 'scenarios-phase-grid' },
       h('div', {},
         req ? h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'scenarios-sub', style: { marginTop: 0 } }, '要求的宏观体制（占这一阶段抽中月份的比例；对应的体制视图列在下表）'),
-          regimeMix(req, REGIME_LABELS, { min: 0 })) : null,
+          regimeRequestMix(req)) : null,
         viewTable,
         oil ? h('p', { class: 'scenarios-note scenarios-oil' }, oil) : null,
         ovr.length ? h('div', {}, h('div', { class: 'scenarios-sub' }, '覆盖项（超出历史支撑、有上限的部分）'),
@@ -739,9 +765,17 @@ export function validationCard(v) {
     if (s.startsWith('regime.')) return `宏观体制要求 · ${regimeName(s.slice(7))}`;
     return `${regimeVarName(s) || ui.varName(s) || s}（${s}）`;
   };
+  // a warning names variables and keys by their spec ids (what a spec author edits; the table below keeps them):
+  // the list shows their names, 「s_spread 的 mean=3.6」 -> 「「信用利差(BAA-10Y)」的均值 3.6」
+  const KEY_NAME = { mean: '均值', mean_annual: '年化均值', shift_sd: '偏移（标准差）', min: '下限', max: '上限',
+    min_annual: '年化下限', max_annual: '年化上限', vol_mult: '波动倍数' };
+  const nameOf = (v) => regimeVarName(v) || (ui.varName(v) !== v ? ui.varName(v) : null);
+  const human = (w) => String(w)
+    .replace(/((?:s|f|e|rg)_[A-Za-z0-9_]+) 的 ([a-z_]+)=/g, (m, v, k) => (nameOf(v) ? `「${nameOf(v)}」的${KEY_NAME[k] || k} ` : m))
+    .replace(/(?<![A-Za-z0-9_])((?:s|f|e|rg)_[a-z0-9_]+)(?![A-Za-z0-9_])/g, (m, v) => (nameOf(v) ? `「${nameOf(v)}」` : m));
   return card({ title: '校验与截断', sub },
     errors.length ? ui.notice(`错误：${errors.join('；')}`, 'error') : null,
-    warnings.length ? h('ul', { class: 'list', style: { margin: '6px 0 0' } }, warnings.map(w => h('li', {}, w))) : null,
+    warnings.length ? h('ul', { class: 'list', style: { margin: '6px 0 0' } }, warnings.map(w => h('li', { title: w }, human(w)))) : null,
     clipped.length ? h('div', { style: { marginTop: '10px' } },
       h('div', { class: 'scenarios-sub' }, `被截断的数值（${clipped.length} 处）`),
       fitTable(table([
@@ -1140,6 +1174,27 @@ function attributionCard(d, state, later, bus) {
     h('div', { class: 'scenarios-sub' }, titleEl),
     box, note,
     h('details', { class: 'scenarios-more' }, h('summary', {}, '各阶段明细表（%/年）'), tableBox));
+}
+
+// The transmission's interaction term (detail.transmission, FACTORS_DESIGN §3.3): it switches on only in drawn
+// months that were themselves in high core inflation; the simulated inflation path does not switch it on.
+const INTERACTION_STATE = { core_yoy: '核心 CPI 同比', cpi_yoy: 'CPI 同比' };
+function transmissionCard(d) {
+  const tr = d.transmission && typeof d.transmission === 'object' ? d.transmission : null;
+  const its = (Array.isArray(tr?.interactions) ? tr.interactions : []).filter(it => it && Array.isArray(it.phases));
+  if (!its.length) return null;
+  return card({ title: '传导模型里的期限溢价项：这个情景抽到了多少高通胀月份',
+    sub: `传导模型${tr.describe ? `（${tr.describe}）` : ''}里的${its.map(it => it.name || '交互项').join('、')}只在抽中的历史月份本身处于高通胀时起作用（1973–92 年的大部分月份、2021–23 年）；模拟路径的通胀升高不会自动打开它。要让它起作用，阶段视图里要多抽这些月份（例如给核心 CPI 同比或宏观体制的高通胀标志设视图）。` },
+  ...its.map(it => {
+    const when = `${it.lag === 1 ? '上月' : `${it.lag ?? '—'} 个月前`}${INTERACTION_STATE[it.state] || '通胀'}高于 ${isNum(it.above) ? it.above : '—'}%`;
+    return h('div', {},
+      h('p', { class: 'scenarios-note', style: { margin: '0 0 6px' } }, `${it.name || '交互项'}打开的条件：${when}。历史月份库整体有 ${pct(it.database_share, 0)} 的月份打开。`),
+      table([
+        { key: 'name', label: '阶段', left: true, wrap: true, fmt: (v, r) => `${r.k + 1}. ${shortName(v)}` },
+        { key: 'drawn_share', label: '抽到的月份里打开的比例', fmt: (v) => pct(v, 0) },
+        { key: 'drawn_share', label: '相对历史月份库', fmt: (v) => (isNum(v) && isNum(it.database_share) ? `${sfx((v - it.database_share) * 100, 0)} 个百分点` : '—') },
+      ], it.phases.map((p, k) => ({ ...p, k })), { stack: true }));
+  }));
 }
 
 function phaseSection(d, labels, later) {
@@ -1603,7 +1658,7 @@ function regimeSection(d, later) {
   const tbl = fitTable(table([
     { value: (x) => x, label: '阶段', left: true, wrap: true, minWidth: 104, fmt: (x) => `${x.k + 1}. ${x.p.name || ''}` },
     { value: (x) => x.p.months, label: '月数' },
-    { value: (x) => x.p.requested, label: '要求', left: true, wrap: true, minWidth: 44, fmt: (m) => (m ? regimeMix(m, labels, { min: 0 }) : '—') },
+    { value: (x) => x.p.requested, label: '要求', left: true, wrap: true, minWidth: 44, fmt: (m) => (m ? regimeRequestMix(m, labels) : '—') },
     { value: (x) => x.p.drawn, label: '抽中月份', left: true, wrap: true, fmt: mixCell },
     { value: (x) => x.p.simulated, label: '模拟路径', left: true, wrap: true, fmt: mixCell },
     { value: (x) => x.p.paths_with_contraction, label: '出现收缩的路径', fmt: (v) => pct(v, 0) },
@@ -1670,7 +1725,8 @@ export function renderScenarioDetail(root, d, ctx = {}, opts = {}) {
     h('div', { style: { height: '16px' } }),
     validationCard(d.validation),
     section('叙事与因果传导'),
-    h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus)),
+    h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus),
+      transmissionCard(d)),
     section('分阶段视图：每一阶段像历史上的哪些月份'),
     h('div', { class: 'scenarios-stack' }, phaseSection(d, labels, later)),
     section('宏观体制：模拟路径处在什么状态'),

@@ -17,7 +17,8 @@ Growth axis: the direction of activity, not the level of slack
     4. Deep (flag `severe`): the leg's IP decline from its peak to its lowest level is at least 15%.
 Inflation axis
     high_infl   CPI y/y > 4% in the same month (factor_model.HIGH_INFLATION has the same threshold but
-                reads the previous month)
+                reads the previous month; the transmission's term-premium term reads the previous month's
+                core CPI y/y against the same 4.0: switch_text names the selected model's switch)
     inflationary contraction   CPI y/y averaged over the episode's contraction months is above 4%: each
                 contraction gets one verdict instead of flipping with the monthly reading (2008-09 stays
                 one 深度衰退 episode)
@@ -100,11 +101,49 @@ def has_inputs(panel: pd.DataFrame) -> bool:
     return all(c in panel.columns for c in INPUTS.values())
 
 
-def rule_text(params: dict | None = None) -> dict[str, str]:
-    """The rules in Chinese for the UI, built from the parameters the code uses."""
+# The transmission's own high-inflation switch in words (switch_text): its state variable and what it switches.
+SWITCH_STATE_NAMES = {"cpi_yoy": "CPI 同比", "core_yoy": "核心 CPI 同比"}
+SWITCH_TERM_NAMES = {"tp10": "期限溢价项"}
+
+
+def switch_text(switch: dict | None, params: dict | None = None) -> str:
+    """The regime label's high-inflation switch next to the transmission's own (FACTORS_DESIGN §7.3), from the
+    rule the selected model uses, e.g. 「宏观体制的高通胀看当月 CPI 同比；传导模型的期限溢价项看上月核心 CPI
+    同比；门槛都是 4%」.
+
+    switch: {"kind": "interaction", "factor", "state", "lag", "above"} for an interaction factor of the model
+    (config.FACTORS "interaction"), {"kind": "regime", "state": "cpi_yoy", "lag": 1, "above"} for the
+    whole-model inflation split (ModelSpec(regime="inflation")), None when the transmission has no inflation
+    state (the sentence then names the label's switch only)."""
+    hi = _params(params)["high_inflation_pct"]
+    label = "宏观体制的高通胀看当月 CPI 同比"
+    if not switch:
+        return f"{label}，门槛 {hi:g}%；传导模型没有通胀状态项"
+    what = (SWITCH_TERM_NAMES.get(switch.get("factor"), "通胀状态项") if switch.get("kind") == "interaction"
+            else "整体通胀状态交互")
+    above = float(switch.get("above", hi))
+    same = abs(above - hi) < 1e-12
+    st = switch_state(switch)
+    return (f"{label}；传导模型的{what}看{' ' if st[:1].isascii() else ''}{st}；"
+            + (f"门槛都是 {hi:g}%" if same else f"门槛分别是 {hi:g}% 和 {above:g}%"))
+
+
+def switch_state(switch: dict) -> str:
+    """The reading a switch looks at: 「上月核心 CPI 同比」, 「上月 CPI 同比」, 「2 个月前核心 CPI 同比」."""
+    lag = int(switch.get("lag") or 1)
+    state = SWITCH_STATE_NAMES.get(switch.get("state"), "通胀")
+    when = "上月" if lag == 1 else f"{lag} 个月前"
+    return f"{when}{' ' if state[:1].isascii() else ''}{state}"
+
+
+def rule_text(params: dict | None = None, switch: dict | None = None) -> dict[str, str]:
+    """The rules in Chinese for the UI, built from the parameters the code uses; `timing` names the selected
+    transmission's own high-inflation switch next to the label's (switch_text: the caller passes the rule of the
+    model it describes, None when that model has no inflation state)."""
     p = _params(params)
     sw, ur, um, sev = p["ip_swing_pct"], p["u_rise_pp"], int(p["u_smooth_months"]), p["severe_ip_decline_pct"]
     hi, neg, core = p["high_inflation_pct"], p["cpi_neg_pct"], p["core_low_pct"]
+    gap = _switch_gap(switch)
     return {
         "growth": (f"收缩：工业产出从高点回落 {sw:g}% 以上（高点要等跌够 {sw:g}% 才确认，低点要等从低位反弹 {sw:g}% 才确认），"
                    f"并且这段下跌里失业率（{um} 个月均值）比段内低点上升至少 {ur:g} 个百分点。"
@@ -123,9 +162,17 @@ def rule_text(params: dict | None = None) -> dict[str, str]:
                      "所以同一个月的两个版本可能不同。"),
         "data": ("数据是今天的修订版，不是当年的首发值：实时版只保证单边、按发布滞后，不保证与当年看到的一模一样。"
                  "单月缺失的读数用前后月份插值，这些月份的标签用到了下一个月的数据。"),
-        "timing": (f"时点：第 t 月的数据在 t+1 月公布，所以第 t 月的实时标签 t+1 月才知道。高通胀的标签和标志看当月的 "
-                   f"CPI 同比，传导模型里的高通胀状态看上个月的 CPI 同比：门槛都是 {hi:g}%，时点差一个月。"),
+        "timing": ("时点：第 t 月的数据在 t+1 月公布，所以第 t 月的实时标签 t+1 月才知道。" + switch_text(switch, p)
+                   + (f"，{gap}。" if gap else "。")),
     }
+
+
+def _switch_gap(switch: dict | None) -> str:
+    """How far the transmission's switch lags the label's (「时点差一个月」), "" without a switch."""
+    if not switch:
+        return ""
+    lag = int(switch.get("lag") or 1)
+    return "时点差一个月" if lag == 1 else f"时点差 {lag} 个月"
 
 
 def flag_defs(params: dict | None = None) -> list[dict]:

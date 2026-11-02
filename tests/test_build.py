@@ -24,9 +24,10 @@ def fake_build(monkeypatch, tmp_path):
     cached = tmp_path / "panel_monthly.csv"
     cached.write_text("date\n", encoding="utf-8")
     monkeypatch.setattr(build, "save_panel", no_panel)
+    monkeypatch.setattr(build, "load_dotenv", lambda *a, **k: None)    # never load the real .env into the test process
     monkeypatch.setattr(build.config, "PANEL_PATH", cached)
     monkeypatch.setattr(build.config, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(build.EngineContext, "load", classmethod(lambda cls, **kw: object()))
+    monkeypatch.setattr(build.EngineContext, "load", classmethod(lambda cls, **kw: ("ctx", kw.get("selection"))))
     raises: dict = {}
 
     def run(module, ctx, **kw):
@@ -86,6 +87,84 @@ def test_regimes_runs_after_scenarios_and_before_forecast_and_two_steps_are_opt_
     assert s.index("scenarios") < s.index("regimes") < s.index("forecast") < s.index("llm")
     assert build.OPT_IN == {"ablation", "regime_forecast"}
     assert s[-2:] == ["ablation", "regime_forecast"]
+
+
+def test_the_step_order_shared_with_the_regime_layer():
+    """FACTORS_DESIGN §7.6: one STEPS list for both branches; factor_audit is a default step after diagnostics."""
+    assert build.STEPS == ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios",
+                           "regimes", "forecast", "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+    assert "factor_audit" not in build.OPT_IN
+
+
+def test_factor_audit_runs_on_the_selected_model_after_diagnostics(fake_build, monkeypatch, tmp_path):
+    calls = []
+    inner = build._run
+
+    def run(module, ctx, **kw):
+        calls.append((module, ctx))
+        return inner(module, ctx, **kw)
+
+    monkeypatch.setattr(build, "_run", run)
+    monkeypatch.setattr(build, "build_meta", lambda ctx: {})
+    assert build.main(["--skip", "panel"]) == 0
+    mods = [m for m, _ in calls]
+    assert mods.index("analysis.diagnostics") < mods.index("analysis.factor_audit") < mods.index("analysis.backtest")
+    assert dict(calls)["analysis.factor_audit"] == ("ctx", True)          # today's transmission: model_selection.json
+    assert dict(calls)["analysis.diagnostics"] == ("ctx", False)
+    assert (tmp_path / "factor_audit.json").exists()
+    calls.clear()
+    assert build.main(["--only", "factor_audit"]) == 0
+    assert [m for m, _ in calls] == ["analysis.factor_audit"]
+
+
+def test_eras_is_attributed_again_when_diagnostics_changes_the_selection(fake_build, monkeypatch, tmp_path, capsys):
+    """eras attributes with the selected model but runs before diagnostics: when the walk-forward picks another
+    model (a fresh clone's first build, a new factor) the build runs eras again, and only then; --only diagnostics
+    prints a note instead."""
+    from scenariolab import jsonio
+    from scenariolab.engine.factor_model import ModelSpec
+
+    old = ModelSpec().to_dict()
+    new = ModelSpec(factors=(*ModelSpec().factors, "gz"), name="base+add_gz").to_dict()
+    sel = tmp_path / "model_selection.json"
+    calls = []
+
+    def run(module, ctx, **kw):
+        calls.append(module)
+        if module == "analysis.diagnostics":
+            jsonio.dump({"spec": new}, sel)
+        return {"attribution_info": {"model": {"spec": jsonio.load(sel)["spec"] if sel.exists() else old}}}
+
+    monkeypatch.setattr(build, "_run", run)
+    monkeypatch.setattr(build, "build_meta", lambda ctx: {})
+    assert build.main(["--only", "eras", "diagnostics"]) == 0
+    assert calls == ["analysis.eras", "analysis.diagnostics", "analysis.eras"]
+    assert jsonio.load(tmp_path / "eras.json")["attribution_info"]["model"]["spec"] == new
+    assert "attributing the eras again" in capsys.readouterr().out
+    calls.clear()
+    assert build.main(["--only", "eras", "diagnostics"]) == 0          # the same selection: eras runs once
+    assert calls == ["analysis.eras", "analysis.diagnostics"]
+    assert not build.eras_model_stale(tmp_path)
+    jsonio.dump({"attribution_info": {"model": {"spec": old}}}, tmp_path / "eras.json")
+    calls.clear()
+    capsys.readouterr()
+    assert build.main(["--only", "diagnostics"]) == 0
+    assert calls == ["analysis.diagnostics"] and "run --only eras too" in capsys.readouterr().out
+    assert build.eras_model_stale(tmp_path)
+    (tmp_path / "eras.json").unlink()
+    assert not build.eras_model_stale(tmp_path)                         # nothing to redo without the file
+
+
+def test_the_dotenv_is_loaded_before_the_panel_step(monkeypatch, tmp_path):
+    """The optional FRED key (.env) must be in the environment before the panel step downloads anything."""
+    order = []
+    monkeypatch.setattr(build, "load_dotenv", lambda *a, **k: order.append("dotenv"))
+    monkeypatch.setattr(build, "save_panel", lambda refresh=False: order.append("panel"))
+    monkeypatch.setattr(build.config, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(build.EngineContext, "load", classmethod(lambda cls, **kw: object()))
+    monkeypatch.setattr(build, "_run", lambda module, ctx, **kw: order.append(module) or {})
+    assert build.main(["--only", "panel"]) == 0
+    assert order == ["dotenv", "panel"]
 
 
 def test_the_default_build_runs_regimes_but_not_the_opt_in_steps(step_calls):

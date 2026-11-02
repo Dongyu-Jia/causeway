@@ -466,12 +466,17 @@ function renderLedger({ ui, fc, pct, assetName }) {
   let asset = 'us_equity';
   const box = h('div');
   const stamp = (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '—');
+  // each entry keeps the transmission it was recorded with; an entry from another model than today's (meta.json)
+  // is not today's forecast of that origin, and the page says so
+  const nowModel = ui.META.raw?.model?.describe || '';
+  const otherModel = (led.entries || []).filter(e => e?.model && nowModel && e.model !== nowModel);
   const draw = () => {
     const rows = (led.entries || []).slice().reverse();          // newest first
     box.replaceChildren(rows.length ? ui.table([
       { key: 'origin', label: '起点' },
       { key: 'created', label: '记录于（UTC）', fmt: stamp },
       { key: 'matures', label: '到期（数据到）' },
+      { key: 'model', label: '记录时的传导模型', wrap: true, minWidth: 110, fmt: (v) => v || '—' },
       { key: 'status', label: '状态', fmt: (v) => ui.chip(v === 'matured' ? '已评分' : '待到期', v === 'matured' ? 'good' : 'warn') },
       { value: (r) => r.methods?.analog?.[asset]?.p50, label: '相似起点 中位数', fmt: (v) => pct(v), cls: (v) => ui.signCls(v) },
       { value: (r) => r.methods?.analog?.[asset], label: '相似起点 90% 区间', fmt: (b) => (b ? `${pct(b.p5)} ~ ${pct(b.p95)}` : '—') },
@@ -494,6 +499,8 @@ function renderLedger({ ui, fc, pct, assetName }) {
   !led.matured && led.first_maturity
     ? ui.notice(`还没有到期的记录：第一条在数据更新到 ${led.first_maturity} 之后到期，届时下一次构建会自动给出覆盖率、PIT 和 CRPS。`, 'info') : null,
   led.skipped ? ui.notice(`这次构建没有记账：${led.skipped}。`, 'info') : null,
+  otherModel.length ? ui.notice(`${otherModel.map(e => e.origin).join('、')} 的记录用的是当时的传导模型（${[...new Set(otherModel.map(e => e.model))].join('、')}），`
+    + `和这次构建的一年期预测（${nowModel}）不是同一个模型：同一起点的两组数字不同，账本按记录时的原样保留、到期后评分。`, 'info') : null,
   h('div', { style: { height: '10px' } }), box,
   scoreRows.length ? [subHead(ui, `已到期记录的成绩（风险资产平均；${led.matured} 条）`), ui.table([
     { key: 'm', label: '方法', fmt: (v) => names[v] || METHOD_CN[v] || v },

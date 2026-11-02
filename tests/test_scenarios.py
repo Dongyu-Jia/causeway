@@ -33,6 +33,20 @@ def ctx():
     return EngineContext.load(selection=False)
 
 
+# The 13 built-in specs are not edited in the missing-factor round (FACTORS_DESIGN §5.2): after the spread timing
+# fix, financial_crisis phase 2's s_spread mean 3.6 lies above what a 6-month phase can average (3.532). The
+# content review after the merge removes this entry; no other clip is allowed.
+KNOWN_CLIPS = {("financial_crisis", 2, "s_spread", "mean")}
+
+
+def _unexpected(sid: str, report: dict) -> tuple[list, list]:
+    """(clipped entries, warnings) of a built-in's validation beyond KNOWN_CLIPS."""
+    known = [c for c in report["clipped"] if (sid, c["phase"], c["var"], c.get("key")) in KNOWN_CLIPS]
+    texts = {f"阶段 {c['phase']}：{c['var']} 的 {c['key']}=" for c in known}
+    return ([c for c in report["clipped"] if c not in known],
+            [w for w in report["warnings"] if not any(w.startswith(t) and "截断为" in w for t in texts)])
+
+
 # ---------------------------------------------------------------- specs
 
 def test_specs_load_with_required_ids_and_fields():
@@ -85,8 +99,9 @@ def test_every_spec_validates_without_errors_or_clipping(ctx):
         spec, _ = library.resolve_calibration(raw, base)
         clean, report = validate_spec(spec, ctx.db.frame)
         assert report["ok"] and not report["errors"], (raw["id"], report["errors"])
-        assert not report["clipped"], (raw["id"], report["clipped"])
-        assert not report["warnings"], (raw["id"], report["warnings"])
+        clipped, warnings = _unexpected(raw["id"], report)
+        assert not clipped, (raw["id"], clipped)
+        assert not warnings, (raw["id"], warnings)
         assert len(clean["phases"]) == len(raw["phases"])
 
 
@@ -452,7 +467,7 @@ def test_no_regime_check_fires_on_the_built_ins(ctx):
     base = library.calibration_base(ctx)
     for raw in library.load_specs():
         clean, report = validate_spec(library.resolve_calibration(raw, base)[0], ctx.db.frame)
-        assert not report["warnings"] and all("regime" not in p for p in clean["phases"]), raw["id"]
+        assert not _unexpected(raw["id"], report)[1] and all("regime" not in p for p in clean["phases"]), raw["id"]
         warnings: list[str] = []
         pools = phase_pools(ctx, clean, warnings)
         assert all("λ=" in w for w in warnings), raw["id"]
@@ -552,20 +567,20 @@ def test_regime_readout_check_values(library_build):
         "阶段「去杠杆与降息」：情景名称里有“通缩”，但模拟路径的这一阶段里物价负增长合计只占 3%",
         "阶段「长期停滞」：情景名称里有“通缩”，但模拟路径的这一阶段里物价负增长合计只占 4%",
         "阶段「衰退与油价回落」：名称里有“衰退”，但模拟路径的这一阶段里衰退、深度衰退、滞胀合计只占 41%",
-        "阶段「绿色通胀」：名称里有“通胀”，但模拟路径的这一阶段里通胀、滞胀合计只占 41%"])
+        "阶段「绿色通胀」：名称里有“通胀”，但模拟路径的这一阶段里通胀、滞胀合计只占 39%"])
     reg = details["baseline"]["regimes"]
     assert reg["notes"] == ["引擎无条件抽样里 CPI 同比高于 4% 的月份占 41%（1973 年以来的历史为 33%），所以模拟路径里“通胀”"
                             "的占比系统性偏高；比较时请看同一时段的“引擎无条件”列"]
     assert reg["anchor"] == {"month": "2026-09", "label_rt": "expansion", "label_expost_mix": {"expansion": 1.0}}
     one, two = reg["phases"][:2]                                             # DESIGN §3.4, baseline
     assert [round(100 * one["simulated"][i], 1) for i in ("expansion", "inflation", "recession", "depression",
-                                                           "stagflation")] == [67.8, 26.4, 5.3, 0.1, 0.4]
+                                                           "stagflation")] == [68.5, 26.3, 4.7, 0.3, 0.2]
     assert (round(one["paths_with_contraction"], 3), round(one["reference"]["paths_with_contraction"], 4),
-            round(one["history_base_rate"], 4)) == (0.098, 0.1915, 0.2417)
+            round(one["history_base_rate"], 4)) == (0.09, 0.1915, 0.2417)
     assert [round(100 * two["simulated"][i], 1) for i in ("expansion", "inflation", "recession", "depression",
-                                                           "stagflation")] == [74.4, 11.3, 11.5, 1.0, 1.4]
+                                                           "stagflation")] == [74.9, 11.4, 10.6, 1.1, 1.7]
     assert (round(two["paths_with_contraction"], 3), round(two["reference"]["paths_with_contraction"], 3),
-            round(two["history_base_rate"], 4)) == (0.367, 0.469, 0.4516)
+            round(two["history_base_rate"], 4)) == (0.342, 0.469, 0.4516)
     ep = reg["episodes"]
     assert (round(ep["reference"]["per_path"], 3), round(ep["reference"]["length_mean"], 2),
             round(ep["reference"]["share_longer_than_18m"], 4), round(ep["reference"]["share_severe"], 4)) == (
@@ -586,7 +601,7 @@ def test_library_index_regime_fields(library_build):
     lib = index["regimes"]
     assert set(lib) == {"year1_weighted", "p_contraction_year1_weighted", "reference", "history"}
     w = np.array([s["prob"] for s in index["scenarios"]])
-    assert abs(w.sum() - 1.0) < 1e-9                                         # the library weights
+    assert abs(w.sum() - 1.0) < 1e-5                                         # the library weights (6 decimals each)
     assert abs(sum(lib["year1_weighted"].values()) - 1.0) < 1e-5            # JSON rounds to 6 decimals
     for i in R.LABEL_IDS:
         assert lib["year1_weighted"][i] == pytest.approx(sum(wk * s["regimes"]["year1"][i]
@@ -603,21 +618,24 @@ def test_library_index_regime_check_values(library_build):
     """DESIGN §3.5: probability-weighted year 1 (simulated, real time, drawn) and P(contraction in year 1)."""
     index, details = library_build
     lib = index["regimes"]
-    want = {"expansion": 0.508, "inflation": 0.323, "deflation": 0.002, "recession": 0.090, "depression": 0.023,
-            "stagflation": 0.054}
+    # regenerated after the missing-factor round's panel fixes (FACTORS_DESIGN §7.1): views on s_spread,
+    # f_capex_share, f_profit_share, s_productivity_yoy and the sentiment select other months; the engine's
+    # reference run and the history are unchanged
+    want = {"expansion": 0.510, "inflation": 0.323, "deflation": 0.003, "recession": 0.087, "depression": 0.023,
+            "stagflation": 0.055}
     assert lib["year1_weighted"] == pytest.approx(want, abs=0.002)
-    assert lib["p_contraction_year1_weighted"] == pytest.approx(0.257, abs=0.002)
+    assert lib["p_contraction_year1_weighted"] == pytest.approx(0.256, abs=0.002)
     w = {s["id"]: s["prob"] for s in index["scenarios"]}
 
     def weighted(key: str) -> dict:
         return {i: sum(w[sid] * d["regimes"]["windows"]["year1"][key][i] for sid, d in details.items())
                 for i in R.LABEL_IDS}
 
-    assert weighted("simulated_rt") == pytest.approx({"expansion": 0.557, "inflation": 0.356, "deflation": 0.001,
-                                                      "recession": 0.047, "depression": 0.001, "stagflation": 0.040},
+    assert weighted("simulated_rt") == pytest.approx({"expansion": 0.558, "inflation": 0.355, "deflation": 0.001,
+                                                      "recession": 0.045, "depression": 0.001, "stagflation": 0.041},
                                                      abs=0.002)
-    assert weighted("drawn") == pytest.approx({"expansion": 0.614, "inflation": 0.212, "deflation": 0.012,
-                                               "recession": 0.049, "depression": 0.057, "stagflation": 0.056},
+    assert weighted("drawn") == pytest.approx({"expansion": 0.612, "inflation": 0.213, "deflation": 0.012,
+                                               "recession": 0.052, "depression": 0.055, "stagflation": 0.056},
                                               abs=0.002)
     assert lib["reference"]["year1"] == pytest.approx({"expansion": 0.5441, "inflation": 0.3502, "deflation": 0.0019,
                                                        "recession": 0.0345, "depression": 0.0083,
@@ -629,7 +647,146 @@ def test_library_index_regime_check_values(library_build):
                                                           abs=1e-6)
     assert lib["history"]["p_contraction_12m_window"] == pytest.approx(0.2417, abs=5e-5)
     p_year1 = {s["id"]: round(s["regimes"]["p_contraction_year1"], 2) for s in index["scenarios"]}
-    assert p_year1 == {"baseline": 0.10, "k_shaped": 0.17, "oil_war": 0.50, "ai_bust": 0.45, "fiscal_dominance": 0.26,
-                       "reacceleration": 0.01, "stagflation": 0.43, "deglobalization": 0.40, "agi_boom": 0.00,
-                       "energy_transition": 0.16, "dollar_decline": 0.15, "financial_crisis": 0.79,
-                       "japanification": 0.32}
+    assert p_year1 == {"baseline": 0.09, "k_shaped": 0.17, "oil_war": 0.49, "ai_bust": 0.41, "fiscal_dominance": 0.26,
+                       "reacceleration": 0.02, "stagflation": 0.43, "deglobalization": 0.39, "agi_boom": 0.00,
+                       "energy_transition": 0.26, "dollar_decline": 0.15, "financial_crisis": 0.80,
+                       "japanification": 0.33}
+
+
+# ---------------------------------------------------------------- missing-factor round: drifts, W12-W14 (25)
+
+# the expected final model of FACTORS_DESIGN (F): the common selection S plus energy's metals-vs-oil factor and
+# gold fitted from 1982
+F_SPEC = dict(factors=("oil", "ip", "cpi_goods", "cpi_services", "ff", "y10", "spread", "usd", "unrate", "gz",
+                       "tp10_x_core4"), asset_factors={"energy": ["metals_oil"]}, asset_start={"gold": "1982-01"})
+W13 = "劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²），它的漂移只改变模拟的劳动收入占比路径，不直接改变资产回报"
+
+
+def _f_spec():
+    from scenariolab.engine.factor_model import ModelSpec
+    return ModelSpec(**F_SPEC)
+
+
+@pytest.fixture(scope="module")
+def f_ctx(ctx):
+    """An engine context running F (needs the panel's new model columns)."""
+    if any(f"f_{f}" not in ctx.panel for f in ("gz", "tp10_x_core4", "metals_oil")):
+        pytest.skip("panel without the missing-factor columns")
+    from scenariolab.context import EngineContext
+    return EngineContext.load(spec=_f_spec())
+
+
+def test_driftable_factors_follow_the_model():
+    from scenariolab.engine.factor_model import ModelSpec
+    from scenariolab.scenarios.schema import drift_factor_ids, transmission_factors
+    base = drift_factor_ids()
+    assert base[:len(config.CORE_FACTOR_IDS)] == config.CORE_FACTOR_IDS and "cpi" in base
+    assert drift_factor_ids(ModelSpec()) == base                            # the base model: today's list
+    f = drift_factor_ids(_f_spec())
+    assert {"gz", "tp10_x_core4", "metals_oil", "cpi", "labor_share"} <= set(f) and len(f) == len(set(f))
+    assert not set(f) & config.AUDIT_FACTOR_IDS and "tp10" not in f
+    assert transmission_factors(_f_spec())[-1] == "metals_oil" and "labor_share" not in transmission_factors(_f_spec())
+    assert calibrate.transmission_check(_f_spec()) == {"labor_share_in_transmission": False}
+    assert calibrate.transmission_check(ModelSpec()) == calibrate.transmission_check(None) == {
+        "labor_share_in_transmission": True}
+
+
+def test_audit_only_view_variables():
+    """W14 refuses the audit-role factors' columns, the stage-B report-only regressors and any other f_ column of
+    the frame that is no config factor; CPI's own change and the model factors stay views."""
+    from scenariolab.data.panel import STAGE_B_AUDIT
+    from scenariolab.scenarios.schema import AUDIT_VARS, audit_only
+    assert {f"f_{c}" for c in STAGE_B_AUDIT} | {f"f_{f}" for f in config.AUDIT_FACTOR_IDS} <= AUDIT_VARS
+    cols = {"f_gz", "f_cpi", "f_new_comparison", "f_usd_em"}
+    assert audit_only("f_usd_em", cols) and audit_only("f_mort_spread") and audit_only("f_ebp")
+    assert audit_only("f_new_comparison", cols) and not audit_only("f_new_comparison")   # only when it exists
+    assert not any(audit_only(v, cols) for v in ("f_gz", "f_cpi", "s_gz", "e_demand"))
+
+
+@needs_panel
+def test_w13_on_the_calculator_specs_and_the_built_ins_under_the_final_model(ctx):
+    """With F the 13 built-ins validate with no warning beyond today's and W13, which fires on the two specs whose
+    income-distribution calculator drifts the labour share (k_shaped, agi_boom); the base model has no W13."""
+    from scenariolab.scenarios.schema import drift_factor_ids
+    base = library.calibration_base(ctx)
+    hits = {}
+    for raw in library.load_specs():
+        spec = library.resolve_calibration(raw, base)[0]
+        clean, report = validate_spec(spec, ctx.db.frame, model_spec=_f_spec())
+        clipped, warnings = _unexpected(raw["id"], report)
+        assert report["ok"] and not clipped, raw["id"]
+        assert all(w.endswith(W13) for w in warnings), (raw["id"], warnings)
+        hits[raw["id"]] = len(warnings)
+        drifts = [p["overrides"].get("factor_drift", {}) for p in clean["phases"]]
+        assert sum("labor_share" in d for d in drifts) == len(warnings)          # the drift is kept, and warned
+        # an explicit list of driftable factors gives the same clean spec, without the warning
+        again, rep2 = validate_spec(spec, ctx.db.frame, driftable=drift_factor_ids(_f_spec()))
+        assert again == clean and not any(W13 in w for w in rep2["warnings"])
+        assert not any(W13 in w for w in validate_spec(spec, ctx.db.frame, model_spec=ctx.model.spec)[1]["warnings"])
+    assert {sid for sid, n in hits.items() if n} == {"k_shaped", "agi_boom"}
+    _, expl = calibrate.distribution_views({"labor_income_shock": {"mid40": -0.05}}, model_spec=_f_spec())
+    assert calibrate.LABOR_SHARE_CAVEAT in expl["caveats"]
+    assert calibrate.LABOR_SHARE_CAVEAT not in calibrate.distribution_views({}, model_spec=ctx.model.spec)[1]["caveats"]
+
+
+@needs_panel
+def test_late_audit_and_x_views_and_the_gz_drift(f_ctx):
+    from scenariolab.scenarios.schema import allowed_variables
+    F = f_ctx.db.frame
+    spec = {"name": "测试", "phases": [{"name": "一", "months": 24, "views": [
+        {"var": "s_tips10", "mean": 1.5}, {"var": "s_mich1y", "mean": 3.0}, {"var": "f_ebp", "mean": 0.0},
+        {"var": "f_tp10_x_infl4", "mean": 0.0}, {"var": "x_spread_mixed", "mean": 2.0}, {"var": "s_gz", "mean": 1.5},
+        {"var": "f_usd_em", "mean": 0.0}, {"var": "f_mort_spread", "mean": 0.0}],
+        "overrides": {"factor_drift": {"gz": 99.0, "metals_oil": 0.05, "ebp": 0.1}}}]}
+    clean, report = validate_spec(spec, F, model_spec=f_ctx.model.spec)
+    ph = clean["phases"][0]
+    assert [v["var"] for v in ph["views"]] == ["s_tips10", "s_mich1y", "s_gz"]
+    text = "\n".join(report["warnings"])
+    tips = F["s_tips10"].first_valid_index()
+    assert f"阶段 1：s_tips10 从 {tips:%Y-%m} 才有数据，这一阶段只会抽 {tips:%Y-%m} 以后的历史月份（占 {F.index[0]:%Y} 年以来" in text
+    assert "s_mich1y 从 " in text and "s_gz 从" not in text                                            # W12
+    assert "阶段 1：f_ebp 只用于审计对照，不能作为情景视图，已忽略" in text                                # W14
+    assert "阶段 1：f_tp10_x_infl4 只用于审计对照，不能作为情景视图，已忽略" in text
+    # the walk-forward's report-only stage-B regressors (panel.STAGE_B_AUDIT) are audit columns too
+    assert {"f_usd_em", "f_mort_spread"} <= set(F.columns)
+    assert "阶段 1：f_usd_em 只用于审计对照，不能作为情景视图，已忽略" in text
+    assert "阶段 1：f_mort_spread 只用于审计对照，不能作为情景视图，已忽略" in text
+    assert "阶段 1：变量 x_spread_mixed 不在引擎支持的列表中，已忽略" in text                              # x_ refused
+    assert "因子 ebp 只用于审计对照，不能加漂移，已忽略" in text
+    bound = 2.0 * float(F["f_gz"].std()) * np.sqrt(12.0)                    # +-2x the annualised sd of f_gz
+    assert ph["overrides"]["factor_drift"] == {"gz": pytest.approx(bound), "metals_oil": 0.05}
+    listed = {v["var"] for v in allowed_variables(F)}
+    assert {"s_gz", "s_ebp", "f_gz", "f_metals_oil", "s_tips10"} <= listed
+    assert not {"f_ebp", "f_tp10_x_infl4"} & listed and not any(v.startswith("x_") for v in listed)
+
+
+@needs_panel
+@check_values
+def test_w12_check_values(ctx):
+    spec = {"name": "测试", "phases": [{"name": "一", "months": 24, "views": [{"var": "s_tips10", "mean": 1.5},
+                                                                           {"var": "s_mich1y", "mean": 3.0}]}]}
+    warnings = validate_spec(spec, ctx.db.frame)[1]["warnings"]
+    assert "阶段 1：s_tips10 从 2003-01 才有数据，这一阶段只会抽 2003-01 以后的历史月份（占 1973 年以来月份的 44%）" in warnings
+    assert "阶段 1：s_mich1y 从 1978-01 才有数据，这一阶段只会抽 1978-01 以后的历史月份（占 1973 年以来月份的 91%）" in warnings
+
+
+@needs_panel
+def test_a_scenario_under_the_final_model(f_ctx):
+    """Each model asset's attribution lists its own equation's terms (energy's metals-vs-oil factor is no term of
+    the others) and still adds up; the detail says what the term-premium interaction does in each phase."""
+    from scenariolab.scenarios import runner
+    spec = next(s for s in library.resolved_specs(f_ctx) if s["id"] == "stagflation")
+    detail, sim = runner.run_spec(f_ctx, spec, n_paths=60, seed=3, regimes=False)
+    for a in ("us_equity", "energy", "gold"):
+        tot = detail["assets"][a]["attribution"]["total"]
+        assert ("metals_oil" in tot["terms"]) == (a == "energy") and "gz" in tot["terms"]
+        assert sum(tot["terms"].values()) == pytest.approx(tot["arithmetic"], abs=1e-9)
+        own = [t for t in tot["terms"] if t in sim.attribution.factor_terms]
+        assert tot["factor_sum"] == pytest.approx(sum(tot["terms"][t] for t in own), abs=1e-12)
+    tr = detail["transmission"]
+    assert tr["describe"] == f_ctx.model.spec.describe() and "labor_share" not in tr["factors"]
+    (it,) = tr["interactions"]
+    assert (it["factor"], it["state"], it["lag"], it["above"]) == ("tp10", "core_yoy", 1, 4.0) and tr["notes"]
+    assert [p["name"] for p in it["phases"]] == [p["name"] for p in detail["spec"]["phases"]]
+    assert it["phases"][0]["drawn_share"] > it["database_share"] > 0.2         # a wage-price spiral draws them
+    assert not any(W13 in w for w in detail["validation"]["warnings"])        # stagflation drifts no labour share

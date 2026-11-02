@@ -527,15 +527,20 @@ def distribution_block(panel: pd.DataFrame, Q: pd.DataFrame | None = None) -> di
 # ================================================================ asset betas
 
 def asset_betas(panel: pd.DataFrame, periods: list[dict] = PERIODS) -> dict:
-    """Standardized betas coef * sd(factor) / sd(asset price return) of the default asset model."""
+    """Standardized betas coef * sd(factor) / sd(asset price return) of the default asset model.
+
+    Always the base spec (one fixed set of core factors, every asset on the same equation and window), so the
+    periods compare like with like; the scenarios run the walk-forward's selected model, whose term-premium term
+    is zero in periods without high core inflation. `model` says which model this is (the page names it)."""
     spec = ModelSpec()
     last = panel.index.max().strftime("%Y-%m")
     out = {"periods": [{"id": p["id"], "name": p["name"], "start": p["start"], "end": p["end"] or last}
                        for p in periods],
+           "model": {"describe": spec.describe(), "spec": spec.to_dict(), "base": True},
            "factors": list(spec.factors), "assets": [], "beta_std": {}, "tstat": {}, "r2": {}}
     X_all = design_matrix(panel, spec)
     for per in periods:
-        m = AssetFactorModel(spec).fit(panel, per["start"], per["end"])
+        m = AssetFactorModel(spec).fit(panel, per["start"], per["end"], honor_asset_start=False)
         P = panel.loc[m.train_start:m.train_end]
         X = X_all.loc[P.index]
         Y = P[m.target_columns()]

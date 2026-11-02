@@ -38,12 +38,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .. import config, jsonio
-from ..engine.factor_model import STRUCTURAL_ASSETS, base_columns
+from ..engine.factor_model import SHORT_NAMES, STRUCTURAL_ASSETS, asset_columns, asset_extras, base_columns
 from ..engine.simulate import DEFAULT_REVERSION
 from ..env import dotenv_problems, load_dotenv
 from ..scenarios import regime_views
 from ..scenarios.schema import (ASSET_DRIFT_BOUND, MAX_PHASES, MAX_VIEWS_PER_PHASE, SPEC_JSON_SCHEMA,
-                                allowed_variables, factor_drift_bounds, slugify, validate_spec)
+                                allowed_variables, drift_factor_ids, factor_drift_bounds, late_start,
+                                slugify, transmission_factors, validate_spec)
 from . import claude_code
 
 try:
@@ -79,6 +80,13 @@ CACHE_DIR = config.DATA_DIR / "llm_cache"            # <sha256>.json: an answer'
 DEFAULT_CONCURRENCY = 2                              # MSL_LLM_CONCURRENCY: model calls at once
 STATUS_TTL_S = 60.0                                  # claude_code status: how long an answer is reused
 STATUS_RETRY_S = 5.0                                 # ... when it is "unavailable" (a fresh login shows at once)
+# Factors of the transmission that are outcomes of a narrative rather than its root causes (prompt rule 3);
+# every other model factor is listed as a root, in ROOT_ORDER first, then in the model's order.
+OUTCOME_FACTORS = ("ip", "cpi_goods", "cpi_services", "y10", "unrate")
+ROOT_ORDER = ("oil", "ff", "spread", "gz", "labor_share", "usd")
+ROOT_LABELS = {"ff": "政策利率（f_ff，或 overrides.r_star）", "tp10": "期限溢价"}
+FACTOR_INFO = {f["id"]: f for f in config.FACTORS}
+STATE_NAMES = {s["id"]: s["name"] for s in config.STATES}
 
 
 class TranslatorError(Exception):
@@ -208,18 +216,35 @@ def _fmt(x) -> str:
     return np.format_float_positional(float(x), precision=3, unique=False, fractional=False, trim="-")
 
 
+def driver_assets(ctx: "EngineContext") -> dict[str, list[str] | None]:
+    """{panel column: the modelled assets whose equation has it, or None when every one has it} for the
+    columns of the transmission (base_columns: common factors, shocks, the assets' extras)."""
+    spec, assets = ctx.model.spec, list(ctx.model.assets)
+    out: dict[str, list[str] | None] = {}
+    for col in base_columns(spec):
+        has = [a for a in assets if col in asset_columns(spec, a)]
+        out[col] = None if len(has) == len(assets) else has
+    return out
+
+
 def variable_table(ctx: "EngineContext") -> list[dict]:
-    """allowed_variables + unit, kind, today's value and whether the asset model uses it."""
+    """allowed_variables + unit, kind, today's value, whether the asset model uses it (asset_driver) and in
+    which equations (asset_driver_assets: None = every modelled asset, else the asset ids, e.g. ["energy"]
+    for a dedicated factor), and for a late-starting variable its first month (late_from, W12)."""
     hist = ctx.panel.loc[:ctx.anchor.date]
     units = {f"s_{s['id']}": s["unit"] for s in config.STATES}
     units.update({f"f_{f['id']}": f"{f['unit']}/月" for f in config.FACTORS})
     units["f_cpi"] = "Δlog/月"
-    drivers = set(base_columns(ctx.model.spec))
+    drivers = driver_assets(ctx)
     rows = []
     for v in allowed_variables(ctx.db.frame, prior=ctx.db.prior(), rare=ctx.db.rare):
         col = v["var"]
         kind = {"s": "state", "f": "factor", "e": "shock"}[col[0]]
-        row = {**v, "kind": kind, "unit": units.get(col, "标准差"), "asset_driver": col in drivers}
+        row = {**v, "kind": kind, "unit": units.get(col, "标准差"), "asset_driver": col in drivers,
+               "asset_driver_assets": drivers.get(col)}
+        late = late_start(ctx.db.frame, col)
+        if late:
+            row["late_from"], row["late_share"] = late
         series = hist[col].dropna()
         if kind == "state" and len(series):
             row["today"] = float(series.iloc[-1])
@@ -396,8 +421,8 @@ def few_shot_examples(ctx: "EngineContext", horizon_months: int = config.HORIZON
     base = calibration_base(ctx)
     out = []
     for raw in chosen:
-        resolved = resolve_calibration(raw, base)[0]
-        clean, _ = validate_spec(resolved, ctx.db.frame, horizon_months)
+        resolved = resolve_calibration(raw, base, ctx.model.spec)[0]
+        clean, _ = validate_spec(resolved, ctx.db.frame, horizon_months, model_spec=ctx.model.spec)
         out.append(jsonio.clean(llm_form(clean, resolved, narrative_chars)))
     return out
 
@@ -437,12 +462,24 @@ def _state_rows(rows: list[dict], today: str) -> list[str]:
     return out
 
 
+def _asset_label(a: str) -> str:
+    return SHORT_NAMES.get(a, a)
+
+
+def driver_text(row: dict) -> str:
+    """「进资产模型」 cell: 是 / 是（仅能源股） / 否."""
+    if not row.get("asset_driver"):
+        return "否"
+    only = row.get("asset_driver_assets")
+    return f"是（仅{'、'.join(_asset_label(a) for a in only)}）" if only else "是"
+
+
 def _factor_rows(rows: list[dict]) -> list[str]:
     out = ["| 变量 | 名称 | 单位 | 进资产模型 | 6个月均值 p2 | 中位数 | 6个月均值 p98 | 6个月均值标准差 | 近12月均值 | 近12月折年(×12) |",
            "|---|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         m = r.get("last12_mean")
-        out.append(f"| {r['var']} | {r['name']} | {r['unit']} | {'是' if r['asset_driver'] else '否'} | "
+        out.append(f"| {r['var']} | {r['name']} | {r['unit']} | {driver_text(r)} | "
                    f"{_fmt(r['block_p2'])} | {_fmt(r['median'])} | {_fmt(r['block_p98'])} | {_fmt(r['block_sd'])} | "
                    f"{_fmt(m)} | {_fmt(12.0 * m if m is not None else None)} |")
     return out
@@ -457,7 +494,7 @@ def _shock_section(rows: list[dict], frame) -> list[str]:
            "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         out.append(f"| {r['var']} | {r['name']} | {_fmt(r['block_p2'])} | {_fmt(r['median'])} | {_fmt(r['block_p98'])} | "
-                   f"{_fmt(r['block_sd'])} | {'是' if r['asset_driver'] else '否'} | {_fmt(r.get('last12_mean'))} | "
+                   f"{_fmt(r['block_sd'])} | {driver_text(r)} | {_fmt(r.get('last12_mean'))} | "
                    f"{_shock_links(frame, r['var'])} |")
     return out
 
@@ -502,13 +539,111 @@ def valuation_rule() -> str:
             "不进资产模型，只用来挑选历史月份。")
 
 
-def _drift_rows(frame) -> list[str]:
+def _interaction_text(rule: dict) -> str:
+    """「上月核心 CPI 同比 > 4%」 from a config.FACTORS interaction rule."""
+    lag = int(rule["lag"])
+    when = "上月" if lag == 1 else f"{lag} 个月前" if lag else "当月"
+    return f"{when}{STATE_NAMES.get(rule['state'], rule['state'])} > {float(rule['above']):g}%"
+
+
+def _drift_note(fid: str, spec) -> str:
+    """The 说明 cell of a driftable factor: what a drift on it reaches in the active model."""
+    f = FACTOR_INFO.get(fid, {})
+    in_model = fid in transmission_factors(spec)
+    if f.get("interaction"):
+        return (f"历史值只在{_interaction_text(f['interaction'])} 的月份非零；给它加漂移等于假定整个阶段都处在这种状态里，"
+                "只在叙事明确如此时使用")
+    only = [a for a, ids in asset_extras(spec).items() if fid in ids and fid not in spec.factors]
+    if only:
+        return f"只进{'、'.join(_asset_label(a) for a in only)}的方程"
+    if fid == "labor_share" and not in_model:
+        return "不在今天的传导模型里：只改变模拟的劳动收入占比路径（收入分配叙事仍可用），不直接改变资产回报"
+    if fid == "profit_share" and not in_model:
+        return "改变估值状态的公允值"
+    return "—"
+
+
+def _drift_rows(frame, spec=None) -> list[str]:
     names = {f["id"]: (f["name"], DRIFT_UNITS.get(f["unit"], f["unit"] + "/年")) for f in config.FACTORS}
     names["cpi"] = ("CPI 总体", "Δlog/年")
-    out = ["| 因子 | 名称 | 单位 | 上限（±） |", "|---|---|---|---|"]
-    for fid, bound in factor_drift_bounds(frame).items():
+    out = ["| 因子 | 名称 | 单位 | 上限（±） | 说明 |", "|---|---|---|---|---|"]
+    for fid, bound in factor_drift_bounds(frame, drift_factor_ids(spec)).items():
         name, unit = names.get(fid, (fid, ""))
-        out.append(f"| {fid} | {name} | {unit} | {_fmt(bound)} |")
+        note = _drift_note(fid, spec) if spec is not None else "—"
+        out.append(f"| {fid} | {name} | {unit} | {_fmt(bound)} | {note} |")
+    return out
+
+
+def root_causes(ctx: "EngineContext", shocks: list[dict]) -> str:
+    """Prompt rule 3's root causes, from the active model (ctx.model.spec) and config.FACTORS names: the
+    structural shocks, the model's factors that are not narrative outcomes (OUTCOME_FACTORS), an
+    interaction factor with its switch, and each asset's dedicated extras."""
+    spec = ctx.model.spec
+    factors = [f for f in spec.factors if f not in OUTCOME_FACTORS and f not in config.AUDIT_FACTOR_IDS]
+    factors = [f for f in ROOT_ORDER if f in factors] + [f for f in factors if f not in ROOT_ORDER]
+    parts = [f"e_ 结构冲击（{'、'.join(r['var'] for r in shocks)}）"] if shocks else []
+    for fid in factors:
+        f = FACTOR_INFO.get(fid, {"name": fid})
+        rule = f.get("interaction")
+        if rule:
+            base = rule["factor"]
+            label = ROOT_LABELS.get(base, FACTOR_INFO.get(base, {"name": base})["name"].removesuffix("变动"))
+            parts.append(f"{label}（f_{base}；{_interaction_text(rule)} 的月份直接进入传导模型）")
+        else:
+            parts.append(ROOT_LABELS.get(fid) or f"{f['name'].removesuffix('变动')}（f_{fid}）")
+    for a, ids in asset_extras(spec).items():
+        own = "、".join(f"{FACTOR_INFO.get(i, {'name': i})['name'].removesuffix('变动')}（f_{i}）" for i in ids)
+        parts.append(f"{_asset_label(a)}另含{own}")
+    return "、".join(parts)
+
+
+def new_variables_section(ctx: "EngineContext", rows: list[dict]) -> list[str]:
+    """The prompt section 「## 新增的情景变量」: the view variables of config.STATES by concept (config.VIEW_CONCEPTS
+    order), the late-starting ones with their first month and the W12 rule, the release-dated quarterly
+    series, and the credit and term-premium rules of the active model. Empty when the frame has none."""
+    by_var = {r["var"]: r for r in rows}
+    groups: dict[str, list[str]] = {}
+    for st in config.STATES:
+        r = by_var.get(f"s_{st['id']}")
+        if not st.get("concept") or r is None:
+            continue
+        item = f"s_{st['id']}（{st['name']}"
+        if r.get("late_from"):
+            item += f"；{r['late_from']} 起才有数据"
+        groups.setdefault(st["concept"], []).append(item + "）")
+    if not groups:
+        return []
+    since = f"{ctx.db.dates[0]:%Y}"
+    out = ["## 新增的情景变量", "",
+           "下面这些状态变量按它们能表达的叙事概念分组（数值范围和今天的读数见上面的状态变量表）。它们只用来挑选历史月份，"
+           "不进资产模型；资产回报仍由抽中月份经传导模型生成。叙事里出现这些概念时，优先用对应变量的视图，而不是覆盖项。", ""]
+    order = list(config.VIEW_CONCEPTS) + sorted(c for c in groups if c not in config.VIEW_CONCEPTS)
+    for concept in order:
+        if concept in groups:
+            out.append(f"- {config.VIEW_CONCEPTS.get(concept, concept)}：{'、'.join(groups[concept])}")
+    late = [r for r in rows if r.get("late_from")]
+    out.append("")
+    if late:
+        items = "、".join(f"{r['var']} {r['late_share']:.0%}" for r in late)
+        out.append(f"- 晚开始的变量（标“起才有数据”）：对它设视图的阶段只会抽它有数据以后的历史月份（占 {since} 年以来月份的比例："
+                   f"{items}），校验会提示这一点；"
+                   "需要更早的历史时，用较早开始的同类变量（例如通胀预期用 s_infl_expect）。")
+    out.append("- 季度数据（劳动收入占比、利润、投资、家庭净值、单位劳动成本、IT 投资占比、关税率、赤字、债务、r*）按发布月对齐，"
+               "只在发布月变化：它们的 f_ 变化大多数月份为零，表达趋势时用 s_ 水平视图或较长的阶段。")
+    drivers = {r["var"]: r for r in rows if r["kind"] == "factor"}
+    gz = drivers.get("f_gz")
+    if gz and gz["asset_driver"]:
+        out.append("- 信用市场的风险偏好用 s_gz / f_gz 表达（GZ 直接进入传导模型）；不要再用 asset_drift 伪造信用冲击。")
+    elif "s_gz" in by_var:
+        out.append("- 信用市场的风险偏好用 s_gz / f_gz 或 s_ebp 表达（它们挑选信用条件相近的历史月份）；不要用 asset_drift 伪造信用冲击。")
+    spec = ctx.model.spec
+    for fid in transmission_factors(spec):
+        rule = FACTOR_INFO.get(fid, {}).get("interaction")
+        if rule:
+            from ..scenarios.runner import INTERACTION_NOTE
+            out.append(f"- f_{fid}（{FACTOR_INFO[fid]['name']}）：{INTERACTION_NOTE}")
+            break
+    out.append("")
     return out
 
 
@@ -563,9 +698,7 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
     oil_gap = np.log(ctx.anchor.oil / oil_target)
     oil_drift = (f"，所以没有油价视图的阶段油价会从今天的 {ctx.anchor.oil:.0f} 美元缓慢"
                  f"{'回落' if oil_gap > 0 else '回升'}" if abs(oil_gap) > 0.1 else "")
-    root = "、".join(([f"e_ 结构冲击（{'、'.join(r['var'] for r in shocks)}）"] if shocks else []) + [
-        "油价（f_oil）", "政策利率（f_ff，或 overrides.r_star）", "信用利差（f_spread）",
-        "劳动收入占比（f_labor_share）", "美元（f_usd）"])
+    root = root_causes(ctx, shocks)
     drift_assets = "、".join(f"{a['id']}（{a['name']}）" for a in config.ASSETS if a["id"] not in STRUCTURAL_ASSETS)
     years = f"{horizon_months / 12:g}"
     regime = regime_rule(ctx)
@@ -655,6 +788,7 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
         "",
         *_shock_section(shocks, frame),
         "",
+        *new_variables_section(ctx, rows),
         "## 历史时期（类比词汇）",
         "",
         *_era_lines(config.MODEL_START),
@@ -664,9 +798,10 @@ def build_system_prompt(ctx: "EngineContext", horizon_months: int = config.HORIZ
         "",
         "- factor_drift：每年额外加到某个因子上的变化（单位同该因子，按年计），作用于该阶段的每个模拟月份，"
         "用于历史上没有先例的持续趋势。例：{\"factor\": \"labor_share\", \"annual\": -0.01, \"why\": \"AI 替代入门级白领岗位，"
-        "劳动收入占比每年额外下降约 1%，历史上没有同类持续冲击\"}。各因子上限为历史年化波动的 2 倍：",
+        "劳动收入占比每年额外下降约 1%，历史上没有同类持续冲击\"}。各因子上限为历史年化波动的 2 倍，「说明」列是它在今天的传导模型里"
+        "能影响什么：",
         "",
-        *_drift_rows(frame),
+        *_drift_rows(frame, ctx.model.spec),
         "",
         f"- asset_drift：每年额外加到某个资产价格回报上的漂移（小数，0.02 = 每年 +2%），只用于因子模型无法表达的结构性效应"
         f"（例如利润集中到少数公司）。上限 ±{ASSET_DRIFT_BOUND:g}，通常不超过 ±0.03。可用资产：{drift_assets}。"
@@ -1121,7 +1256,8 @@ def translate(narrative: str, ctx: "EngineContext", horizon_months: int = config
     elapsed = time.perf_counter() - t0
 
     spec, notes = repair(raw)
-    clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS)    # the engine always runs the full horizon
+    # the engine always runs the full horizon
+    clean, report = validate_spec(spec, ctx.db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     if horizon < config.HORIZON_MONTHS:
         report["warnings"].append(f"引擎总是模拟 {config.HORIZON_MONTHS} 个月：叙事覆盖的 {horizon} 个月之后补了一个无视图的回归常态阶段")
     report["warnings"] = notes + report["warnings"]
@@ -1159,7 +1295,7 @@ def run(ctx: "EngineContext", narrative: str | None = None, horizon_months: int 
                    "sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
                    "examples": [e["id"] for e in examples]},
         "variables": variable_table(ctx),
-        "factor_drift_bounds": factor_drift_bounds(ctx.db.frame),
+        "factor_drift_bounds": factor_drift_bounds(ctx.db.frame, drift_factor_ids(ctx.model.spec)),
         "asset_drift": {"bound": ASSET_DRIFT_BOUND,
                         "assets": [a for a in config.ASSET_IDS if a not in STRUCTURAL_ASSETS]},
         "schema": SPEC_JSON_SCHEMA,

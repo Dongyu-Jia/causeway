@@ -3,6 +3,7 @@
     python -m scenariolab.build                 # cached downloads
     python -m scenariolab.build --refresh       # re-download all data first
     python -m scenariolab.build --only scenarios meta
+    python -m scenariolab.build --only factor_audit   # the missing-factor audit (~20 s; needs diagnostics.json)
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~5 min, not run by default)
     python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
@@ -10,7 +11,12 @@
 
 Order matters: causality writes the structural shock series that later steps
 can use; diagnostics writes model_selection.json, which backtest, scenarios
-and the server then load as "today's transmission"; regimes reuses the engine's
+and the server then load as "today's transmission" (eras attributes with the
+selected model but runs before diagnostics: a build that runs both attributes
+the eras again when the walk-forward changed the selection, as on a fresh
+clone's first build, and --only diagnostics prints a note); factor_audit replicates the
+research round's archive and evaluates the changes against that selected model
+(it reads diagnostics.json's walk-forward); regimes reuses the engine's
 unconditional reference run that the scenario readouts computed (rebuild it
 after --only scenarios); forecast scores rolling one-year-ahead forecasts and
 needs the scenario paths; valuation tests the valuation state on the backtest
@@ -31,9 +37,11 @@ import traceback
 from . import config, jsonio
 from .context import EngineContext
 from .data.panel import load_meta, meta_sources, save_panel
+from .engine.factor_model import ModelSpec
+from .env import load_dotenv
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "backtest", "scenarios", "regimes", "forecast", "valuation",
-         "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes", "forecast",
+         "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
 OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
@@ -42,6 +50,25 @@ def optional_missing(err: ModuleNotFoundError) -> bool:
     """Whether a ModuleNotFoundError is an optional package (the llm extra) rather than a broken install."""
     name = str(getattr(err, "name", None) or "")
     return any(name == p or name.startswith(f"{p}.") for p in OPTIONAL_PACKAGES)
+
+
+def eras_model_stale(out) -> bool:
+    """Whether out/eras.json was attributed with another transmission than the selected one (out/
+    model_selection.json; the base spec without it), compared as ModelSpecs with the name aside (the eras page
+    warns on the same mismatch). False when eras.json is missing or unreadable: there is nothing to redo (a failed
+    step is reported)."""
+    try:
+        used = jsonio.load(out / "eras.json")["attribution_info"]["model"]["spec"]
+    except (OSError, KeyError, TypeError, ValueError):
+        return False
+    try:
+        selected = jsonio.load(out / "model_selection.json")["spec"]
+    except (OSError, KeyError, TypeError, ValueError):
+        selected = ModelSpec().to_dict()
+    try:
+        return ModelSpec.from_dict({**used, "name": ""}) != ModelSpec.from_dict({**selected, "name": ""})
+    except (TypeError, ValueError):
+        return True
 
 
 def _run(module: str, ctx: EngineContext, **kwargs):
@@ -62,6 +89,7 @@ def build_meta(ctx: EngineContext) -> dict:
         "data_start": panel_meta["start"], "data_end": panel_meta["end"],
         "model_start": config.MODEL_START, "horizon_months": config.HORIZON_MONTHS,
         "assets": config.ASSETS, "factors": config.FACTORS, "states": config.STATES, "eras": config.ERAS,
+        "view_concepts": config.VIEW_CONCEPTS,          # the view variables' concept names (the method tab groups them)
         "today": {"date": last.strftime("%Y-%m"),
                   "states": {s["id"]: row.get(f"s_{s['id']}") for s in config.STATES},
                   "income_yield": ctx.anchor.income_yield},
@@ -80,6 +108,7 @@ def main(argv=None) -> int:
                     help="run every step, the opt-in ones (ablation, regime_forecast) included")
     ap.add_argument("--paths", type=int, default=600, help="simulated paths per scenario")
     args = ap.parse_args(argv)
+    load_dotenv()                 # the optional FRED_API_KEY (data/sources.py) lives in the git-ignored .env
     default = STEPS if args.all else [s for s in STEPS if s not in OPT_IN]
     steps = [s for s in (args.only or default) if s not in args.skip]
     out = config.RESULTS_DIR
@@ -120,6 +149,12 @@ def main(argv=None) -> int:
     step("eras", lambda: jsonio.dump(_run("analysis.eras", ctx), out / "eras.json"))
     step("diagnostics", lambda: jsonio.dump(_run("analysis.diagnostics", ctx), out / "diagnostics.json"))
     ctx = EngineContext.load(selection=True)           # today's transmission = selected model
+    if "eras" in steps and "diagnostics" in steps and eras_model_stale(out):
+        # the walk-forward picked another model than the one eras just attributed with (a fresh clone's first
+        # build, a new factor): attribute again, so eras.json and the scenarios use the same transmission
+        print("[build] eras: diagnostics changed the selected model, attributing the eras again", flush=True)
+        step("eras", lambda: jsonio.dump(_run("analysis.eras", ctx), out / "eras.json"))
+    step("factor_audit", lambda: jsonio.dump(_run("analysis.factor_audit", ctx), out / "factor_audit.json"))
     step("backtest", lambda: jsonio.dump(_run("analysis.backtest", ctx), out / "backtest.json"))
     step("scenarios", lambda: _run("scenarios.library", ctx, n_paths=args.paths))
     step("regimes", lambda: jsonio.dump(_run("analysis.regimes", ctx), out / "regimes.json"))
@@ -131,6 +166,8 @@ def main(argv=None) -> int:
     step("ablation", lambda: jsonio.dump(_run("analysis.ablation", ctx), out / "ablation.json"))
     step("regime_forecast", lambda: jsonio.dump(_run("analysis.regime_forecast", ctx), out / "regime_forecast.json"))
 
+    if "diagnostics" in steps and "eras" not in steps and eras_model_stale(out):
+        print("[build] note: the selected model changed; run --only eras too (the eras attribution uses it)", flush=True)
     if "scenarios" in steps and "regimes" not in steps and (out / "regimes.json").exists():
         # the scenario readouts and regimes.json share the engine's reference run; the regimes tab warns
         # when they come from different builds

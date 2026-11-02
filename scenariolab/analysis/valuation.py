@@ -572,8 +572,9 @@ def persistence(P: pd.DataFrame, features, gap_in_sample: pd.Series | None = Non
 
 def roic_proxy(panel: pd.DataFrame, depreciation: float = ROIC_DEPRECIATION) -> pd.Series:
     """After-tax profits / a perpetual-inventory nonresidential capital stock (percent), from the panel's
-    monthly profit and investment levels (both $bn at annual rates, interpolated from quarters): a
-    descriptive proxy only, it is not release-dated."""
+    monthly profit and investment levels (both $bn at annual rates, quarterly values release dated with
+    config.RELEASE_LAGS: lvl_profits and lvl_pnfi are known from the quarter's first month + 5): a
+    descriptive proxy only."""
     inv = panel["lvl_pnfi"].dropna()
     d = 1.0 - (1.0 - depreciation) ** (1.0 / 12.0)
     k = float(inv.iloc[:12].mean()) / depreciation                      # steady state at the first year
@@ -1054,7 +1055,7 @@ def notes(ctx: EngineContext, vm: ValuationModel, reg: dict, roic: dict | None =
     line = (f"利润占比（企业税后利润/GDP）、利润同比、利润减资本开支都按发布月对齐（季度第一个月 + {s['release_lag_months']} 个月"
             "才算已知），没有前视；用的是今天的修订版数据。")
     if roic:
-        line += (f"ROIC 代理（利润 / 永续盘存法估算的非住宅资本存量，折旧率 {roic['depreciation']:.0%}）与利润占比（同为季度插值口径）"
+        line += (f"ROIC 代理（利润 / 永续盘存法估算的非住宅资本存量，折旧率 {roic['depreciation']:.0%}）与利润占比（同为按发布月对齐的季度数据）"
                  f"在 {roic['sample'][0]} 至 {roic['sample'][1]} 的相关为 {roic['corr_with_profit_share']:.2f}；把公允值回归里的利润占比"
                  f"换成它，系数 {roic['coef_in_fair_value']:+.3f}（t={roic['t_in_fair_value']:.1f}）"
                  + ("，同样不显著" if abs(roic["t_in_fair_value"]) < 2.0 else "") + "，所以用利润占比代表盈利能力。")

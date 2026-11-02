@@ -848,6 +848,21 @@ def _gap_text(tg: dict) -> str:
             "f_valuation（市场 P/D 变化）是内生的，几乎就是股价本身，只用来诊断。" + "；".join(parts) + "。")
 
 
+def _resid_effect(variant: dict | None) -> str:
+    """What a residual setting (an H1 variant) does to the drawn months' residuals, for the summary: 「类比月份的残差
+    只带进一半」 for partial coupling 0.5, 「…不再跟着抽中的月份进来」 for full decoupling."""
+    p = (variant or {}).get("params") or {}
+    mode, c = p.get("resid_mode"), p.get("resid_coupling")
+    if mode == "partial" and c is not None:
+        part = "一半" if abs(float(c) - 0.5) < 1e-9 else f"{float(c):.0%}"
+        return f"类比月份的残差只带进{part}"
+    if mode == "decoupled":
+        return "类比月份的残差不再跟着抽中的月份进来"
+    if mode in ("recentered", "detrended", "trend_decoupled"):
+        return "类比月份残差里跟着视图来的漂移被去掉或收缩"
+    return "类比月份的残差全部跟着抽中的月份进来"
+
+
 def _summary_text(by_id: dict, selection: dict, tg: dict, scen: dict | None, val: tuple, tst: tuple,
                   hyps: list[dict] | None = None) -> str:
     base = by_id["baseline"]
@@ -869,6 +884,10 @@ def _summary_text(by_id: dict, selection: dict, tg: dict, scen: dict | None, val
                    f"靠拢，而 oracle 离实际更远，所以“知道”反而更差。")
     pick = by_id.get(selection["chosen"])
     if selection["adopt"] and pick:
+        # the engine switches only by hand (config.RESIDUALS): while it runs another variant, the pick's effects are
+        # what adopting it would do (若采用), not what the engine does now (采用后)
+        runs = selection.get("engine_variant") == pick["id"]
+        after = "采用后" if runs else "若采用，"
         pu_v, pu_t = _mean_over(pick, "cagr_mae_uncond_risk", val), _mean_over(pick, "cagr_mae_uncond_risk", tst)
         still = (pick["validation_mae"] > pu_v) or (pick["test_mae"] > pu_t)
         cov_kept = (pick["validation_coverage"] >= base["validation_coverage"]
@@ -878,21 +897,26 @@ def _summary_text(by_id: dict, selection: dict, tg: dict, scen: dict | None, val
                    f"测试 {base['test_mae']:.2%} → {pick['test_mae']:.2%}，"
                    + ("覆盖率不降" if cov_kept else f"覆盖率下降不超过 {COVERAGE_DROP:.2f}")
                    + (f"，15 年无条件分布的宽度不低于基准的 {width:.1%}。" if width is not None else "。")
-                   + (f"它缩小但没有消除“知道反而更差”：采用后不知道宏观的误差为验证 {pu_v:.2%}、测试 {pu_t:.2%}，"
+                   + (f"它缩小但没有消除“知道反而更差”：{after}不知道宏观的误差为验证 {pu_v:.2%}、测试 {pu_t:.2%}，"
                       f"剩下的主要是传导问题，不是调参能修的。" if still else
-                      f"采用后知道宏观的误差在验证和测试窗口都低于不知道宏观（{pu_v:.2%}、{pu_t:.2%}）。"))
+                      f"{after}知道宏观的误差在验证和测试窗口都低于不知道宏观（{pu_v:.2%}、{pu_t:.2%}）。"))
         s = (scen or {}).get("variants", {}).get(pick["id"])
         if s:
             heads = scen.get("baseline") or {}
             big = s["max_scenario"]
             big_delta = (s.get("delta") or {}).get(big, {}).get("us_equity_cagr_p50")
             busts = [heads.get(x, {}).get("name", x) for x in scen.get("asset_drift_busts") or []]
-            txt.append(f"对 {len(heads)} 个未来情景：概率加权的美股中位数年化收益变化 {s['prob_weighted_delta']['us_equity_cagr_p50']:+.2%}，"
+            # the built-ins were written for the engine as it runs: their asset_drift follows from its residual setting
+            now = (f"采用后{_resid_effect(pick)}" if runs else
+                   f"引擎现在的设定下{_resid_effect(by_id.get(selection.get('engine_variant')))}")
+            then = "" if runs else f"；若采用，{_resid_effect(pick)}"
+            txt.append(f"对 {len(heads)} 个未来情景：{'' if runs else '若采用，'}概率加权的美股中位数年化收益变化 "
+                       f"{s['prob_weighted_delta']['us_equity_cagr_p50']:+.2%}，"
                        f"变化最大的是「{heads.get(big, {}).get('name', big)}」（"
                        + (f"{big_delta:+.1%}" if big_delta is not None else f"{s['max_abs_us_equity_delta']:.1%}") + "）"
-                       + (("——类比月份的残差采用后只带进一半，所以内置情景把估值压缩写成显式、有上限的 asset_drift（"
-                           + "、".join(busts) + "）。") if pick["hypothesis"] == "H1" and busts else
-                          "——这些情景的一部分跌幅原本来自类比月份的残差，采用后应改用显式、有上限的 asset_drift 表达。"
+                       + ((f"——{now}，所以内置情景把估值压缩写成显式、有上限的 asset_drift（" + "、".join(busts) + f"）{then}。")
+                          if pick["hypothesis"] == "H1" and busts else
+                          f"——这些情景的一部分跌幅原本来自类比月份的残差，{after}应改用显式、有上限的 asset_drift 表达。"
                           if pick["hypothesis"] == "H1" else "。"))
     else:
         txt.append("走步检验没有找到稳健、可采用的引擎改动：" + selection["reason"])

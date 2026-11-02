@@ -32,11 +32,18 @@ How the result enters the engine:
     the same reason as the Okun view: the months these views select (mostly the
     2010s) bring a labour-share decline of their own (-0.2% to -0.65% a year in
     the built-in specs), which on top of the drift would count the shift twice.
+    The labour share is a tracked macro path either way; it moves asset returns
+    directly only while it is a factor of today's transmission. The release-dated
+    labour share does not improve the out-of-sample fit and the walk-forward may
+    drop it (FACTORS_DESIGN C3); transmission_check() says which, the validation
+    warns (W13) and the explanation carries a caveat.
 """
 from __future__ import annotations
 
 import copy
 import math
+
+from ..engine.factor_model import ModelSpec, asset_extras
 
 GROUPS = ("bottom50", "mid40", "top10")
 GROUP_NAMES = {"bottom50": "收入后 50%", "mid40": "收入 50-90%", "top10": "收入前 10%"}
@@ -95,6 +102,22 @@ DEFAULT_BASE = {"ip_yoy": 1.8, "services_yoy": 3.2}
 # 1973 (the 1973-75 and 2007-09 recessions: 0.19-0.27), and the lockdown blocks drop out (their share
 # of the draws falls from 0.5-2% under a plain mean view to under 0.1%).
 UNRATE_VOL_MULT = 0.62
+
+
+LABOR_SHARE_CAVEAT = ("劳动收入占比不在今天的传导模型里（按发布月对齐后它不提高样本外 R²）：这里的劳动收入占比漂移只改变模拟的"
+                      "劳动收入占比路径，不直接改变资产回报；资产受到的影响来自需求视图挑中的历史月份和失业率的变化。")
+
+
+def labor_share_in_transmission(spec: ModelSpec | None) -> bool:
+    """Whether the labour share enters some asset equation of `spec` (None: the base model, which has it)."""
+    if spec is None:
+        return "labor_share" in ModelSpec().factors
+    return "labor_share" in spec.factors or any("labor_share" in ids for ids in asset_extras(spec).values())
+
+
+def transmission_check(spec: ModelSpec | None) -> dict:
+    """What the calculator's drifts reach in the active model (merged into each explanation's engine_check)."""
+    return {"labor_share_in_transmission": labor_share_in_transmission(spec)}
 
 
 def _merge(params: dict | None) -> tuple[dict, list[str]]:
@@ -170,13 +193,16 @@ def _pct(x: float, digits: int = 2) -> str:
     return f"{100.0 * x:+.{digits}f}%"
 
 
-def distribution_views(params: dict | None = None, base: dict | None = None) -> tuple[list[dict], dict]:
+def distribution_views(params: dict | None = None, base: dict | None = None,
+                       model_spec: ModelSpec | None = None) -> tuple[list[dict], dict]:
     """(views, explanation): EP views for one phase plus every number behind them.
 
     base: the no-shock levels the views are measured from, {"ip_yoy", "services_yoy"}
     in percent (library.py passes today's recent averages).
     explanation["overrides"]["factor_drift"] holds the direct distribution
     effects (annual, in factor units: pp for unrate, log for labor_share).
+    model_spec: the active transmission; when the labour share is not in it, the
+    caveats say that its drift moves only the labour-share path (None: no caveat).
     """
     imp = distribution_impact(params)
     b = {**DEFAULT_BASE, **{k: float(v) for k, v in (base or {}).items() if k in DEFAULT_BASE}}
@@ -241,4 +267,6 @@ def distribution_views(params: dict | None = None, base: dict | None = None) -> 
             "财富效应只算股票，不含房产；高收入组的边际消费倾向和持股比例都有较大不确定性。",
         ],
     }
+    if model_spec is not None and not labor_share_in_transmission(model_spec):
+        explanation["caveats"].append(LABOR_SHARE_CAVEAT)
     return views, explanation

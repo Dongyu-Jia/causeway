@@ -727,6 +727,25 @@ def test_definitions_follow_the_parameters_and_hold_no_code_ids():
     assert not [t for t in prose if code_id.search(t)]
 
 
+def test_the_timing_text_names_the_selected_models_switch():
+    """FACTORS_DESIGN §7.3: the label's switch and the transmission's own in one line, built from the rule of the
+    model the caller describes (the term-premium term reads last month's core CPI y/y; same 4% threshold)."""
+    from scenariolab.analysis import regimes as A
+    from scenariolab.engine.factor_model import ModelSpec
+    rule = next(f["interaction"] for f in config.FACTORS if f["id"] == "tp10_x_core4")
+    tp = A.transmission_switch(ModelSpec(factors=(*ModelSpec().factors, "tp10_x_core4")))
+    assert tp == {"kind": "interaction", "id": "tp10_x_core4", **rule}
+    assert R.switch_text(tp) == "宏观体制的高通胀看当月 CPI 同比；传导模型的期限溢价项看上月核心 CPI 同比；门槛都是 4%"
+    assert R.rule_text(switch=tp)["timing"].endswith("；门槛都是 4%，时点差一个月。")
+    whole = A.transmission_switch(ModelSpec(regime="inflation"))
+    assert "传导模型的整体通胀状态交互看上月 CPI 同比；门槛都是 4%" in R.switch_text(whole)
+    assert A.transmission_switch(ModelSpec()) is None
+    plain = R.rule_text()["timing"]
+    assert "传导模型没有通胀状态项" in plain and "时点差" not in plain
+    for t in (R.switch_text(tp), R.rule_text(switch=tp)["timing"], plain, R.switch_text(whole)):
+        assert "传导模型里的高通胀状态看上个月的 CPI 同比" not in t and "传导模型的通胀状态看上月 CPI 同比" not in t
+
+
 # ---------------------------------------------------------------- simulated paths and the reference run
 
 @needs_panel

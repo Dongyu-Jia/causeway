@@ -20,6 +20,7 @@ dependencies = [
   "uvicorn>=0.30",
   "requests>=2.31",
   "xlrd>=2.0",
+  "openpyxl>=3.1",
   "pyyaml>=6.0",
 ]
 
@@ -37,6 +38,7 @@ include = ["scenariolab*"]
 
 [tool.setuptools.package-data]
 "scenariolab.scenarios" = ["specs/*.yaml"]
+"scenariolab.analysis" = ["audit_archive/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

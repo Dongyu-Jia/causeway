@@ -1015,10 +1015,17 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     // the current forecast's name comes from forecast.json; the test file's own name only when it tested it
     const curName = FC?.selection?.baseline_name || '';
     const baseName = rfOk ? (RF.baseline?.name || curName) : curName;
+    // the transmission line is generated from diagnostics.json by the build (model_use.transmission.reason: it names
+    // a kept inflation-state term, FACTORS_DESIGN §7.4); the sentence built here only for an older file without it
     const tv = R.transmission?.walk_forward_verdict;
-    const trans = tv?.oos_r2_delta?.length
-      ? h('p', { class: 'rg-text' }, `传导模型不加通胀状态交互项：走步检验里样本外 R² 变化 ${tv.oos_r2_delta.map(d => `${d.period} ${sg(d.delta, 3)}`).join(' / ')}（`, h('a', { href: '#diagnostics' }, '诊断与迭代页'), '）。')
-      : (R.model_use?.transmission?.reason ? h('p', { class: 'rg-text' }, R.model_use.transmission.reason) : null);
+    const reason = R.model_use?.transmission?.reason;
+    // a reason that points at the audit section links straight to it (#diagnostics?audit)
+    const trans = reason
+      ? h('p', { class: 'rg-text' }, reason, ' ', /缺失因子审计/.test(reason)
+        ? h('a', { href: '#diagnostics?audit' }, '缺失因子审计 →') : h('a', { href: '#diagnostics' }, '诊断与迭代页 →'))
+      : tv?.oos_r2_delta?.length
+        ? h('p', { class: 'rg-text' }, `传导模型不加通胀状态交互项：走步检验里样本外 R² 变化 ${tv.oos_r2_delta.map(d => `${d.period} ${sg(d.delta, 3)}`).join(' / ')}（`, h('a', { href: '#diagnostics' }, '诊断与迭代页'), '）。')
+        : null;
     const cmd = h('code', { class: 'mono' }, 'python -m scenariolab.build --only regime_forecast');
     if (!RF) {
       box.append(card({ title: '体制特征的样本外检验', sub: baseName ? `对照：${baseName}` : '' },

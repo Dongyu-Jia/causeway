@@ -456,7 +456,8 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     return vs.length ? vs.reduce((a, b) => a + b, 0) : null;
   };
   // the model the eras step used vs the one the scenarios run (meta.model)
-  const specKey = (s) => (s ? JSON.stringify([s.factors, s.lags, s.regime, s.kind, s.ridge, s.window_years, s.target, s.shock_cols]) : '');
+  const specKey = (s) => (s ? JSON.stringify([s.factors, s.lags, s.regime, s.kind, s.ridge, s.window_years, s.target, s.shock_cols,
+    s.asset_factors || {}, s.asset_start || {}]) : '');
   const modelMismatch = ainfo.model?.spec && meta?.model?.spec && specKey(ainfo.model.spec) !== specKey(meta.model.spec);
   let attrAsset = 'us_equity';
 
@@ -649,7 +650,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
         { key: 'ratio', label: '波动相对各时代中位数', fmt: (v) => (isNum(v) ? `${v.toFixed(2)} 倍` : '—'),
           cls: (v) => (isNum(v) && v >= 1.5 ? 'eras-hi' : isNum(v) && v <= 0.6 ? 'eras-lo' : '') },
       ], facRows, { stack: true }),
-      h('p', { class: 'eras-note' }, '劳动收入占比、利润、投资、净值等季度数据被插值成月度，它们的月度波动偏低，只适合跨时代相对比较。')));
+      h('p', { class: 'eras-note' }, '劳动收入占比、利润、投资、净值等季度数据按发布月对齐（不插值），只在发布月变化，月度变化集中在这些月份：它们的波动只适合跨时代相对比较。')));
 
     // charts after the DOM exists
     charts.bars(barBox, {

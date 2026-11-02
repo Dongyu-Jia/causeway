@@ -160,6 +160,24 @@ def test_no_code_ids_in_the_chinese_texts(result):
 
 
 @needs_panel
+def test_the_two_high_inflation_switches_follow_the_selected_model(result, ctx):
+    """The 判断方法 and 口径 cards name the selected transmission's own switch next to the label's (FACTORS_DESIGN
+    §7.3); the headline previous-month split is the rejected whole-model interaction unless the model is that."""
+    sw = A.transmission_switch(ctx.model.spec)
+    d = result["definitions"]
+    assert d["conventions"]["high_inflation_timing"]["text"] == R.switch_text(sw)
+    assert R.switch_text(sw) in d["rule_text"]["timing"]
+    if sw and sw["kind"] == "interaction" and sw["factor"] == "tp10":
+        assert "传导模型的期限溢价项看上月核心 CPI 同比；门槛都是 4%" in d["rule_text"]["timing"]
+        assert "上月核心 CPI 同比高于 4% 时，期限溢价变化单独进入" in result["model_use"]["transmission"]["reason"] \
+            or "add_tp10_x_core4" not in (result["transmission"]["walk_forward_verdict"] or {}).get("changes", [])
+    split = result["transmission"]["splits"][0]["desc"]
+    assert ("走步检验没有采用" in split) == (ctx.model.spec.regime != "inflation")
+    text = json.dumps(result, ensure_ascii=False)
+    assert "传导模型里的高通胀状态看上个月的 CPI 同比" not in text and "传导模型的通胀状态" not in text
+
+
+@needs_panel
 def test_thin_cells_get_no_placebo_p_and_survival_needs_enough_episodes(result):
     for w in ("1973", "1948"):
         blk = result["forward"]["windows"][w]
@@ -390,6 +408,13 @@ def _built() -> dict | None:
     except (OSError, ValueError):
         return None
     return d if d.get("data_end") == CHECK_MONTH and d.get("version") == 1 else None
+
+
+@pytest.mark.skipif(not (config.RESULTS_DIR / "regimes.json").exists(), reason="results/regimes.json not built")
+def test_the_built_file_names_the_transmissions_own_switch():
+    """The stale sentence (the rejected headline switch called the transmission's state) is not in the built file."""
+    text = (config.RESULTS_DIR / "regimes.json").read_text(encoding="utf-8")
+    assert "传导模型里的高通胀状态看上个月的 CPI 同比" not in text and "传导模型的通胀状态看上月 CPI 同比" not in text
 
 
 @pytest.mark.skipif(_built() is None, reason=f"results/regimes.json for {CHECK_MONTH} not built")

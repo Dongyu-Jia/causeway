@@ -540,3 +540,95 @@ def test_translation_with_a_regime_key_is_checked_against_the_month_database(ctx
     row = saved["regime_support"]["depression"]
     assert {"months", "runs", "episodes", "max_delivered", "shrink", "reason", "ens", "engine_episodes",
             "regime_effective_episodes", "weights"} <= set(row)
+
+
+# ---------------------------------------------------------------- missing-factor round (26)
+
+F_SPEC = dict(factors=("oil", "ip", "cpi_goods", "cpi_services", "ff", "y10", "spread", "usd", "unrate", "gz",
+                       "tp10_x_core4"), asset_factors={"energy": ["metals_oil"]}, asset_start={"gold": "1982-01"})
+NEW_SECTION = "## 新增的情景变量"
+
+
+@pytest.fixture(scope="module")
+def f_ctx(ctx):
+    if any(f"f_{f}" not in ctx.panel for f in ("gz", "tp10_x_core4", "metals_oil")):
+        pytest.skip("panel without the missing-factor columns")
+    from scenariolab.context import EngineContext
+    from scenariolab.engine.factor_model import ModelSpec
+    return EngineContext.load(spec=ModelSpec(**F_SPEC))
+
+
+def _rule3(prompt: str) -> str:
+    return next(line for line in prompt.split("\n") if line.startswith("3. 优先刻画根因："))
+
+
+def test_root_causes_come_from_the_model(ctx, f_ctx):
+    shocks = "e_ 结构冲击（e_oil_supply、e_demand、e_monetary、e_financial）、" if "e_oil_supply" in ctx.db.frame else ""
+    base = _rule3(tr.build_system_prompt(ctx))
+    assert base.startswith(f"3. 优先刻画根因：{shocks}油价（f_oil）、政策利率（f_ff，或 overrides.r_star）、信用利差（f_spread）、"
+                           "劳动收入占比（f_labor_share）、美元（f_usd）。")                    # the base model: as before
+    final = _rule3(tr.build_system_prompt(f_ctx))
+    assert final.startswith(f"3. 优先刻画根因：{shocks}油价（f_oil）、政策利率（f_ff，或 overrides.r_star）、信用利差（f_spread）、"
+                            "GZ 信用利差（f_gz）、美元（f_usd）、期限溢价（f_tp10；上月核心 CPI 同比 > 4% 的月份直接进入传导模型）、"
+                            "能源股另含基础金属相对油价（f_metals_oil）。")
+    assert "f_labor_share" not in final
+
+
+def test_variable_table_marks_the_equations_a_column_enters(ctx, f_ctx):
+    rows = {r["var"]: r for r in tr.variable_table(f_ctx)}
+    assert rows["f_metals_oil"]["asset_driver"] and rows["f_metals_oil"]["asset_driver_assets"] == ["energy"]
+    assert rows["f_gz"]["asset_driver"] and rows["f_gz"]["asset_driver_assets"] is None
+    assert not rows["f_labor_share"]["asset_driver"] and rows["f_labor_share"]["asset_driver_assets"] is None
+    assert not {"f_ebp", "f_tp10_x_infl4"} & set(rows) and not any(v.startswith("x_") for v in rows)
+    assert rows["s_tips10"]["late_from"] == f"{f_ctx.db.frame['s_tips10'].first_valid_index():%Y-%m}"
+    assert "late_from" not in rows["s_gz"] and "late_from" not in rows["s_cpi_yoy"]
+    prompt = tr.build_system_prompt(f_ctx)
+    line = next(x for x in prompt.split("\n") if x.startswith("| f_metals_oil |"))
+    assert "| 是（仅能源股） |" in line
+    assert "| f_gz | GZ 信用利差变动（月度） | Δpp/月 | 是 |" in prompt
+    assert "| f_labor_share | 劳动收入占比变动（月度） | Δlog/月 | 否 |" in prompt
+    # the drift table: the model's factors, the labour share with what its drift still reaches
+    for fid in ("gz", "tp10_x_core4", "metals_oil", "labor_share"):
+        assert f"| {fid} |" in prompt
+    assert "| labor_share | 劳动收入占比变动 | Δlog/年 |" in prompt and "只改变模拟的劳动收入占比路径" in prompt
+    base_rows = {r["var"]: r for r in tr.variable_table(ctx)}
+    assert base_rows["f_labor_share"]["asset_driver"] and not base_rows["f_gz"]["asset_driver"]
+
+
+def test_the_new_variable_section(ctx, f_ctx, tmp_path, monkeypatch):
+    monkeypatch.setattr(tr, "REGIMES_PATH", tmp_path / "missing.json")
+    prompt = tr.build_system_prompt(f_ctx)
+    assert prompt == tr.build_system_prompt(f_ctx) and prompt.count(NEW_SECTION) == 1        # deterministic
+    regime = "## 宏观体制（regime 字段）"
+    assert prompt.index("### 结构冲击 e_") < prompt.index(NEW_SECTION) < prompt.index("## 历史时期")
+    assert prompt.index("## 历史时期") < prompt.index(regime) < prompt.index("## 覆盖项")
+    section = prompt[prompt.index(NEW_SECTION):prompt.index("## 历史时期")]
+    frame = f_ctx.db.frame
+    for st in config.STATES:
+        if st.get("concept") and f"s_{st['id']}" in frame:
+            assert f"s_{st['id']}（{st['name']}" in section, st["id"]
+    for concept in {st["concept"] for st in config.STATES if st.get("concept")}:
+        assert f"- {config.VIEW_CONCEPTS[concept]}：" in section
+    tips = f"{frame['s_tips10'].first_valid_index():%Y-%m}"
+    assert f"s_tips10（10 年期 TIPS 实际收益率；{tips} 起才有数据）" in section and "s_mich1y（" in section
+    share = float(frame["s_tips10"].notna().mean())
+    assert f"s_tips10 {share:.0%}" in section and "只会抽它有数据以后的历史月份" in section
+    assert "信用市场的风险偏好用 s_gz / f_gz 表达（GZ 直接进入传导模型）；不要再用 asset_drift 伪造信用冲击" in section
+    assert "期限溢价项只在抽中的历史月份本身处于高核心通胀时起作用" in section
+    base = tr.build_system_prompt(ctx)                          # GZ is no model input of the base model
+    base_section = base[base.index(NEW_SECTION):base.index("## 历史时期")]
+    assert "GZ 直接进入传导模型" not in base_section and "期限溢价项只在" not in base_section
+    out = tr.run(f_ctx, write=False)
+    assert set(out["factor_drift_bounds"]) == set(tr.drift_factor_ids(f_ctx.model.spec))
+    assert out["prompt"]["sha256"] == tr.run(f_ctx, write=False)["prompt"]["sha256"]
+
+
+def test_translation_under_the_final_model_warns_w12_and_w13(f_ctx):
+    raw = copy.deepcopy(tr.INLINE_EXAMPLE)
+    raw["phases"][2]["views"].append(tr._view("s_tips10", "实际利率回落", mean=1.0))
+    raw["phases"][1]["overrides"]["factor_drift"] = [{"factor": "labor_share", "annual": -0.01, "why": "AI 替代"},
+                                                     {"factor": "gz", "annual": 0.2, "why": "信用收紧"}]
+    out = tr.translate(NARRATIVE, f_ctx, client=FakeClient(message(spec_json(raw))))
+    text = "\n".join(out["validation"]["warnings"])
+    assert "阶段 3：s_tips10 从 " in text and "阶段 2：劳动收入占比不在今天的传导模型里" in text
+    assert out["spec"]["phases"][1]["overrides"]["factor_drift"] == {"labor_share": -0.01, "gz": 0.2}

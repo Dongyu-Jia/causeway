@@ -1387,9 +1387,33 @@ def eras_section(P: pd.DataFrame, lab: pd.DataFrame) -> list[dict]:
 
 # ============================================================================ transmission by inflation state
 
+# what the transmission's interaction term switches, in the model-use line (FACTORS_DESIGN §7.4)
+TERM_CHANGE = {"tp10": "期限溢价变化"}
+
+
+def transmission_switch(spec) -> dict | None:
+    """The selected transmission's own high-inflation switch (FACTORS_DESIGN §7.3), for engine/regimes.switch_text:
+    its first interaction factor (config.FACTORS "interaction": the term premium in high core inflation), else the
+    whole-model split of ModelSpec(regime="inflation") (previous-month headline CPI y/y above
+    factor_model.HIGH_INFLATION), else None (no inflation state in the model)."""
+    info = {f["id"]: f for f in config.FACTORS}
+    extras = [f for _, ids in (getattr(spec, "asset_factors", ()) or ()) for f in ids]
+    for fid in (*spec.factors, *extras):
+        rule = info.get(fid, {}).get("interaction")
+        if rule:
+            return {"kind": "interaction", "id": fid, **rule}
+    if spec.regime == "inflation":
+        return {"kind": "regime", "factor": None, "state": "cpi_yoy", "lag": 1, "above": FM.HIGH_INFLATION}
+    return None
+
+
 def transmission_section(ctx, lab: pd.DataFrame) -> dict:
     """The selected transmission's betas in high- vs low-inflation months (the engine's previous-month
-    dummy) and in contraction months, by HAC Wald tests: a description; the model itself has no regime term."""
+    dummy) and in contraction months, by HAC Wald tests: a description; the model itself has no regime term.
+
+    Each asset is tested on its own equation: its features (asset_feature_names: a dedicated extra enters
+    only its own asset) and its own fit months (asset_train_start: gold may start later), so the
+    full-sample check reproduces the engine's coefficients."""
     P = ctx.panel
     eng = ctx.model
     spec = eng.spec
@@ -1401,59 +1425,83 @@ def transmission_section(ctx, lab: pd.DataFrame) -> dict:
     ok = X_all.loc[rows].notna().all(axis=1) & Yall.notna().all(axis=1)
     rows = rows[ok.to_numpy()]
     X = X_all.loc[rows].to_numpy(float)
-    n, k = X.shape
+    n = len(rows)
     D_hi = FM.design_matrix(P, replace(spec, regime="inflation")).loc[rows, "hi_infl"].to_numpy(float)
-    sd_f = X.std(axis=0)
     con = (lab.loc[rows, "contraction"] == 1).to_numpy(float)
-    labor = np.array([nm.split("_l")[0] == "labor_share" for nm in names])
+    own = {}
+    for a in assets:
+        nm_a = FM.asset_feature_names(spec, a)
+        first = (eng.asset_train_start or {}).get(a)
+        r_a = np.asarray(rows >= pd.Timestamp(first)) if first else np.ones(n, bool)
+        cols = [names.index(f) for f in nm_a]
+        own[a] = {"names": nm_a, "cols": cols, "rows": r_a, "sd": X[r_a][:, cols].std(axis=0),
+                  "labor": np.array([f.split("_l")[0] == "labor_share" for f in nm_a])}
     check = 0.0
     for a in assets:
-        b, _, _ = _nw(P.loc[rows, f"{spec.target}_{a}"].to_numpy(float), np.column_stack([np.ones(n), X]), HAC_MONTHLY)
-        check = max(check, float(np.max(np.abs(b[1:] - eng.coef.loc[a, names].to_numpy(float)))))
+        o = own[a]
+        Xa = X[o["rows"]][:, o["cols"]]
+        b, _, _ = _nw(P.loc[rows[o["rows"]], f"{spec.target}_{a}"].to_numpy(float),
+                      np.column_stack([np.ones(len(Xa)), Xa]), HAC_MONTHLY)
+        check = max(check, float(np.max(np.abs(b[1:] - eng.coef.loc[a, o["names"]].to_numpy(float)))))
 
     def split(D, mask, sid, desc):
         m = mask.astype(bool)
-        Xm, Dm = X[m], D[m]
         nm = int(m.sum())
-        res = {"id": sid, "desc": desc, "months": nm, "months_high": int(Dm.sum()), "months_low": int(nm - Dm.sum()),
+        res = {"id": sid, "desc": desc, "months": nm, "months_high": int(D[m].sum()), "months_low": int(nm - D[m].sum()),
                "first": _ym(rows[m][0]), "last": _ym(rows[m][-1]), "assets": {}}
-        if Dm.sum() < 3 * (k + 2) or (nm - Dm.sum()) < 3 * (k + 2):
-            res["skipped"] = f"高、低两组里有一组的月份太少，估不出 {k + 1} 个系数"
-            return res
-        Z = np.column_stack([np.ones(nm), Xm, Dm, Xm * Dm[:, None]])
-        n_sig = n_sig_x = 0
+        n_sig = n_sig_x = n_tests = n_tests_x = 0
         for a in assets:
-            y = P.loc[rows, f"{spec.target}_{a}"].to_numpy(float)[m]
+            o = own[a]
+            ma = m & o["rows"]
+            Xm, Dm = X[ma][:, o["cols"]], D[ma]
+            k, nma = Xm.shape[1], int(ma.sum())
+            if Dm.sum() < 3 * (k + 2) or (nma - Dm.sum()) < 3 * (k + 2):
+                res["skipped"] = f"高、低两组里有一组的月份太少，估不出 {k + 1} 个系数"
+                res["assets"] = {}
+                return res
+            Z = np.column_stack([np.ones(nma), Xm, Dm, Xm * Dm[:, None]])
+            y = P.loc[rows, f"{spec.target}_{a}"].to_numpy(float)[ma]
             b, V, _ = _nw(y, Z, HAC_MONTHLY)
             bl, dd = b[1: k + 1], b[k + 2:]
             tt = dd / np.sqrt(np.diag(V)[k + 2:])
             w10 = float(dd @ np.linalg.pinv(V[k + 2:, k + 2:]) @ dd)
+            sd_f = o["sd"]
             per = {f: {"beta_low": float(bl[j]), "beta_high": float(bl[j] + dd[j]), "diff": float(dd[j]),
                        "t_hac": float(tt[j]), "p": float(2 * sps.norm.sf(abs(tt[j]))),
                        "beta_low_1sd_pct": float(100 * bl[j] * sd_f[j]),
-                       "beta_high_1sd_pct": float(100 * (bl[j] + dd[j]) * sd_f[j])} for j, f in enumerate(names)}
+                       "beta_high_1sd_pct": float(100 * (bl[j] + dd[j]) * sd_f[j])} for j, f in enumerate(o["names"])}
             n_sig += int((np.abs(tt) >= 1.96).sum())
-            n_sig_x += int((np.abs(tt[~labor]) >= 1.96).sum())
+            n_sig_x += int((np.abs(tt[~o["labor"]]) >= 1.96).sum())
+            n_tests += k
+            n_tests_x += int((~o["labor"]).sum())
             res["assets"][a] = {"factors": per, "wald_slopes": {"chi2": w10, "df": k, "p": float(sps.chi2.sf(w10, k))},
-                                "n_sig_5pct": int((np.abs(tt) >= 1.96).sum())}
+                                "n_sig_5pct": int((np.abs(tt) >= 1.96).sum()), "months": nma,
+                                "first": _ym(rows[ma][0])}
         res.update({"wald_p": {a: res["assets"][a]["wald_slopes"]["p"] for a in assets},
-                    "n_sig_5pct": n_sig, "n_tests": k * len(assets), "expected_5pct": 0.05 * k * len(assets),
-                    "n_sig_excl_labor_share": n_sig_x, "n_tests_excl_labor_share": int((~labor).sum()) * len(assets),
-                    "expected_5pct_excl_labor_share": 0.05 * int((~labor).sum()) * len(assets)})
-        if "y10" in names:
+                    "n_sig_5pct": n_sig, "n_tests": n_tests, "expected_5pct": 0.05 * n_tests,
+                    "n_sig_excl_labor_share": n_sig_x, "n_tests_excl_labor_share": n_tests_x,
+                    "expected_5pct_excl_labor_share": 0.05 * n_tests_x})
+        if "y10" in own["us_equity"]["names"]:
             f = res["assets"]["us_equity"]["factors"]["y10"]
             res["equity_y10"] = {"low": f["beta_low_1sd_pct"], "high": f["beta_high_1sd_pct"], "t": f["t_hac"]}
         return res
 
     yrs = rows.year
     hi = FM.HIGH_INFLATION
-    splits = [split(D_hi, np.ones(n, bool), "inflation_prev_month", f"上月 CPI 同比 > {hi:g}%（传导模型的通胀状态），全样本"),
+    # the headline previous-month dummy is the whole-model inflation split (ModelSpec(regime="inflation")): the
+    # transmission's own state only when the selected model is that split (the walk-forward rejected it)
+    whose = "传导模型的整体通胀状态交互" if spec.regime == "inflation" else "整体通胀状态交互，走步检验没有采用"
+    splits = [split(D_hi, np.ones(n, bool), "inflation_prev_month", f"上月 CPI 同比 > {hi:g}%（{whose}），全样本"),
               split(D_hi, yrs <= 1999, "inflation_prev_month_1973_1999", "同上，只用 1999 年及以前的月份"),
               split(D_hi, yrs >= 2000, "inflation_prev_month_2000_end", "同上，只用 2000 年以后的月份"),
               split(con, np.ones(n, bool), "contraction_expost", "收缩月份（事后）对非收缩月份，全样本")]
+    labor_in = any(o["labor"].any() for o in own.values())
     return {"fit_rows": [_ym(rows[0]), _ym(rows[-1])], "months": int(n), "assets": assets, "features": names,
+            "asset_features": {a: own[a]["names"] for a in assets},
+            "asset_fit_start": {a: _ym(rows[own[a]["rows"]][0]) for a in assets},
             "target": spec.target, "hac_lags": HAC_MONTHLY, "engine_coef_check_max_abs_diff": check,
-            "labor_share_note": "劳动收入占比是季度数据插值成的月度序列（前后两个季度之间线性），单列计数",
+            "labor_share_in_model": bool(labor_in),
+            "labor_share_note": "劳动收入占比按发布月对齐，只在发布月变化" + ("，单列计数" if labor_in else "；它不在今天的传导模型里"),
             "splits": splits, "walk_forward_verdict": _diagnostics_verdict()}
 
 
@@ -1466,7 +1514,7 @@ def _diagnostics_verdict() -> dict | None:
         return None
     ev = rec.get("evidence") or {}
     return {"title": rec.get("title"), "detail": rec.get("detail"), "oos_r2_delta": ev.get("oos_delta"),
-            "n_reject": ev.get("n_reject")}
+            "n_reject": ev.get("n_reject"), "changes": ev.get("changes") or []}
 
 
 # ============================================================================ the engine side
@@ -1691,7 +1739,7 @@ def conflict_example(ctx) -> dict:
     db = ctx.db
     prior = db.prior()
     spec = next(s for s in library.resolved_specs(ctx) if s.get("id") == CONFLICT["spec"])
-    clean, _ = validate_spec(spec, db.frame, config.HORIZON_MONTHS)
+    clean, _ = validate_spec(spec, db.frame, config.HORIZON_MONTHS, model_spec=ctx.model.spec)
     ph = clean["phases"][CONFLICT["phase"]]
     rviews = [{"var": f"rg_{i}", "mean": float(s)} for i, s in CONFLICT["regime"].items()]
     others = [v for v in ph["views"] if v["var"] not in {r["var"] for r in rviews}]
@@ -1760,7 +1808,9 @@ def interpolations(panel: pd.DataFrame) -> list[dict]:
     return out
 
 
-def conventions(masks: dict, idx) -> dict:
+def conventions(masks: dict, idx, switch: dict | None = None) -> dict:
+    """The conventions every number of the page shares; `switch`: the selected transmission's high-inflation
+    switch (transmission_switch), named next to the label's."""
     p = CFG["params"]
     w73, w48 = idx[masks["1973"]], idx[masks["1948"]]
     hl = CFG["hac_lags"]
@@ -1782,8 +1832,7 @@ def conventions(masks: dict, idx) -> dict:
         "hac": {"name": "HAC t 值", "text": f"Newey–West：月度回归 {hl['monthly']} 阶滞后，重叠的 12 个月窗口 {hl['forward']} 阶"},
         "placebo": {"name": "置换检验", "text": f"把实时标签序列循环平移至少 {MIN_SHIFT} 个月（保留标签的段结构和回报的自相关，"
                                              "确定性，不用随机数），看平移后的差异有多大"},
-        "high_inflation_timing": {"name": "高通胀的时点", "text": f"标签和标志看当月 CPI 同比，传导模型的通胀状态看上月 CPI 同比；"
-                                                            f"门槛都是 {p['high_inflation_pct']:g}%"},
+        "high_inflation_timing": {"name": "高通胀的时点", "text": R.switch_text(switch, p)},
         "names": {"name": "体制和标志", "text": "六种体制：" + "、".join(R.NAME[i] for i in R.LABEL_IDS) + "；标志："
                                            + "、".join(d["name"] for d in R.flag_defs())},
         "rounding": {"name": "取整", "text": "占比取整到 1%，回报保留 1 位小数（%），相关系数和 z 值保留 2 位"},
@@ -1799,7 +1848,8 @@ def _runs_text(spans: list[str]) -> str:
     return "、".join(spans)
 
 
-def definitions_section(panel: pd.DataFrame, lab: pd.DataFrame, masks: dict, parts: dict) -> dict:
+def definitions_section(panel: pd.DataFrame, lab: pd.DataFrame, masks: dict, parts: dict,
+                        switch: dict | None = None) -> dict:
     p = CFG["params"]
     hi, neg, sev, sw = p["high_inflation_pct"], p["cpi_neg_pct"], p["severe_ip_decline_pct"], p["ip_swing_pct"]
     idx = panel.index
@@ -1878,23 +1928,35 @@ def definitions_section(panel: pd.DataFrame, lab: pd.DataFrame, masks: dict, par
                       ["depression", "depression", "stagflation"]],
             "note": "收缩期的通胀按整段平均判断，一段收缩只有一个结论"}
     return {"params": dict(p), "labels": [{k: d.get(k) for k in ("id", "code", "name", "term", "color", "desc")} for d in R.LABELS],
-            "flags": R.flag_defs(), "precedence": list(R.PRECEDENCE), "rule_text": R.rule_text(), "terms": terms,
-            "names_changed": names_changed, "grid": grid, "conventions": conventions(masks, idx),
+            "flags": R.flag_defs(), "precedence": list(R.PRECEDENCE), "rule_text": R.rule_text(switch=switch),
+            "terms": terms, "names_changed": names_changed, "grid": grid, "conventions": conventions(masks, idx, switch),
             "interpolations": interpolations(panel), "swing_pct": sw}
 
 
 # ============================================================================ the file
 
-def model_use_section(parts: dict) -> dict:
+def model_use_section(parts: dict, switch: dict | None = None) -> dict:
     verdict = parts["transmission"].get("walk_forward_verdict") or {}
     deltas = verdict.get("oos_r2_delta") or []
     dtxt = "、".join(f"{d['period']} {d['delta']:+.3f}" for d in deltas if isinstance(d, dict) and "delta" in d)
     split = parts["transmission"]["splits"][0]
-    trans_reason = "传导模型不加通胀状态交互项：诊断的走步检验里样本外 R² 变化" + (f" {dtxt}" if dtxt else "不稳定") + "，不显著也不稳定。"
+    if "add_tp10_x_core4" in (verdict.get("changes") or []):
+        # the walk-forward kept one inflation-state term (the term premium in high core inflation, FACTORS_DESIGN §7.4)
+        dd = " / ".join(f"{d['delta']:+.3f}".replace("-", "−") for d in deltas if isinstance(d, dict) and "delta" in d)
+        sw = switch if switch and switch.get("kind") == "interaction" else {"factor": "tp10", "state": "core_yoy",
+                                                                             "lag": 1, "above": FM.HIGH_INFLATION}
+        rule = f"{R.switch_state(sw)}高于 {float(sw['above']):g}% 时，{TERM_CHANGE.get(sw.get('factor'), '这一项')}单独进入"
+        trans_reason = ("传导模型不按通胀状态拆分全部系数" + (f"（整体交互的样本外 R² 变化 {dd}）" if dd else "")
+                        + f"；走步检验只保留了一项：{rule}（见诊断页“缺失因子审计”）。")
+    else:
+        trans_reason = "传导模型不加通胀状态交互项：诊断的走步检验里样本外 R² 变化" + (f" {dtxt}" if dtxt else "不稳定") + "，不显著也不稳定。"
     if "n_sig_5pct" in split:
-        trans_reason += (f"样本内按上月高通胀拆分，{split['n_tests']} 个斜率差异里 {split['n_sig_5pct']} 个 |t| ≥ 1.96，"
-                         f"去掉插值的劳动收入占比后是 {split['n_tests_excl_labor_share']} 个里 {split['n_sig_excl_labor_share']} 个"
-                         f"（偶然约 {split['expected_5pct_excl_labor_share']:.1f} 个）。")
+        trans_reason += (f"样本内按上月高通胀拆分，{split['n_tests']} 个斜率差异里 {split['n_sig_5pct']} 个 |t| ≥ 1.96"
+                         f"（偶然约 {split['expected_5pct']:.1f} 个）")
+        if parts["transmission"].get("labor_share_in_model", True):
+            trans_reason += (f"，去掉劳动收入占比（只在发布月变化）后是 {split['n_tests_excl_labor_share']} 个里 "
+                             f"{split['n_sig_excl_labor_share']} 个（偶然约 {split['expected_5pct_excl_labor_share']:.1f} 个）")
+        trans_reason += "。"
     # the forecast test is its own opt-in step that runs after this one: its verdict is stated only when its file
     # was computed on this build's data (forward.forecast_test)
     ft = parts["forward"].get("forecast_test") or {}
@@ -1959,9 +2021,10 @@ def run(ctx, **_) -> dict:
     timed("engine", lambda: engine_section(ctx, lab, timings))
     episodes, ep_summary = parts.pop("episodes")
     parts["episodes"] = episodes
-    timed("definitions", lambda: definitions_section(panel, lab, masks, parts))
+    switch = transmission_switch(ctx.model.spec)
+    timed("definitions", lambda: definitions_section(panel, lab, masks, parts, switch))
     db = ctx.db
-    use = model_use_section(parts)
+    use = model_use_section(parts, switch)
     timings["total"] = time.time() - t_all
     return {
         "version": 1, "data_end": _ym(panel.index.max()),

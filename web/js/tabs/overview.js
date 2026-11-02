@@ -29,6 +29,8 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     if (n) for (const el of root.querySelectorAll('.ov-nscen')) el.textContent = String(n);
   };
   paintCount();
+  // the missing-factor audit (optional; skipped when /api/meta's `results` says it is absent): one line below
+  const faP = api.optional('factor_audit', meta);
 
   // ---- today's state
   const today = meta?.today?.states || {};
@@ -67,6 +69,19 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
       typeof pdMed === 'number' && Number.isFinite(pdMed) ? `，1973 年以来中位数 ${pdMed.toFixed(0)} 倍` : '',
       '。市盈率、ROIC、自由现金流要不要当宏观因子、估值怎样进入模型：',
       h('a', { href: '#valuation' }, '估值与盈利 →')));
+  }
+  // credit and term: today's GZ spread and term premium (factor_audit.json), and whether the term-premium term is on
+  const fa = await faP;
+  if (!alive()) return;
+  const ft = fa?.today;
+  if (ft?.gz && ft?.tp10 && typeof ft.tp_term_on === 'boolean') {
+    const ok = (x) => typeof x === 'number' && Number.isFinite(x);
+    const rank = (p) => (ok(p) ? `第 ${Math.round(p * 100)} 百分位` : '分位未知');
+    root.append(h('p', { style: { margin: '6px 0 0', fontSize: '13px' } },
+      h('a', { href: '#diagnostics?audit', style: { color: 'inherit' } }, h('b', {}, '信用与期限：'),
+        `GZ 信用利差 ${ok(ft.gz.value) ? ft.gz.value.toFixed(2) : '—'}（1973 年以来${rank(ft.gz.pct_since_1973)}）· `,
+        `ACM 期限溢价 ${ok(ft.tp10.value) ? ft.tp10.value.toFixed(2) : '—'}（${rank(ft.tp10.pct_since_1973)}）· `,
+        `期限溢价项${ft.tp_term_on ? '打开' : '关闭'}`, tpWhy(ft, meta), ' →')));
   }
 
   // ---- resemblance to eras (the full matching is on 历史时代画像, #eras?today)
@@ -161,4 +176,22 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     h('a', { href: `#${id}`, class: 'card', style: { color: 'inherit', textDecoration: 'none' } },
       h('div', { class: 'card-title' }, t), h('div', { class: 'card-sub' }, d)))));
   paintCount();
+}
+
+// Why the term-premium term is on or off today: the reading that decided it (factor_audit.json today: the state
+// `lag` months before the latest month) and the switch's own rule (meta.json, the selected model's interaction
+// factor; the audit file's copy for an older meta).
+function tpWhy(ft, meta) {
+  const ok = (x) => typeof x === 'number' && Number.isFinite(x);
+  const F = Object.fromEntries((meta?.factors || []).map(f => [f.id, f]));
+  const rule = (meta?.model?.spec?.factors || []).map(id => F[id]?.interaction).find(x => x && ok(x.above)) || ft.tp_term_rule;
+  const lag = Number(rule?.lag ?? 1);
+  const when = lag === 1 ? '上月' : `${lag} 个月前`;
+  const name = { core_yoy: '核心 CPI 同比', cpi_yoy: 'CPI 同比' }[rule?.state] || '核心 CPI 同比';
+  const state = /^[A-Za-z]/.test(name) ? ` ${name}` : name;      // 「上月 CPI 同比」, 「上月核心 CPI 同比」
+  const thr = ok(Number(rule?.above)) ? `${String(Number(rule.above))}%` : '门槛';
+  if (ok(ft.core_yoy_prev)) {
+    return `（${when}${state} ${ft.core_yoy_prev.toFixed(2)}%，${ft.core_yoy_prev_month || ''}；${when}高于 ${thr} 时打开）`;
+  }
+  return ok(ft.core_yoy) ? `（最新${state} ${ft.core_yoy.toFixed(2)}%，${ft.core_yoy_month || ''}；${when}高于 ${thr} 时打开）` : '';
 }

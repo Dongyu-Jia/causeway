@@ -12,6 +12,8 @@
 // Deep link: #valuation?<section>. The few numbers the page derives itself (the gap's percentile, half-lives,
 // the probability-weighted P/D) come from the same file and the page says so.
 
+import { CHANGE_LABELS } from './_change_labels.js';
+
 const SECTIONS = [
   ['answer', '问题与回答'], ['today', '今天'], ['history', '历史'], ['regression', '公允值回归'],
   ['kappa', '拉力速度 κ'], ['variants', '变体检验'], ['factors', '因子候选'], ['scenarios', '情景隐含 P/D'],
@@ -27,12 +29,8 @@ const FEAT_COLOR = { real_y10: '#3b5bdb', profit_share: '#2f9e44', infl_expect: 
 const THEORY = { real_y10: '实际利率越高、估值越低', y10: '收益率越高、估值越低', profit_share: '利润占比越高、估值越高' };
 // selection.checks keys, in the order of the rule's ① ② ③ ④
 const CHECKS = [['coverage', '①覆盖率'], ['forward_fan', '②长期分布宽度'], ['gain', '③MAE 改善'], ['forecast_val', '④一年期预测']];
-// walk-forward change ids (same wording as the diagnostics page)
-const CHANGE = { add_valuation: '+估值变动', add_sentiment: '+消费者信心', add_profit_share: '+利润占比', add_capex_share: '+资本开支占比',
-  add_wealth: '+家庭净值', add_white_collar: '+白领就业占比', add_wage: '+普通工资', add_real_y10: '+实际收益率',
-  add_profit_growth: '+利润增长', add_fcf_share: '+利润减资本开支', add_cape: '+CAPE 变动', lags1: '1 个月滞后', lags3: '1–3 个月滞后',
-  regime_inflation: '通胀状态交互', shocks_add: '+结构冲击', shocks_replace_oil: '结构冲击替代油价', 'ridge_0.01': '岭回归 0.01',
-  'ridge_0.05': '岭回归 0.05', window_15: '只用近 15 年', window_25: '只用近 25 年', mlp16: '神经网络 16', mlp32: '神经网络 32' };
+// walk-forward change ids: the diagnostics page's own map (_change_labels.js), so the two pages use one wording
+const CHANGE = CHANGE_LABELS;
 // meta.cma.method in words
 const CMA_METHOD = { valuation_adjusted: '估值调整', historical: '历史漂移' };
 // "% of GDP" (valuation.json data.units) in Chinese; "% of GDP（note）" -> "占 GDP 的 %；note"

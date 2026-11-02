@@ -582,6 +582,15 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
 
   // ======================================================== asset betas by period
   root.append(h('div', { class: 'section-title' }, '资产对宏观因子的敏感度（分时期 β）'));
+  // these betas are the base linear model's (causality.json asset_betas.model: one fixed set of core factors for
+  // every period); the scenarios run the walk-forward's selected model (meta.json), which may differ
+  const betaModel = betas?.model?.describe || '';
+  const engineModel = ui.META.raw?.model?.describe || '';
+  if (betaModel && engineModel && betaModel !== engineModel) {
+    root.append(h('p', { class: 'causality-note', style: { margin: '0 0 10px' } },
+      `这里的 β 来自基准线性模型（${betaModel}：每个时期用同一组核心因子，方便跨时期比较），不是情景引擎所用的走步检验选出的模型（${engineModel}）；`,
+      '后者的因子和样本外表现见 ', h('a', { href: '#diagnostics' }, '诊断与迭代 →')));
+  }
   const betaBox = ui.chartBox();
   const flipWrap = h('div');
   const r2Line = h('p', { class: 'causality-note' });
@@ -649,7 +658,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
           + `<br/>${across}${isNum(r2) ? `<br/>该资产模型 R² ${r2.toFixed(2)}` : ''}${k ? `<br/><b>${KIND[k][0]}</b>` : ''}`;
       } });
     const r2 = betas.r2?.[betaSel] || {};
-    r2Line.textContent = `模型解释力 R²（${per ? periodLabel(per) : ''}）：` + bAssets.map(a => `${ui.assetName(a)} ${isNum(r2[a]) ? r2[a].toFixed(2) : '—'}`).join('，')
+    r2Line.textContent = `${betaModel && betaModel !== engineModel ? '基准模型的' : '模型'}解释力 R²（${per ? periodLabel(per) : ''}）：` + bAssets.map(a => `${ui.assetName(a)} ${isNum(r2[a]) ? r2[a].toFixed(2) : '—'}`).join('，')
       + '。原油和 10 年期美债几乎就是油价和收益率本身（R² 接近 1），属于机械关系。';
   }
 
