@@ -3,6 +3,7 @@
     python -m scenariolab.build                 # cached downloads
     python -m scenariolab.build --refresh       # re-download all data first
     python -m scenariolab.build --only scenarios meta
+    python -m scenariolab.build --only instruments    # the 16 tickers on the scenario paths (~1 min; needs scenarios)
     python -m scenariolab.build --only factor_audit   # the missing-factor audit (~20 s; needs diagnostics.json)
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
     python -m scenariolab.build --only ablation # the engine ablation study (~5 min, not run by default)
@@ -16,13 +17,18 @@ selected model but runs before diagnostics: a build that runs both attributes
 the eras again when the walk-forward changed the selection, as on a fresh
 clone's first build, and --only diagnostics prints a note); factor_audit replicates the
 research round's archive and evaluates the changes against that selected model
-(it reads diagnostics.json's walk-forward); regimes reuses the engine's
+(it reads diagnostics.json's walk-forward); instruments runs the ticker recipes
+on the scenario paths and on the unconditional continuation that follows them to
+year 40 (instrument_paths.npz, instrument_continuation.npz, instrument_meta.json;
+it reads scenario_paths.npz and the scenarios step's scenario_macro.npz, so rebuild
+it after --only scenarios); regimes reuses the engine's
 unconditional reference run that the scenario readouts computed (rebuild it
 after --only scenarios); forecast scores rolling one-year-ahead forecasts and
 needs the scenario paths; valuation tests the valuation state on the backtest
 windows and the forecast and checks itself against backtest.json,
 scenarios.json and forecast.json; portfolio evaluates the preset portfolios on
-the scenario paths; llm writes what the translator would send the model (it
+the scenario paths (and the example ticker portfolio when the instruments step
+has run); llm writes what the translator would send the model (it
 never calls a model: its status runs only `claude --version` and `claude auth
 status`, which spend no usage; its regime section reads regimes.json).
 """
@@ -40,8 +46,8 @@ from .data.panel import load_meta, meta_sources, save_panel
 from .engine.factor_model import ModelSpec
 from .env import load_dotenv
 
-STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "regimes", "forecast",
-         "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
+STEPS = ["panel", "causality", "eras", "diagnostics", "factor_audit", "backtest", "scenarios", "instruments", "regimes",
+         "forecast", "valuation", "portfolio", "llm", "meta", "ablation", "regime_forecast"]
 OPT_IN = {"ablation", "regime_forecast"}   # slow; run with --only <step> (or --all)
 OPTIONAL_PACKAGES = ("anthropic",)   # a step that needs only these and finds them missing is skipped, not failed
 
@@ -73,6 +79,14 @@ def eras_model_stale(out) -> bool:
 
 def _run(module: str, ctx: EngineContext, **kwargs):
     return importlib.import_module(f"scenariolab.{module}").run(ctx, **kwargs)
+
+
+def build_instruments(ctx: EngineContext) -> dict:
+    """The instruments step (INSTRUMENTS_DESIGN §6.1): every ticker on every built-in scenario path
+    (instruments.build: instrument_paths.npz and instrument_meta.json), then on the unconditional continuation
+    that follows the paths to year 40, one 480-month path per scenario path with the portfolio step's seeds
+    (portfolio.tickers: instrument_continuation.npz, its summary added to instrument_meta.json)."""
+    return {"paths": _run("instruments.build", ctx), "continuation": _run("portfolio.tickers", ctx)}
 
 
 def build_meta(ctx: EngineContext) -> dict:
@@ -157,6 +171,7 @@ def main(argv=None) -> int:
     step("factor_audit", lambda: jsonio.dump(_run("analysis.factor_audit", ctx), out / "factor_audit.json"))
     step("backtest", lambda: jsonio.dump(_run("analysis.backtest", ctx), out / "backtest.json"))
     step("scenarios", lambda: _run("scenarios.library", ctx, n_paths=args.paths))
+    step("instruments", lambda: build_instruments(ctx))
     step("regimes", lambda: jsonio.dump(_run("analysis.regimes", ctx), out / "regimes.json"))
     step("forecast", lambda: jsonio.dump(_run("analysis.forecast", ctx), out / "forecast.json"))
     step("valuation", lambda: jsonio.dump(_run("analysis.valuation", ctx), out / "valuation.json"))
@@ -172,6 +187,9 @@ def main(argv=None) -> int:
         # the scenario readouts and regimes.json share the engine's reference run; the regimes tab warns
         # when they come from different builds
         print("[build] note: scenarios were rebuilt without regimes; run --only regimes too", flush=True)
+    if "scenarios" in steps and "instruments" not in steps and (out / "instrument_paths.npz").exists():
+        # the ticker paths belong to the scenario paths they were run on; the portfolio service refuses stale ones
+        print("[build] note: scenarios were rebuilt without instruments; run --only instruments too", flush=True)
     print(f"[build] finished in {time.time() - t_all:.1f}s" + (f"; failed: {failures}" if failures else ""))
     return 1 if failures else 0
 

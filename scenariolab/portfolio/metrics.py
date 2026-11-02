@@ -48,8 +48,10 @@ def portfolio_wealth(total: np.ndarray, weights: np.ndarray, rebalance: str = "m
 
 
 def period_returns(wealth: np.ndarray) -> np.ndarray:
-    """(n, T+1) wealth -> (n, T) simple returns."""
-    return wealth[:, 1:] / wealth[:, :-1] - 1.0
+    """(n, T+1) wealth -> (n, T) simple returns (NaN after a path's wealth reaches 0, e.g. a portfolio of one
+    leveraged fund that is wiped out; the per-path statistics then leave that path out)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return wealth[:, 1:] / wealth[:, :-1] - 1.0
 
 
 def drawdowns(wealth: np.ndarray) -> np.ndarray:

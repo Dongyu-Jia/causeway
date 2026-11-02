@@ -35,6 +35,14 @@ comes out of the price return, so the pro-rata reinvestment holds less of the
 asset that then recovers) and moved no safe rate by more than 0.02 pp. Only the
 cash / price split moves, the total return is fixed, and today's equity yields
 are low (US equity 1.1%), so the pot is mostly bond coupons and cash interest.
+
+A ticker column (portfolio.tickers, INSTRUMENTS_DESIGN §7.3) brings its own
+distributions instead: its payout model's cash per start-of-month value (sticky
+payouts for the BDCs, MLPs, MO, SCHD and BME, 14.3% of NAV for QQQI, the coupon
+yield for TLT, index dividends for QQQ and XLG, nothing for the leveraged funds
+and BRK.B), through the same year_factors. Nothing here depends on where a
+column comes from. cash_flows() and cut_flags() report the pot against the
+withdrawal and a holding's distribution cuts.
 """
 from __future__ import annotations
 
@@ -209,6 +217,40 @@ def simulate(f: YearFactors, weights: np.ndarray, initial: float = 1.0, rate=0.0
         if hold is not None:
             hold[:, y + 1] = h
     return WithdrawalPaths(wealth, ruin, hold)
+
+
+def cash_flows(res: WithdrawalPaths, f: YearFactors, amount, inflation_indexed: bool = True) -> dict:
+    """Per path and year: the cash the start-of-year holdings paid during the year (their income; the pot of the
+    dividend-first rules, reinvested by pro_rata), the year's withdrawal and whether the path was still alive at
+    the start of the year. amount: rate * initial (scalar or (P,)), the year-y withdrawal being amount * CPI_y /
+    CPI_0 when inflation_indexed. Needs simulate(..., record_holdings=True).
+
+    Returns {"pot" (P, Y), "need" (P, Y), "alive" (P, Y)}; a ruined path's pot is 0 from the year after its ruin."""
+    if res.holdings is None:
+        raise ValueError("cash_flows needs simulate(..., record_holdings=True)")
+    Y = res.wealth.shape[1] - 1
+    h = res.holdings[:, :Y]                                   # holdings at the start of each year
+    pot = np.einsum("pya,pya->py", h, f.income[:, :Y])
+    base = np.broadcast_to(np.asarray(amount, dtype=float), (h.shape[0],))
+    need = base[:, None] * (f.cpi[:, 1:Y + 1] if inflation_indexed else np.ones((1, Y)))
+    ry = res.ruin_year[:, None]
+    alive = (ry == 0) | (ry >= np.arange(1, Y + 1)[None, :])
+    return {"pot": pot, "need": need, "alive": alive}
+
+
+def cut_flags(f: YearFactors, column: int, years: int = 10, cut: float = 0.2) -> np.ndarray:
+    """Per path, whether one unit held from t = 0 (distributions not reinvested) receives in some year 2..`years`
+    at least `cut` less cash than in year 1 (NaN on a path whose year-1 cash is 0): the distribution-cut pressure
+    of a holding (INSTRUMENTS_DESIGN §4.2, §7.3)."""
+    Y = min(int(years), f.years)
+    inc, pr = f.income[:, :Y, column], f.price[:, :Y, column]
+    unit = np.concatenate([np.ones((inc.shape[0], 1)), np.cumprod(pr[:, :-1], axis=1)], axis=1)
+    cash = inc * unit
+    first = cash[:, 0]
+    if Y < 2:
+        return np.where(first > 0, False, np.nan)
+    low = cash[:, 1:].min(axis=1)
+    return np.where(first > 0, low < (1.0 - cut) * first, np.nan)
 
 
 def critical_rates(f: YearFactors, weights: np.ndarray, strategy: str, inflation_indexed: bool = True,

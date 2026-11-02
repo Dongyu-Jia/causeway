@@ -1,0 +1,232 @@
+{
+ "month": "2026-09",
+ "date": "2026-09-30",
+ "vol": {
+  "lrv_ndx": -6.196702641157682,
+  "lrv_ndx_prev": -5.968731282401417,
+  "lrv_ndx_q": -4.668920052079876,
+  "lrv_mkt": -6.954604230339704,
+  "lrv_mkt_prev": -6.922146027486379,
+  "lrv_mkt_q": -5.7557274761691835,
+  "dd_ndx": 0.0,
+  "dd_mkt": -0.008511222273319685,
+  "vxn": 0.22460000000000002,
+  "ndx_close": 30408.5,
+  "rv_ndx_ann_vol": 0.15631251167020704,
+  "rv_mkt_ann_vol": 0.10700830932677162
+ },
+ "rates": {
+  "y10": 0.0529,
+  "y20": 0.056799999999999996,
+  "y30": 0.0564,
+  "dff": 0.0388
+ },
+ "prices": {
+  "QLD": {
+   "price": 95.6425,
+   "asof": "2026-09-30",
+   "basis": "ProShares NAV"
+  },
+  "TQQQ": {
+   "price": 77.9601,
+   "asof": "2026-09-30",
+   "basis": "ProShares NAV"
+  },
+  "QQQ": {
+   "price": 739.6142335519307,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 rolled to 2026-09-30 by the NDX price return",
+   "from": "2026-06-30",
+   "method": "ndx"
+  },
+  "QQQI": {
+   "price": 54.94274911526224,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 rolled to 2026-09-30 by the QQQI model (beta x the NDX return, less the NAV-rate distributions)",
+   "from": "2026-06-30",
+   "method": "ndx_cc"
+  },
+  "TLT": {
+   "price": 76.00916971035441,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 rolled to 2026-09-30 by the duration model D(y) dy on the TLT yield (0.513 y20 + 0.487 y30)",
+   "from": "2026-06-30",
+   "method": "tlt"
+  },
+  "GLD": {
+   "price": 375.93239990066223,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 rolled to 2026-09-30 by the ratio of the London monthly-average gold price, less the fee",
+   "from": "2026-06-30",
+   "method": "gold"
+  },
+  "XLG": {
+   "price": 61.933344554771466,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "SCHD": {
+   "price": 30.692183066375126,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MO": {
+   "price": 70.79339333815001,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "BRK.B": {
+   "price": 480.65516539556256,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MAIN": {
+   "price": 50.85105837201601,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "ARCC": {
+   "price": 19.1,
+   "asof": "2026-09-30",
+   "basis": "SEC XBRL market price 2026-09-30"
+  },
+  "CSWC": {
+   "price": 23.19450613389706,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "EPD": {
+   "price": 38.95760106109626,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MPLX": {
+   "price": 60.479258846789826,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "BME": {
+   "price": 44.02116782349295,
+   "asof": "2026-09-30",
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  }
+ },
+ "estimated": {
+  "XLG": {
+   "price": 61.933344554771466,
+   "D_last_q": 0.095,
+   "D_ttm": 0.38,
+   "yield_ttm": 0.006135628597676372,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "SCHD": {
+   "price": 30.692183066375126,
+   "D_last_q": 0.27,
+   "D_ttm": 1.08,
+   "yield_ttm": 0.035188112805934486,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MO": {
+   "price": 70.79339333815001,
+   "D_last_q": 1.11,
+   "D_ttm": 4.29,
+   "yield_ttm": 0.0605988750886469,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "BRK.B": {
+   "price": 480.65516539556256,
+   "D_last_q": 0.0,
+   "D_ttm": 0.0,
+   "yield_ttm": 0.0,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MAIN": {
+   "price": 50.85105837201601,
+   "D_last_q": 1.08,
+   "D_ttm": 4.300000000000001,
+   "yield_ttm": 0.08456067853184243,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)",
+   "nav": 33.92,
+   "nav_asof": "2026-06-30",
+   "premium_log": 0.4048961249632343
+  },
+  "ARCC": {
+   "price": 19.1,
+   "D_last_q": 0.48,
+   "D_ttm": 1.92,
+   "yield_ttm": 0.10052356020942407,
+   "asof": "2026-09-30",
+   "estimated_start": false,
+   "basis": "SEC XBRL market price 2026-09-30",
+   "nav": 19.31,
+   "nav_asof": "2026-09-30",
+   "premium_log": -0.0109347613878387
+  },
+  "CSWC": {
+   "price": 23.19450613389706,
+   "D_last_q": 0.64,
+   "D_ttm": 2.56,
+   "yield_ttm": 0.11037096393523761,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)",
+   "nav": 16.61,
+   "nav_asof": "2026-06-30",
+   "premium_log": 0.3339105224310281
+  },
+  "EPD": {
+   "price": 38.95760106109626,
+   "D_last_q": 0.55,
+   "D_ttm": 2.1950000000000003,
+   "yield_ttm": 0.05634330503455885,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "MPLX": {
+   "price": 60.479258846789826,
+   "D_last_q": 1.0765,
+   "D_ttm": 4.30536,
+   "yield_ttm": 0.07118738030349597,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)"
+  },
+  "BME": {
+   "price": 44.02116782349295,
+   "D_last_q": 0.785,
+   "D_ttm": 3.1425,
+   "yield_ttm": 0.0713861116224847,
+   "asof": "2026-09-30",
+   "estimated_start": true,
+   "basis": "13F 2026-06-30 price rolled to 2026-09-30 by the recipe's systematic return on the actual core quarter (residual unknown)",
+   "nav": 44.22,
+   "nav_asof": "2026-06-30",
+   "premium_log": -0.004506570298671812
+  }
+ },
+ "source": "params/anchors.json (packaged; anchors.compute on the 2026-11-01 import)",
+ "vintages": {
+  "ndx": "2026-10-29",
+  "vxn": "2026-10-30",
+  "us_market_daily": "2026-09-30",
+  "dgs20": "2026-10-29",
+  "dgs30": "2026-10-29",
+  "qld_nav": "2026-10-30",
+  "tqqq_nav": "2026-10-30",
+  "prices_13f": "2026-06-30",
+  "nport": "2026-08"
+ },
+ "version": "instruments 1 (2026-11-01): anchors.compute(\"2026-09\") on data/raw/instruments",
+ "note": "Fallback start state for the 2026-09 core anchor. anchors.current() recomputes it from data when data/raw/instruments is present (e.g. after the 13F 2026Q3 data set replaces the rolled 2026-09-30 prices)."
+}

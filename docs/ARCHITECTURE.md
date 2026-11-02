@@ -2083,11 +2083,11 @@ check it against the registry's `dist.integrity`, keep only
 `dist/echarts.min.js`, LICENSE and NOTICE, and update the version comment in
 index.html and the README.
 
-* **Router** (app.js). `TABS` lists 13 tabs in four groups: 历史与因果
+* **Router** (app.js). `TABS` lists 14 tabs in four groups: 历史与因果
   (overview 总览, eras 历史时代画像, regimes 宏观体制, causality 因果传导), 验证 (forecast
   一年期预测, backtest 回测：模拟 vs 实际, diagnostics 诊断与迭代, valuation
-  估值与盈利), 未来 (scenarios 未来情景, lab 情景实验室（LLM）, portfolio
-  组合评估, withdrawal 提取与破产概率), 说明 (method 方法与数据). A route
+  估值与盈利), 未来 (scenarios 未来情景, lab 情景实验室（LLM）, instruments 标的推演,
+  portfolio 组合评估, withdrawal 提取与破产概率), 说明 (method 方法与数据). A route
   `#<tab>?<param>` lazy-imports `./tabs/<tab>.js` and calls
   `render(root, ctx)`; root is a fresh container that is detached when the
   reader navigates away, so a slow render can never draw on the next page.

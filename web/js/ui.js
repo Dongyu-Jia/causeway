@@ -183,6 +183,34 @@ export function select(options, value, onChange) {
   return el;
 }
 
+// Keep `el` scrolled into view while the layout above it settles: results that arrive later, tables that stack a
+// frame after they are drawn (fitTable) and charts that size themselves all push a deep-linked section down after a
+// one-off scrollIntoView. The scroll is re-issued in the frame after every size change of the page until the reader
+// scrolls, touches, clicks or types, or `ms` pass. Returns a function that stops it (a new pin stops the last one).
+let unpin = null;
+export function pinIntoView(el, { block = 'start', ms = 6000 } = {}) {
+  if (unpin) unpin();
+  if (!el || !el.isConnected) return () => {};
+  const go = () => { if (el.isConnected) el.scrollIntoView({ block }); else stop(); };
+  let raf = 0, timer = 0;
+  const ro = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(() => { cancelAnimationFrame(raf); raf = requestAnimationFrame(go); }) : null;
+  const events = ['wheel', 'touchstart', 'keydown', 'mousedown'];
+  function stop() {
+    ro?.disconnect();
+    cancelAnimationFrame(raf);
+    clearTimeout(timer);
+    events.forEach(t => window.removeEventListener(t, stop, true));
+    if (unpin === stop) unpin = null;
+  }
+  go();
+  ro?.observe(document.body);
+  events.forEach(t => window.addEventListener(t, stop, { capture: true, passive: true }));
+  timer = setTimeout(stop, ms);
+  unpin = stop;
+  return stop;
+}
+
 // Rewrite the "?param" part of the address for the page `tab` without navigating, but only while
 // that page is still the one in the address bar and still alive: a slow render or a late result
 // (an engine run finishing after the reader left) must not drag the URL, and the next hashchange,

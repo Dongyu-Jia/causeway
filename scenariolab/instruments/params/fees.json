@@ -1,0 +1,35 @@
+{
+  "version": "instruments 1 (2026-11-01)",
+  "note": "The only fee table of the instrument layer (T14: no fee literal anywhere else). Annual net expense ratios, decimal. A schedule entry applies from its `from` date (inclusive) until the next entry; `null` = since inception. ProShares fiscal years run June to May (FY2026 = 2025-06-01..2026-05-31). instr-data's old table (QQQ 0.20, QLD 0.95, TQQQ 0.84) is out of date.",
+  "funds": {
+    "QQQ": {
+      "schedule": [
+        {"from": null, "fee": 0.0020, "source": "QQQ Trust (UIT) annual reports N-30B-2, expense ratio 0.20%"},
+        {"from": "2025-12-20", "fee": 0.0018, "source": "Invesco QQQ Trust converted to an open-end fund 2025-12-20: unitary fee 0.18% (N-CSRS 2026)"}
+      ]
+    },
+    "QLD": {
+      "schedule": [
+        {"from": null, "fee": 0.0095, "source": "ProShares summary prospectuses (497K) to FY2025"},
+        {"from": "2025-06-01", "fee": 0.0089, "source": "ProShares FY2026 summary prospectus (497K)"}
+      ]
+    },
+    "TQQQ": {
+      "schedule": [
+        {"from": null, "fee": 0.0095, "source": "ProShares summary prospectuses (497K) to FY2021"},
+        {"from": "2021-06-01", "fee": 0.0086, "source": "497K FY2022"},
+        {"from": "2022-06-01", "fee": 0.0088, "source": "497K FY2023"},
+        {"from": "2023-06-01", "fee": 0.0084, "source": "497K FY2024"},
+        {"from": "2024-06-01", "fee": 0.0082, "source": "497K FY2025"},
+        {"from": "2025-06-01", "fee": 0.0078, "source": "497K FY2026"}
+      ]
+    },
+    "QQQI": {"schedule": [{"from": null, "fee": 0.0068, "source": "NEOS QQQI prospectus and fact sheet (2026-09-30)"}]},
+    "TLT": {"schedule": [{"from": null, "fee": 0.0015, "source": "iShares 20+ Year Treasury Bond ETF summary prospectus (EDGAR 497K)"}]},
+    "GLD": {"schedule": [{"from": null, "fee": 0.0040, "source": "SPDR Gold Trust sponsor fee 0.40% (paid daily in gold)"}]},
+    "XLG": {"schedule": [{"from": null, "fee": 0.0020, "source": "Invesco S&P 500 Top 50 ETF annual report (EDGAR N-CSR)"}]},
+    "SCHD": {"schedule": [{"from": null, "fee": 0.0006, "source": "Schwab Strategic Trust annual report (EDGAR N-CSR)"}]},
+    "BME": {"schedule": [{"from": null, "fee": 0.0110, "source": "BlackRock Health Sciences Term Trust N-CSR (EDGAR) total expense ratio; enters only the alpha prior"}]},
+    "QYLD": {"schedule": [{"from": null, "fee": 0.0060, "source": "Global X Nasdaq 100 Covered Call ETF N-PORT / prospectus (EDGAR); validation only"}]}
+  }
+}

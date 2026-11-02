@@ -11,7 +11,11 @@ are added to the phase's own drifts; the explanations (one per calibrated
 phase, with an engine_check against the simulation) are attached to the
 detail JSON as the list detail["calibration"]. Probabilities come from
 probabilities.run. Outputs: results/scenarios/<id>.json, results/scenarios.json
-and results/scenario_paths.npz (arrays ordered like the index, by probability).
+and results/scenario_paths.npz (arrays ordered like the index, by probability),
+and next to it results/scenario_macro.npz: the y10 / ff / Baa - 10y level paths
+and the drawn months of the same runs, which the instrument layer needs and the
+paths file does not keep (save_macro; collected from the SimOutputs already in
+hand, so no scenario is simulated again and no stored number changes).
 Each index entry carries the headline numbers and, under "assets", every asset's
 cagr_p5 / cagr_p50 / cagr_p95 / real_cagr_p50 / max_dd_p50, so the UI can compare
 scenarios without loading every detail file; under "regimes", the year-1 and
@@ -285,4 +289,33 @@ def run(ctx: EngineContext, n_paths: int = 600, out_dir: Path | None = None,
             labels=np.array(details[0]["labels"]), probs=np.array([d["prob"] for d in details]),
         )
         tmp.replace(out_dir / "scenario_paths.npz")
+        save_macro(out_dir, sims, [d["id"] for d in details], ctx.db)
     return index
+
+
+MACRO_FILE = "scenario_macro.npz"
+
+
+def save_macro(out_dir: Path, sims: list, ids: list[str], db) -> Path | None:
+    """results/scenario_macro.npz for the instrument layer (INSTRUMENTS_DESIGN §2.8, §6.1): y10, ff and spread
+    (S, N, T + 1) float32, the drawn month positions drawn_idx (S, N, T) int16 with db_dates mapping them, the ids
+    and the fingerprint of the stored paths (instruments.build.paths_fingerprint: the ids and the first two paths
+    of each scenario, as scenario_paths.npz stores them), in the order of scenario_paths.npz. Only reads the
+    SimOutputs. A failure is reported and leaves the paths alone: the instruments step then simulates the
+    scenarios again with the build's seeds (checked bit for bit against scenario_paths.npz) and writes this file."""
+    try:
+        from ..instruments.build import paths_fingerprint
+        ids_arr = np.array([str(i) for i in ids])
+        first = np.stack([np.asarray(s.total[:2], dtype=np.float32) for s in sims])      # what the npz stores
+        arrays = {k: np.stack([np.asarray(s.macro[k], dtype=np.float32) for s in sims]) for k in ("y10", "ff", "spread")}
+        arrays.update(drawn_idx=np.stack([np.asarray(s.idx, dtype=np.int16) for s in sims]), ids=ids_arr,
+                      db_dates=np.asarray(db.dates.strftime("%Y-%m")).astype("U7"),
+                      paths_fingerprint=np.array(paths_fingerprint({"ids": ids_arr, "total": first})))
+        tmp = out_dir / "scenario_macro.tmp.npz"
+        np.savez_compressed(tmp, **arrays)
+        tmp.replace(out_dir / MACRO_FILE)
+        return out_dir / MACRO_FILE
+    except Exception as err:  # noqa: BLE001 - the scenario paths are written already; the instruments step can redo this
+        print(f"[scenarios] {MACRO_FILE} not written ({type(err).__name__}: {err}); "
+              "the instruments step will simulate the scenarios again for their macro paths", flush=True)
+        return None

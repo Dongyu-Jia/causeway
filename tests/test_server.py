@@ -49,6 +49,15 @@ def test_regimes_tab_is_routed_after_the_eras_tab():
     assert "api.optional('regime_forecast', meta)" in r.text and "api.optional('scenarios', meta)" in r.text
 
 
+def test_instruments_tab_is_routed_between_the_lab_and_the_portfolio():
+    """标的推演 (INSTRUMENTS_DESIGN §7.1) has its own tab in 未来, after 情景实验室 and before 组合评估."""
+    app_js = client.get("/js/app.js").text
+    assert "{ id: 'instruments', name: '标的推演' }" in app_js
+    assert app_js.index("id: 'lab'") < app_js.index("id: 'instruments'") < app_js.index("id: 'portfolio'")
+    r = client.get("/js/tabs/instruments.js")
+    assert r.status_code == 200 and "export async function render" in r.text and "projection(" in r.text
+
+
 def test_tables_that_do_not_fit_wrap_then_stack():
     """Every tab's tables are watched: too wide for the card -> cells wrap -> rows become labelled blocks."""
     assert "ui.watchTables(view)" in client.get("/js/app.js").text
