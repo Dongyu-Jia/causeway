@@ -3,8 +3,8 @@
 This file is the contract every module codes against. If you change a shape
 here, change every producer and consumer of it.
 
-Example numbers come from the build of 2026-11-01 (`meta.json` `built_at`
-2026-11-01T17:50:45Z, data through 2026-09). They move with every data
+Example numbers come from the build of 2026-11-02 (`meta.json` `built_at`
+2026-11-02T01:02:07Z, data through 2026-09). They move with every data
 update; the shapes and rules do not.
 
 ## Layout
@@ -13,7 +13,8 @@ update; the shapes and rules do not.
 scenariolab/
   __init__.py              package version
   config.py                shared ids and engine settings: paths, MODEL_START, HORIZON_MONTHS, BLOCK_MONTHS,
-                           RARE_MONTHS, RESIDUALS, EXOGENOUS_SHOCKS, ERAS, ASSETS, FACTORS, STATES, VALUATION
+                           RARE_MONTHS, RESIDUALS, EXOGENOUS_SHOCKS, ERAS, ASSETS, FACTORS, STATES, VALUATION,
+                           REGIMES
   env.py                   minimal .env loader (KEY=VALUE lines; never overrides a variable that is already set)
   jsonio.py                JSON I/O: numpy/pandas-safe, NaN/inf -> null, floats to 6 decimals, atomic writes
   context.py               EngineContext (panel + selected model + MonthDB + Anchor + CMA); get_context()
@@ -30,9 +31,15 @@ scenariolab/
   engine/simulate.py       MonthDB, Anchor, capital_market_assumptions(), ValuationModel, simulate(),
                            Attribution (the additive split of each simulated return, attribution=True)
   engine/summary.py        wealth paths, fans, representative path, Brownian-bridge candles, correlations
+  engine/regimes.py        the macro-regime classifier (numpy, pandas, config only): classify(), classify_panel(),
+                           classify_sim(), regime_columns() / asof_columns() (the rg_ columns), nowcast(),
+                           validate_nber(), rule_text() and the conventions (runs, window_mask, rng_for, …)
   scenarios/schema.py      spec schema (YAML and the LLM JSON schema), validate_spec(), allowed_variables()
   scenarios/runner.py      run_spec(ctx, spec) -> (detail dict, SimOutput); phase_pools(); summarize(); headline();
-                           attribution_summary() (assets[a].attribution)
+                           attribution_summary() (assets[a].attribution); reference_simulation() (the engine's
+                           unconditional reference run the regime readouts compare with)
+  scenarios/regime_views.py   the `regime` phase key (aliases, expansion into rg_ views), checks W1-W11, the
+                           regime readout (detail["regimes"]), the library's regime fields, the translator's rule
   scenarios/library.py     runs specs/*.yaml -> results/scenarios.json, scenarios/<id>.json, scenario_paths.npz
   scenarios/probabilities.py  prior x likelihood(today)^gamma -> posterior scenario probabilities
   scenarios/calibrate.py   income-distribution -> consumption calculator (a spec's `calibration` block)
@@ -47,6 +54,10 @@ scenariolab/
                            its reconciliation with the scenario mixture) + data/ledger/ (the live record)
   analysis/valuation.py    -> results/valuation.json (P/E, ROIC, FCF as factors? valuation-state variants)
   analysis/ablation.py     -> results/ablation.json (engine ablation; opt-in build step)
+  analysis/regimes.py      -> results/regimes.json (macro regimes: nowcast, NBER validation, assets, episodes,
+                           transitions, forward returns, eras, the engine's regimes, why they stay out of the model)
+  analysis/regime_forecast.py  -> results/regime_forecast.json (does the real-time regime improve the one-year
+                           forecast? opt-in build step)
   portfolio/metrics.py     portfolio wealth (rebalance monthly / annual / none), path metrics, weighted stats
   portfolio/withdrawal.py  three withdrawal strategies, ruin, critical (safe) withdrawal rates
   portfolio/service.py     evaluate_portfolio(), evaluate_withdrawal() for the API; build step ->
@@ -61,9 +72,9 @@ web/
   js/api.js                fetch wrapper (GET results cached per page load)
   js/ui.js                 DOM helpers, number formats, colour classes, META lookups
   js/charts.js             ECharts helpers and their lifecycle, K-line colours
-  js/tabs/<id>.js          one module per tab (12, see "Web app")
+  js/tabs/<id>.js          one module per tab (13, see "Web app")
   js/tabs/_scenario_detail.js, js/tabs/_weights.js   shared helpers (a leading underscore = not a tab)
-tests/                     pytest suite (15 files, see "Testing")
+tests/                     pytest suite (18 files, see "Testing")
 data/                      raw/, processed/, results/, ledger/ (git-ignored, built locally; ledger/ is the
                            append-only record of live one-year forecasts, see "Forecast ledger")
 docs/                      ARCHITECTURE.md (this file), screenshots/ (the README's four PNGs)
@@ -89,6 +100,20 @@ CONTRIBUTING.md            setup, build, tests, adding a scenario or a data sour
   for re-anchoring), `e_<shock>` (structural shocks, merged from
   processed/structural_shocks.csv by `context.load_panel_with_shocks()` when
   present).
+* The `rg_` family (macro regimes, engine/regimes.py) is computed on load and
+  never stored: `load_panel_with_shocks()` appends `regimes.regime_columns(panel)`
+  after the `e_` merge when the panel has the three inputs (s_cpi_yoy,
+  lvl_unrate, lvl_ip), about 0.06 s. 18 columns, 0/1 floats, NaN where the
+  label is unknown (before 1948-01, or a month without its own CPI,
+  unemployment and IP readings): the ex-post label one-hot `rg_expansion`
+  `rg_inflation` `rg_deflation` `rg_recession` `rg_depression`
+  `rg_stagflation`, the ex-post flags `rg_contraction` `rg_severe`
+  `rg_high_infl` `rg_cpi_neg`, and the real-time (one-sided) `rg_rt_<label>`
+  (6), `rg_rt_contraction`, `rg_rt_severe`. They are never written to
+  panel_monthly.csv: an ex-post label depends on later data, so a stored column
+  would be right only for windows ending today, and a parameter change needs no
+  panel rebuild. Scenario views may use the ex-post ones (see "Scenario spec");
+  `rg_rt_` views are refused.
 * Models are estimated from `config.MODEL_START` (1973-01). The MonthDB holds
   the months from 1973-02 to the last panel month that have every required
   column: 644 months in the current build.
@@ -100,8 +125,8 @@ CONTRIBUTING.md            setup, build, tests, adding a scenario or a data sour
 * UI text and API error details are Simplified Chinese. Code, ids and comments
   are English.
 * Every analysis module exposes `run(ctx, ...) -> dict`. build.py writes the
-  returned dict for causality, eras, diagnostics, backtest, forecast,
-  valuation, meta and ablation; scenarios.library, portfolio.service and
+  returned dict for causality, eras, diagnostics, backtest, regimes, forecast,
+  valuation, meta, ablation and regime_forecast; scenarios.library, portfolio.service and
   llm.translator write their own files; diagnostics also writes
   model_selection.json, causality also writes
   processed/structural_shocks.csv, forecast appends its live forecast to
@@ -118,17 +143,19 @@ CONTRIBUTING.md            setup, build, tests, adding a scenario or a data sour
 python -m scenariolab.build                     # every default step (all but ablation)
 python -m scenariolab.build --refresh           # re-download every source first
 python -m scenariolab.build --skip panel        # everything from the cached panel
-python -m scenariolab.build --only scenarios forecast valuation portfolio llm
+python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm
 python -m scenariolab.build --paths 1000        # paths per built-in scenario (default 600)
 python -m scenariolab.build --only ablation     # the opt-in engine ablation (~5 min)
-python -m scenariolab.build --all               # every step, ablation included
+python -m scenariolab.build --only regime_forecast   # the opt-in regime forecast test (~2 min)
+python -m scenariolab.build --all               # every step, both opt-in steps included
 ```
 
-`STEPS = [panel, causality, eras, diagnostics, backtest, scenarios, forecast,
-valuation, portfolio, llm, meta, ablation]` always run in this order, whatever
-order `--only` lists them in. `OPT_IN = {"ablation"}` is left out of the
-default set: `--all` adds it, `--only` picks any steps (opt-in ones included),
-`--skip` removes steps from either. `--paths N` changes only the scenarios step
+`STEPS = [panel, causality, eras, diagnostics, backtest, scenarios, regimes,
+forecast, valuation, portfolio, llm, meta, ablation, regime_forecast]` always
+run in this order, whatever order `--only` lists them in. `OPT_IN =
+{"ablation", "regime_forecast"}` is left out of the default set: `--all` adds
+them, `--only` picks any steps (opt-in ones included), `--skip` removes steps
+from either. `--paths N` changes only the scenarios step
 (the backtest's 400, the forecast's 1000, and the studies' 400 per window and
 600 per scenario run are fixed in their modules). Without `--refresh` the panel step downloads only the
 files that are missing (the optional Shiller workbook included: 2 attempts, 60 s
@@ -149,35 +176,52 @@ data downloaded) anyway.
 | diagnostics | `analysis.diagnostics.run` | panel + shocks | results/diagnostics.json, results/model_selection.json |
 | backtest | `analysis.backtest.run` | panel, model_selection.json | results/backtest.json |
 | scenarios | `scenarios.library.run` | specs/*.yaml, model_selection.json | results/scenarios.json, results/scenarios/<id>.json, results/scenario_paths.npz |
+| regimes | `analysis.regimes.run` | panel (+ the rg_ columns), the MonthDB, the cached reference run (`runner.reference_simulation`, shared with the scenario readouts), diagnostics.json (the transmission walk-forward verdict, optional), data/raw/fred (the 2025-10 interpolation note, cache only, optional) | results/regimes.json |
 | forecast | `analysis.forecast.run` | panel, model_selection.json, scenario_paths.npz (live scenario mixture), results/scenarios/<id>.json (each built-in's validated spec, re-run with runner.run_spec at library.seed_for(id) and the npz path count for its year-one macro paths; this reproduces the npz exactly, `live.reconciliation.paths_reproduced`), data/ledger/*.json | results/forecast.json; appends data/ledger/forecast_<origin>.json |
-| valuation | `analysis.valuation.run` | panel, forecast.json (analog_ens, reproduction check), backtest.json and scenarios.json (consistency checks), data/raw/shiller (cache only, never downloads) | results/valuation.json |
+| valuation | `analysis.valuation.run` | panel, forecast.json (analog_share, reproduction check), backtest.json and scenarios.json (consistency checks), data/raw/shiller (cache only, never downloads) | results/valuation.json |
 | portfolio | `portfolio.service.run` | the context (build_continuation), scenario_paths.npz, scenarios.json | results/continuation_paths.npz, results/portfolio_default.json |
 | llm | `llm.translator.run` | specs/*.yaml (few-shot examples), the MonthDB | results/llm_translator.json |
 | meta | `build.build_meta` | panel_meta.json + `data.panel.SOURCES` (`meta_sources`), the context, `translator.status()` | results/meta.json |
 | ablation (opt-in) | `analysis.ablation.run` | panel, backtest.json (reproduction check), scenarios.json | results/ablation.json |
+| regime_forecast (opt-in) | `analysis.regime_forecast.run` | panel (real-time labels from `panel.loc[:t]` only), model_selection.json, forecast.json (optional: only the check that the module's own re-selection gives forecast.json's share and analog medians, `baseline.forecast_json`) | results/regime_forecast.json |
 
 The context is loaded with `selection=False` before causality and again after
 it (to merge the fresh shocks); after diagnostics it is loaded with
 `selection=True`, so backtest and every later step use "today's transmission"
-from model_selection.json. A default build without downloads takes about 4
-minutes, most of it the valuation step. The last full build (`--all --skip
-panel`, 2026-11-01) took 532 s with a peak RSS of 2.6 GB: causality 2.7 s, eras
-0.4, diagnostics 6.9, backtest 21.5, scenarios 6.7, forecast 13.7, valuation
-151.2 (`valuation.json` `settings.seconds` 151.1), portfolio 19.7 (most of it
-the 40-year continuation), llm 0.8, meta 0.0, ablation 307.9; 224 s without
-the ablation.
+from model_selection.json. A default build without downloads takes about 5
+minutes, most of it the valuation step. The last build of every step but panel
+and ablation (`--only causality eras diagnostics backtest scenarios regimes
+forecast valuation portfolio llm meta regime_forecast`, 2026-11-02) took 388 s
+(peak RSS 2.1 GB): causality 2.8 s, eras 0.4, diagnostics 9.7, backtest 22.2,
+scenarios 11.3 (13 regime readouts and the reference run included), regimes
+37.5, forecast 16.1, valuation 164.2 (`valuation.json` `settings.seconds`
+164.1), portfolio 22.0 (most of it the 40-year continuation), llm 1.0, meta
+0.0, regime_forecast 100.7 (its walk-forward 80 s); 287 s for the default
+steps. `--only regimes llm` ran once more after it (41 s), so regimes.json's
+`forward.forecast_test` sees the new regime_forecast.json. The opt-in ablation
+took 308 s in an earlier full build (peak RSS 2.6 GB).
 
 Partial rebuilds:
 
 * After editing a built-in spec, or after `--only scenarios`, rebuild
-  forecast, valuation, portfolio and llm as well
-  (`--only scenarios forecast valuation portfolio llm`): forecast mixes the
+  regimes, forecast, valuation, portfolio and llm as well
+  (`--only scenarios regimes forecast valuation portfolio llm`): regimes.json's
+  `engine.reference` and the scenario details' `regimes.phases[].reference`
+  blocks come from the same cached reference run (the build prints a reminder
+  when scenarios ran without regimes, and the 宏观体制 tab warns when
+  `regimes.data_end` differs from the scenario start), forecast mixes the
   scenario paths into its live forecast, valuation compares its own copy of
   the scenario results with scenarios.json (the 估值与盈利 page asks for
   `--only valuation` when they differ), portfolio_default.json is computed on
   the paths, and the translator's few-shot examples are built-in specs.
   The portfolio step also rebuilds continuation_paths.npz, whose start must
   match the scenario paths' first label.
+* After `--only regimes`, rebuild llm too: the translator's prompt quotes the
+  study numbers of regimes.json `engine.studies` only when its `data_end` is
+  the anchor month (a full build runs llm after regimes).
+* After `--only forecast`, rebuild valuation (its forecast block re-runs the
+  42 origins at forecast.json's `analog_share`, `settings.baseline_reproduces_forecast`)
+  and, if it is kept, regime_forecast.
 * A different model in model_selection.json changes every later step. The
   eras step fits the selected model for its attribution but runs before
   diagnostics, so after a walk-forward that changes the selection run
@@ -199,9 +243,9 @@ Module entry points: `python -m scenariolab.analysis.ablation [--paths 400]
 [--seeds 11 12 13 14 15] [--scen-dir DIR] [--scen-paths 600] [--no-scenarios]
 [--no-forecast] [--forecast-paths 1000]`; `python -m scenariolab.llm.translator
 "<叙事>" [--run] [--yaml OUT] [--horizon N] [--paths N] [--model ID]
-[--print-prompt]`. analysis.backtest, forecast, diagnostics, eras and
-causality also run as `python -m scenariolab.analysis.<name>` and write their
-own result file (forecast also appends to the ledger); `python -m
+[--print-prompt]`. analysis.backtest, forecast, diagnostics, eras, causality,
+regimes and regime_forecast also run as `python -m scenariolab.analysis.<name>`
+and write their own result file (forecast also appends to the ledger); `python -m
 scenariolab.portfolio.service` loads an EngineContext itself and writes
 continuation_paths.npz and portfolio_default.json.
 
@@ -220,6 +264,7 @@ continuation_paths.npz and portfolio_default.json.
 | `STATES` | 30 ids | level variables (era fingerprints, views, today's state); `endogenous` (cape) warns as a view |
 | `ERAS` | 9 eras, 1955-01 .. today | the era of a month (`simulate.era_of`), fingerprints, a phase's era mix; the simulator draws only months from 1973 on |
 | `ASSETS` | 13 ids | ids, names, data proxies, `group`, and the `income` source (dividend / coupon / interest / none) |
+| `REGIMES` | see below | the macro-regime classifier (engine/regimes.py) and its conventions; changes no simulated number |
 
 `FACTORS`: core = oil, ip, cpi_goods, cpi_services, ff, y10, spread, usd,
 unrate, labor_share; candidates = profit_share, capex_share, wealth (end.),
@@ -240,6 +285,23 @@ a MonthDB month needs every non-optional `f_` column.
 | `cma` | "historical" | the drift the pull is added to: "historical" or "valuation_state" |
 | `income` | "constant" | equity income: the anchor yield, or "path" = yield_0 x (P/D_0 / P/D_t)^beta |
 
+`REGIMES` (the one block of conventions every regime consumer uses):
+
+| Key | Value | Meaning |
+|---|---|---|
+| `params` | ip_swing_pct 3.0, u_rise_pp 0.5, u_smooth_months 3, severe_ip_decline_pct 15.0, high_inflation_pct 4.0, cpi_neg_pct 0.0, core_low_pct 1.0 | contraction = IP 3% below its peak confirmed by a 0.5 pp rise of the 3-month unemployment rate from its low in the leg; severe = the leg's IP fall reaches 15%; high inflation = CPI y/y > 4% in the same month (the transmission dummy of `ModelSpec.regime` uses the previous month; a test asserts both thresholds are 4.0); cpi_neg = CPI y/y < 0; core_low = core CPI y/y < 1% |
+| `labels` | expansion 扩张, inflation 通胀, deflation 物价负增长 (term 通缩), recession 衰退, depression 深度衰退 (term 萧条), stagflation 滞胀 | id, Chinese name, the user's term it maps, colour and description, in code order 0..5. Precedence: 滞胀 > 深度衰退 > 衰退 > 物价负增长 > 通胀 > 扩张 |
+| `first_month` | "1948-01" | earlier months are unknown (NaN rg_ columns) |
+| `nber_window` | ("1948-06", "2020-12") | the window of the NBER validation (NBER dates only score the rule, they never enter a label) |
+| `min_episodes` | 4 | fewer episodes = thin (†, no placebo p; no interval below 2) |
+| `bootstrap` | 4000 replicates, seed 20261101, 90% (5, 95) | episode bootstrap; every cell seeds its own generator, `regimes.rng_for(section, window, group, asset, stat)` |
+| `hac_lags` | monthly 6, forward 12 | Newey-West lags |
+| `forward_lag_months` | 1 | a label is known the month after: forward windows run t+2..t+13 (t+1..t+12 is the `base` sensitivity) |
+| `placebo_min_shift` | 24 | circular shifts of the real-time labels by at least 24 months |
+| `reference` | n_paths 2000, seed 4242 | the engine's unconditional reference run (`runner.reference_simulation`) |
+| `longest_contraction_months` | 18 | the longest contraction since 1948 (W7, W11) |
+| `thin_runs` | 3 | W9: fewer runs since 1973 than this |
+
 Engine constants outside config.py, each set by the evidence in its module
 docstring: `engine/pooling.py` MIN_ENS 30, MIN_EPISODES 6, EPISODE_MONTHS 12,
 SHRINK_STEPS 14; `engine/simulate.py` DEFAULT_REVERSION, RATE_SCALING,
@@ -247,12 +309,20 @@ SPREAD_WIDENING_FLOOR 0.85, OIL_VIEW_VARS; `engine/residuals.py`
 DEFAULT_WINDOW 36, SEED_OFFSET 7919; the spec bounds in `scenarios/schema.py`;
 `scenarios/calibrate.py` UNRATE_VOL_MULT 0.62; `scenarios/probabilities.py`
 GAMMA 0.5, WINDOW 6, KEY_STATES; `scenarios/runner.py` ATTRIBUTION True (the
-module switch for run_spec's attribution), ATTRIBUTION_BAND (10, 90);
+module switch for run_spec's attribution), ATTRIBUTION_BAND (10, 90),
+REGIME_READOUT True (the switch for detail["regimes"]), _REFERENCE_KEEP 2
+(reference runs kept per MonthDB); `scenarios/regime_views.py`
+SUPPORT_MONTHS 12, DELIVERY_TOL 0.005, CONFLICT_SD 1.5, CONFLICT_GAIN 0.05,
+CONTRACTION_SHARE_MIN 0.3, NOTE_REQUEST_GAP 0.10, NOTE_CATCH_UP_GAP 0.20,
+NOTE_TERM_SHARE 0.5, NAME_TERMS; `engine/regimes.py` THIN (= min_episodes),
+EPS 1e-9;
 `analysis/eras.py` ATTR_MIN_COVERAGE 0.5, OWN_BETA_MONTHS_PER_PARAM 5;
 `analysis/backtest.py` WINDOWS, VIEW_VARS, PHASE_MONTHS 24, N_PATHS 400,
 SEED 11, CUSTOM_PATHS 200, CUSTOM_PATHS_RANGE (100, 400), CUSTOM_MONTHS_RANGE
 (12, 180), MIN_TRAIN_MONTHS_CUSTOM 180, SETUP_CACHE_MAX 8;
-`analysis/forecast.py` FIRST_ORIGIN 1984-12, KEY_STATES, ENS_GRID, SPLIT
+`analysis/forecast.py` FIRST_ORIGIN 1984-12, KEY_STATES, ANALOG_SHARES (1/32,
+1/16, 1/8, 1/4, 1/2 of the starts available at each origin), ANALOG_SHARE 1/4
+(without a selection), FLAT_BANDWIDTH 999, CLAIM_SKILL 0.005, CLAIM_T 2.0, SPLIT
 2004-12, N_PATHS 1000, SEED 23, SKILL_MIN_T 1.0, SKILL_REFS (uncond, naive),
 LEDGER_DIR (data/ledger), LEDGER_SCHEMA 1, LEDGER_TAUS (100 levels),
 LEDGER_METHODS, LEDGER_MAX_DELAY_MONTHS 3; `analysis/walkforward.py`
@@ -281,15 +351,40 @@ get_context() / reset_context()                    # the server's cached process
 ## Engine pipeline
 
 `scenarios.runner.run_spec(ctx, spec, n_paths=600, seed=0, source="builtin",
-attribution=None)` runs validate_spec -> `pool_phase` per phase ->
-`with_oil_lock` -> `simulate` -> `summarize` -> `attribution_summary`.
-Built-ins use the seed crc32(id) (`library.seed_for`); custom runs default
-to 7. `attribution=None` means the module switch `runner.ATTRIBUTION` (True:
-built-ins, custom and LLM runs through the API, and the studies that call
-library.run all get `assets[a].attribution`, about 30 ms per 600-path run);
-a study that needs only the returns can set it to False, as it swaps
-`runner.RESIDUALS` and `runner.VALUATION`. Every simulated number is
-bit-identical either way.
+attribution=None, regimes=None)` runs validate_spec -> `pool_phase` per phase
+-> the regime checks W8-W11 (`regime_views.spec_checks`, appended to
+`validation.warnings`) -> `with_oil_lock` -> `simulate` -> `summarize` ->
+`attribution_summary` -> the regime readout. Built-ins use the seed crc32(id)
+(`library.seed_for`); custom runs default to 7. `attribution=None` means the
+module switch `runner.ATTRIBUTION` (True: built-ins, custom and LLM runs
+through the API, and the studies that call library.run all get
+`assets[a].attribution`, about 30 ms per 600-path run); a study that needs
+only the returns can set it to False, as it swaps `runner.RESIDUALS` and
+`runner.VALUATION`. `regimes=None` means `runner.REGIME_READOUT` (True): the
+detail gets `regimes` (see "Results files"), about 0.25 s per 600 paths
+(`regimes.classify_sim`); the ablation, the valuation study, the forecast's
+reconciliation re-runs and the regimes step's own studies pass
+`regimes=False` (`library.run(..., regimes=False)` passes it through). Every
+simulated number is bit-identical with and without either (tested on
+baseline, stagflation and financial_crisis, with and without the rg_
+columns).
+
+`runner.reference_simulation(ctx) -> dict` is the engine's own unconditional
+run that every regime readout and regimes.json `engine.reference` compare
+with: the spec `{phases: [{name: 回归常态, months: 180, views: []}]}` through
+run_spec's own steps (validate_spec, phase_weights, with_oil_lock,
+valuation_for, simulate) with `config.REGIMES["reference"]` (2000 paths, seed
+4242), without detail, attribution or readout, so it is bit-identical to
+`run_spec(ctx, <that spec>, 2000, 4242)` and never calls run_spec. Returns
+`{sim, regimes: {the classify_sim label, flag and episode arrays, (2000, 181),
+column 0 = the anchor}, drawn: (2000, 180) label codes of the drawn months,
+n_paths, seed, months, spec}`; every array is read-only and shared. It is
+cached per MonthDB (a WeakKeyDictionary under a lock, so a request that
+arrives during the first run waits instead of computing a second copy), keyed
+by the anchor date, paths, seed, horizon, `runner.RESIDUALS`,
+`runner.VALUATION` and the CMA (method and adjustment); a db keeps the 2 most
+recently used settings (`_REFERENCE_KEEP`). About 1 s the first time and
+72 MB; the server warms it at startup.
 
 ### Transmission model (engine/factor_model.py)
 
@@ -314,6 +409,20 @@ rare, optionally decayed toward recent months), `uncond_frequency()` (each
 month's share of an unconditional 15-year path's draws: the weight of every
 "historical average" the engine projects forward), `oil_log_real_median` and
 `oil_real_drift`.
+
+**As-of regime columns.** `MonthDB(panel, model, start, end)` with an `end`
+before the panel's last month replaces the frame's ex-post `rg_` columns by
+`regimes.asof_columns(panel, end)`, computed from `panel.loc[:end]` only;
+without it a window ending 2008-06 would see 2008-01..06 already labelled
+收缩 / 深度衰退, and one ending 2020-03 would see 2020-03. The `rg_rt_` columns
+are one-sided and stay as they are; `db.dates` are unchanged (644 months).
+`db.panel` keeps the full-sample rg_ columns, so an early window must read
+regimes from `db.frame`. The cache is keyed by `id(panel)`, checked against a
+weak reference (dropped with the panel), then by the last month, a blake2b
+digest of the input series up to it and the params (an in-place edit
+invalidates it), at most 256 windows per panel; about 35 ms per new window.
+No current backtest or forecast view uses rg_ columns: this guards any future
+one.
 
 ### Phase weights: entropy pooling over block starts (engine/pooling.py, engine/ep.py)
 
@@ -590,6 +699,7 @@ causal_chain:                    # <= 30 edges; from / to <= 40 chars, lag <= 20
 phases:                          # <= 8, in time order; the months are padded / trimmed to 180
   - name: 绿色通胀               # <= 30 chars
     months: 36                   # integer >= 1 (invalid -> 12, with a warning)
+    regime: {通胀: 0.5}          # optional: shares of macro-regime months among the drawn ones (see below)
     views:                       # <= 12 per phase: entropy-pooling views on MonthDB columns
       - {var: f_oil, mean_annual: 0.10, vol_mult: 1.3, why: "油价每年约 +10% 且波动更大"}
       - {var: s_cpi_yoy, mean: 3.8}
@@ -614,7 +724,8 @@ fields and their bounds:
 
 | Field | Rule |
 |---|---|
-| view `var` | starts with `s_`, `f_` or `e_` and is a MonthDB column with history; anything else is dropped with a warning |
+| view `var` | starts with `s_`, `f_`, `e_` or `rg_` and is a MonthDB column with history; anything else is dropped with a warning; a view on a real-time `rg_rt_*` column is dropped with W4 |
+| `regime` | `{id or Chinese alias: share}` (YAML) or `[{id, share, why}]` (LLM form). Ids: the six labels expansion, inflation, deflation, recession, depression, stagflation plus the flags contraction and high_infl; aliases 扩张 / 金发姑娘 / 软着陆, 通胀 / 过热, 通缩 / 物价负增长, 衰退, 萧条 / 深度衰退, 滞胀, 收缩, 高通胀. Each entry becomes a plain view `{var: rg_<id>, mean: share, why: 宏观体制：…}`, placed first, replacing a view on the same column and not counted in the 12-view cap; shares are clipped to 0..1 (listed in `clipped` as `regime.<id>`), and labels summing to more than 1 are rescaled (W3). The clean phase keeps `regime: {id: share}` only when one was asked, so re-validation is idempotent and the 13 built-ins (none uses it) are unchanged. The views are clipped to the block support like any view (衰退 1.0 -> 0.373) |
 | `mean`, `min`, `max` | clipped to the 2nd-98th percentile of what the phase can average (`pooling.view_support`: means of B-month runs, much narrower than single months) |
 | `mean_annual`, `min_annual`, `max_annual` | the same bounds x 12 (the value / 12 is the monthly target); `min_annual` / `max_annual` exist in YAML only |
 | `shift_sd` | -3..3 prior sds of the phase average |
@@ -652,7 +763,43 @@ other fix is a warning. Report (an actual run on the current build):
 
 `resid_scale` / `r_star` clipping is listed in `clipped` without a warning.
 run_spec appends the shrink warnings of the phase pooling to the same
-`warnings`. The UI shows the report next to every result (a `phase: null` row
+`warnings`.
+
+**Regime checks** (scenarios/regime_views.py). Asking for a regime is not
+getting it, so every regime request (and every plain view on an ex-post rg_
+column) is checked. validate_spec runs W1-W7 without the database; run_spec
+(after pooling) and `translator.preview` append W8-W11. Every number in a
+warning comes from the frame or `config.REGIMES` at validation time; how much
+a request delivers in simulated paths lives in regimes.json `engine.studies`
+and is never typed into a warning.
+
+| id | trigger | warning (abridged) |
+|---|---|---|
+| W1 | unknown regime id | 阶段 k：未知的宏观体制 …，已忽略（可用：…） |
+| W2 | share not a number | 阶段 k：宏观体制 … 的占比不是数值，已忽略 |
+| W3 | the six labels sum to more than 1 | 六种体制互斥，占比之和 … 超过 1，已按比例缩到合计 1 |
+| W4 | a view on `rg_rt_*` | … 是实时标签（只用于现况判断和一年期预测检验），情景视图请用事后标签 rg_<体制>，已忽略 |
+| W5 | deflation or cpi_neg requested | the MonthDB's 物价负增长 months (8 now: 2009-07..10, 2015-01..04) are base effects; use f_cpi mean_annual (support lower bound about -0.008/年) with 收缩 0 and an f_unrate view |
+| W6 | an inflation-type id (inflation, stagflation, high_infl) in a phase under 12 months | simulated CPI y/y takes about 12 months to catch up with the drawn months |
+| W7 | a contraction-type id (contraction, recession, depression, stagflation) with share x months > 18 (`longest_contraction_months`) | more contraction months than the longest contraction since 1948; split the phase |
+| W8 | share above what a 12-month phase can deliver (`max_delivered` of the support table, + 0.005) | … 最多只能占抽中月份的 …（要求 …） |
+| W9 | fewer than `thin_runs` = 3 runs since 1973, or fewer than 2.5 effective episodes | only these few episodes would be repeated (the engine's own thinness check counts every drawn month and cannot see it) |
+| W10 | another mean-type view more than 1.5 block-sd from the regime's own drawn mean | … 的目标 … 与所选体制的历史月份（平均 …）相差 … 个标准差 |
+| W10b | the regime views pool alone at lambda_base but with the other views only at a lower lambda | names the views whose removal lifts lambda most (leave-one-out, gains >= 0.05) |
+| W11 | any spec: consecutive phases drawing >= 30% contraction months add up to more than 18 expected contraction months | 区块首尾相接会造出比历史上任何一次都更深更长的收缩 |
+
+The support table (`regime_views.support_table(db)`, cached per MonthDB;
+llm_translator.json `regime_support`, regimes.json `engine.support`) is what a
+12-month phase with the view at 1 delivers: today 扩张 100% (15 runs), 通胀
+100%, 收缩 100%, 高通胀 100%, 滞胀 93% (4 runs, lambda 0.928), 深度衰退 76% (2 runs,
+1.01 effective episodes: 2008-09), 衰退 37% (1 run, 2001), 物价负增长 33% (2
+runs). No built-in trips W1-W11. Example: stagflation phase 1 with 滞胀 0.8 is
+infeasible with its own views (lambda 0.65; s_real_ff and s_ip_yoy named by
+W10b). The pools of W10 / W10b (one per pair and per left-out view, a second or
+more each when the views conflict) are cached per MonthDB and (months, views),
+so `translator.preview` and the run of the same clean spec pool them once
+(about 13 s, then 2.6 s for the run, for that example at 200 paths).
+ The UI shows the report next to every result (a `phase: null` row
 shows — as its phase).
 
 **LLM form** (`SPEC_JSON_SCHEMA`, used as the structured-output schema). The
@@ -661,14 +808,18 @@ mean_annual, shift_sd, min, max, vol_mult and why (null when unused; no
 `*_annual` bounds); overrides always have the list form
 `factor_drift: [{factor, annual, why}]`, `asset_drift: [{asset, annual, why}]`,
 `resid_scale`, `r_star` (null when unused), which `_normalize_overrides` turns
-into the dict form; there is no `reversion` and no `calibration`, so the
+into the dict form; every phase has a required `regime` array of `{id (enum of
+the 8 ids), share, why}` (`additionalProperties: false`; `[]` when unused);
+there is no `reversion` and no `calibration`, so the
 translator cannot set either. Numeric bounds are not in the JSON schema
 (structured outputs do not support minimum / maximum); validate_spec enforces
 them. Before validation `translator.repair()` prefixes the id with `llm_`,
 sets `source: "llm"`, reads a prior_prob or confidence between 1.5 and 100 as
 a percentage, merges duplicate views of a variable, turns mean_annual on a
 non-`f_` variable into mean, keeps only the first of mean / mean_annual /
-shift_sd, and warns about valuation variables and overrides without a reason.
+shift_sd, maps Chinese regime ids to ids (with a note) and drops unknown ones
+with the W1 text, and warns about valuation variables and overrides without a
+reason.
 
 **Calibration block** (built-ins only: `library.resolve_calibration`, then
 `calibrate.distribution_views`). `calibration: {kind: distribution, phase:
@@ -702,7 +853,7 @@ analysis file also carries its own `units` and `notes`. Shapes below use
 ### meta.json (build.build_meta)
 
 ```text
-{built_at: "2026-11-01T17:50:45Z", data_start: "1947-01-01", data_end: "2026-09-01",
+{built_at: "2026-11-02T01:02:07Z", data_start: "1947-01-01", data_end: "2026-09-01",
  model_start: "1973-01", horizon_months: 180,
  assets: [config.ASSETS], factors: [config.FACTORS], states: [config.STATES], eras: [config.ERAS],
  today: {date: "2026-09", states: {state: level}, income_yield: {asset: trailing 12-month income, decimal}},
@@ -902,7 +1053,11 @@ Index (scenarios ordered by posterior probability):
               nasdaq_cagr_p50, gold_cagr_p50, treasury_10y_cagr_p50, cash_real_cagr_p50,
               y10_end_p50 (%), unrate_max_p50 (%)},
    ens_min, analogs, warnings (count), calibrated (bool),
-   assets: {asset: {cagr_p5, cagr_p50, cagr_p95, real_cagr_p50, max_dd_p50}}}]}
+   assets: {asset: {cagr_p5, cagr_p50, cagr_p95, real_cagr_p50, max_dd_p50}},
+   regimes: {year1: {label: share}, whole: {label: share}, p_contraction_year1, dominant_by_phase: [label]}}],
+ regimes: {year1_weighted: {label: share}, p_contraction_year1_weighted,           # probability-weighted
+           reference: {year1, p_contraction_year1, n_paths: 2000, seed: 4242},       # runner.reference_simulation
+           history: {shares_1973: {label: share}, p_contraction_12m_window}}}
 ```
 
 Detail (`runner.run_spec` + library extras):
@@ -928,15 +1083,52 @@ Detail (`runner.run_spec` + library extras):
                                 total: {months, terms, factor_sum, factor_band, arithmetic, cagr_p50, reconciliation}}}},
  macro: {cpi_yoy, ff, y10, unrate, spread (%), oil ($ a barrel, nominal), pd (multiple): {fan: {p5, …, p95}}},
  corr: {assets, matrix}, era_composition: {era: share of the drawn months}, representative_path,
- calibration: [{kind, title, text, base, impact, views, overrides, override_notes, param_notes, formulae,
+ calibration: [{kind, title, text, base, impact, views, overrides, override_notes, param_names, param_notes, formulae,
                 engine_mapping, caveats, phase, phase_name, start_month, months,
                 engine_check: {equity_wealth_change_assumed, us_equity_price_return_p50, us_equity_total_return_p50,
                                unemployment_change_assumed_pp, unemployment_change_p50_pp,
                                unemployment_change_mean_pp, labor_share_log_change_assumed,
                                labor_share_log_change_p50}}],   # calibrated built-ins only
+ regimes: {version: 1, labels: [{id, name, color}],                    # the regime readout (REGIME_READOUT)
+           anchor: {month, label_rt, label_expost_mix: {label: share of paths}},
+           phases: [{name, start_month, months, requested: {id: share} | null,
+                     simulated, simulated_rt, drawn: {label: share}, dominant,
+                     paths_with_contraction, contraction_share,
+                     reference: {simulated, paths_with_contraction},   # the same months of the reference run
+                     history_base_rate}],        # share of 1973-02.. windows of `months` months holding a contraction month
+           windows: {year1 | years2_5 | years6_15 | whole: {simulated, simulated_rt, drawn, paths_with_contraction,
+                                                            contraction_share, reference: {simulated, paths_with_contraction}}},
+           years: [{year: 1..15, simulated, paths_with_contraction}],
+           episodes: {per_path, length_mean, share_longer_than_18m, share_severe,
+                      reference: {the same four}, history: {episodes, per_15y, length_mean, longer_than_18m, severe}},
+           notes: [str]},
  probability: {prior, likelihood, posterior, distance, z: {state}, phase_means: {state}, today, method},
  prob}
 ```
+
+`regimes` (宏观体制 readout, `regime_views.readout`): `simulated` is the ex-post
+label of each simulated month (the paths classified with the panel history
+prepended, `regimes.classify_sim`), `simulated_rt` its real-time label, and
+`drawn` the ex-post label of the historical month it was drawn from
+(`SimOutput.idx`); the two differ because simulated CPI y/y and IP accumulate
+from today's levels. Every share dict sums to 1; `anchor.label_rt` is the same
+on every path (today: 扩张), `label_expost_mix` the anchor's ex-post label over
+the paths (a later simulated fall can make it a contraction month). The
+`reference` blocks are the same months of `runner.reference_simulation` (the
+same in every scenario of a build), `history_base_rate` the share of
+historical windows of the phase's length that hold a contraction month (12
+months 24.2%, 36 months 45.2%). Notes, generated from the numbers: N1
+requested - drawn > 0.10; N2 drawn - simulated > 0.20 for a requested label;
+N3 a name term (滞胀, 通缩, 萧条, 衰退, 通胀 / 过热; the phase name's own, else the
+scenario name's for every phase with views; the text says 名称里有 or 情景名称里有)
+whose labels hold less than half of that phase's simulated months; N4 always:
+the reference's share of months 25-180 with CPI y/y above 4% against history
+(41% against 33%). Today N3 fires 6 times (stagflation 工资-物价螺旋 26% and 沃尔克式紧缩
+44% 滞胀, japanification 去杠杆与降息 3% and 长期停滞 4% 物价负增长, oil_war 衰退与油价回落
+41% and energy_transition 绿色通胀 41%), never for baseline or financial_crisis.
+Probability-weighted year 1: simulated 扩张 50.8 / 通胀 32.3 / 物价负增长 0.2 / 衰退
+9.0 / 深度衰退 2.3 / 滞胀 5.4 %, P(a contraction month in year 1) 25.7%, against
+the reference's 19.2% and history's 24.2%. A detail grows about 10 KB with it.
 
 `macro.pd` is the P/D each path implies with the valuation state tracked at
 kappa = 0 (index 0 = today's 97.4); `headline.pd_end_p50` is its last p50
@@ -974,16 +1166,123 @@ scenario_paths.npz: `total` (S, N, T, A) float32 monthly total returns,
 `labels` (T+1,), `probs` (S,); rows in index order. Currently S = 13, N = 600,
 T = 180, A = 13.
 
+### regimes.json (analysis/regimes.py)
+
+The macro-regime layer's evidence: what each month was, how well the rule
+dates recessions, what assets and factors did in each regime, how regimes
+move, what the engine does with them, and why they stay out of the
+transmission model and the one-year forecast. About 36 s; `python -m
+scenariolab.analysis.regimes` writes it too.
+
+```text
+{version: 1, data_end: "2026-09", monthdb: {first: "1973-02", last: "2026-09", months: 644},
+ definitions: {params, labels: [{id, code, name, term, color, desc}], flags: [{id, name, desc, history_only, rt}],
+               precedence, rule_text: {growth, severity, inflation, precedence, realtime, data, timing},
+               terms: [{term, labels, text}], names_changed: [{from, to, why}],
+               grid: {rows, cols, cells: [[label]], note}, conventions: {id: {name, text}} (ordered),
+               interpolations: [{month: "2025-10", series: [cpi, unrate, core], values, how}], swing_pct},
+ nowcast: {month, known_from, label, name, label_expost, readings: {…},
+           checks: [{id, name, rule, reading, threshold, distance, on}], missing_after: {series: [months]},
+           provisional_from, last_high_infl: {month, cpi_yoy}, recent: [24 x {month, label, label_rt, cpi_yoy,
+           ip_below_peak_rt, u_rise_rt}], note},
+ timeline: {dates (945), label, label_rt, provisional_from, flags: {flag: [0/1]}, series: {cpi_yoy, core_yoy,
+            infl_trend_12m, unrate_3m, sahm_gap, ip_yoy, ip_below_peak_rt, ip_drawdown_24m, u_rise_rt},
+            runs: [{label, name, start, end, months}], runs_rt, nber: [{peak, trough, first_month}]},
+ counts: {"1948" | "1973": {expost | realtime: {months, labels: {id: {months, share, runs}}}, flags: {id: {months, runs}},
+                            inflation_falling: {months_with_trend, falling, first_month}}, agreement_rt_expost, confusion_1948: [[6x6]], runs_expost_1948,
+          cpi_near_threshold_1973},
+ validation: {window, expost | realtime: {balanced_accuracy, tpr, tnr, precision, detected, recessions,
+              mean_start_err, mean_end_err, mean_abs_start_err, mean_abs_end_err, false_alarms: [[start, end]],
+              per_recession}, months_flagged_after_window, alternatives: [{id, name, kind, ba, …, fa_runs}],
+              legs, legs_margin, sensitivity, out_of_sample: {loro, split, grid_points_ba_ge_0955, grid_size, …},
+              revisions: {cases, paths: 300, seed}, near_miss_2022_24},
+ assets: {windows: {"1973" | "1948": {start, end, months, assets, groups: {gid: {kind, id, name, months, episodes,
+            episode_list, thin, contraction_cell, survivors: [asset], assets: {asset: {months,
+            ann_real | ann_nominal: {value, ci90}, vs_rest: {value, ci90, rest_value, survives}, vol, sharpe,
+            share_positive, worst_12m, worst_12m_real}}, corr_stock_bond, corr_gold_equity}}}},
+          inflation_by_era: [{span, start, end, months, episodes, thin, equity_real, bond_real, corr_sb}],
+          corr_by_half, corr_by_cpi_bucket},
+ episodes: [{label, start, end, months, ip_decline_pct, u_rise_pp, cpi_mean, equity_real_total,
+             equity_real_to_low, equity_low_month, equity_real_after_low, months_after_low, bond_real_total,
+             worst_window, path: [real equity index, 100 the month before the start]}],
+ episodes_summary: {stagflation_after_low_1973: {after, of, episodes}, stagflation_low_before_trough_1973: [lo, hi]},
+ factors: {window, reference, factors_meta, states_meta, table_states,
+           groups: {gid: {…, factors: {f: {z, ci90, sig, mean_annual}}, states: {s: {mean, z, sig}},
+                          distinctive_factors, distinctive_states}}},
+ transitions: {"1948" | "1973": {monthly, durations: {id: {mean, median, max, min, thin, …}}, rt_to_expost_12m,
+                                 base_rate_12m, p_contraction_12m: {by_label, by_flag, all},
+                                 inflation_to_stagflation_hits: {hits, years}},
+               walk_forward: {exactly_t12 | any_12m | new_contraction: {all | 1973_1999 | 2000_end}}},
+ forward: {lag_months: 1, windows: {"1973" | "1948": {groups: {gid: {name, kind, assets: {asset: {origins,
+           episodes, thin, mean (real), uncond, diff, ci90 (of diff), ci90_mean, placebo_p (null if thin), t_hac,
+           diff_vs_rest, halves, robust}}}}, global_placebo: {tests, actual, null_mean, null_p95, p}, n_tests,
+           eligible_tests, n_survive, n_robust, holm_discoveries, bh10_discoveries, base: {… t+1..t+12 …}}},
+           mechanism: {origins, within_12m_of_contraction, mean_within, mean_not, …},
+           forecast_test: {available, file, data_end, adopted}},
+ eras: [{id, name, start, end, months, dominant, expost, realtime, flags, runs_expost}],
+ transmission: {fit_rows, splits: [{id, desc, wald_p: {asset}, n_sig_5pct, n_tests, n_sig_excl_labor_share, …,
+                equity_y10}], walk_forward_verdict: {title, detail, oos_r2_delta, n_reject}},
+ engine: {support: {id: {name, column, months, runs, episodes, support_hi, max_delivered, shrink, reason, ens,
+                        engine_episodes, regime_effective_episodes, thin}},
+          reference: {n_paths, seed, months, windows: {year1 | years2_5 | years6_15 | whole | m25_180: {…}},
+                      anchor, cpi_gt4_share, cpi_pct, label_changes_per_year, mean_run_months,
+                      contraction_episodes},
+          history: {shares, cpi_gt4_share, cpi_pct, label_changes_per_year, mean_run_months, contraction_episodes,
+                    contraction_base_rate_by_window_months},
+          comovement, drawn_vs_sim_crosstab, simulated_inflation_from_expansion_share,
+          studies: {n_paths: 600, seed: 20261101, duration_seed: 7,
+                    drawn_vs_simulated: [{case, views, months: 12 | 48, drawn_share, simulated_share, lambda, …,
+                                          unrate_end_p50}], duration: [{share, months, …}],
+                    conflict_example: {spec, phase, regime, lambda_alone, lambda, drawn_share, leave_one_out}}},
+ model_use: {transmission | forecast | scenarios: {used, reason, …}; transmission | forecast: tested, forecast: adopted},
+ settings: {bootstrap, seed, ci, min_episodes, hac_lags, placebo_min_shift, forward_lag_months, seconds},
+ units, notes}
+```
+
+Group ids: `label:<id>` (the six labels; real-time labels in `forward`),
+`flag:contraction | severe | high_infl | cpi_neg | core_low` (`flag:contraction_rt`,
+`flag:severe_rt` in `forward`), `all`. Conventions (`config.REGIMES` and
+engine/regimes.py, one block for every consumer): the "1973" window is the
+MonthDB months (1973-02..2026-09, 644), the "1948" window 1948-01..today
+(945; US equities, Treasuries from 1953-05 and cash only); real returns are
+geometric (`expm1(12 x mean(log1p(r) - f_cpi))`); forward windows run t+2..t+13
+(a label is known the month after); an episode is a run with at least one month
+in the window; fewer than 4 episodes is thin (†, no placebo p); intervals are
+90% episode-bootstrap intervals with one generator per cell; HAC 6 / 12 lags;
+placebo = circular shifts of >= 24 months. Today (2026-09): real time 扩张,
+known from 2026-10, CPI y/y 0.28 pp under the 4% line (last above it 2026-05,
+4.17%), no month provisional. NBER: ex post balanced accuracy 0.960 in sample
+and 12 / 12 recessions, real time 0.786 with one false alarm (1959-11) and
+signals 3.9 months late at the start, 2.9 at the end; leave-one-recession-out
+0.909-0.933. The real-time 通胀 tilt of US equities a year later (-6.7 pp) has a
+joint placebo p of 0.17 over 130 tests (Holm 0 of 65 eligible), and the
+labels have no skill for a new contraction (Brier skill +0.04, t 0.6). The
+engine's reference run has CPI y/y above 4% in 41% of months 25-180 (history
+33%) and 2.12 contractions per path (history 1.96 per 15 years).
+`forward.forecast_test` is `{available, file, data_end, adopted}`: available
+only when regime_forecast.json exists and its `data_end` is this build's data
+month. That step runs later, so the first build of a new data month reports it
+as not available until `--only regimes` runs again after it; `model_use.forecast`
+(`tested`, `adopted`) and the last note state the forecast test's verdict only
+when it is available (「两者都做过样本外检验，没有通过」), otherwise they say the test
+is the opt-in step and this build has no result for its data. Every survives /
+robust / significant sentence in the UI is generated from the flags, not typed.
+
 ### forecast.json (analysis/forecast.py)
 
 ```text
-{horizon_months: 12, n_paths: 1000, key_states, analog_ens (chosen),
+{horizon_months: 12, n_paths: 1000, key_states,
+ analog_share (the share of the available starts every origin used), analog_ens (today's effective starts),
  methods: {uncond | analog | naive | scenarios: {name, description}},
  assets, asset_names, risk_assets, shocks: config.EXOGENOUS_SHOCKS, notes,
- selection: {grid: [{ens, val_crps_analog, val_crps_uncond, val_crps_naive, val_coverage,
-                     test_crps_analog, test_crps_uncond, test_crps_naive, test_coverage, test_rank_ic}],
-             chosen, split: "2004-12", rule, gain_val, gain_test, text},
+ selection: {grid: [{share, label ("1/32" ..), ens_first, ens_last, flat_origins,
+                     val_crps_analog, val_crps_uncond, val_crps_naive, val_coverage, val_t,
+                     test_crps_analog, test_crps_uncond, test_crps_naive, test_coverage, test_rank_ic, test_t}],
+             chosen (a share), chosen_label, unit, split: "2004-12", rule, common_random_numbers: true,
+             gain_val, gain_test, t_val, t_test, flat_origins, n_origins, claim: {min_skill, min_t},
+             baseline_name, text},
  origins: [{date, end, shocks: [name], inflation, analogs: [{date, weight, distance}], bandwidth,
+            flat (bandwidth at the cap: analog = uncond), analog_ens, n_starts,
             assets: {asset: {realized,
                              uncond | analog: {p5, p25, p50, p75, p95, mean, prob_loss, pit, crps},
                              naive: {p5, p50, p95, mean, pit, crps}}},
@@ -992,14 +1291,15 @@ T = 180, A = 13.
                                                     risk_avg: {coverage90, pit_mad, crps, mae_p50}, all_avg: {…},
                                                     direction: {hit_rate, base_rate_up, n},
                                                     rank_ic: {mean, t, n, by_origin}},
-                           crps_skill_risk: {analog_vs_uncond, analog_vs_naive, uncond_vs_naive}}},
+                           crps_skill_risk: {analog_vs_uncond, analog_vs_naive, uncond_vs_naive},
+                           crps_paired_risk: {analog_vs_uncond | analog_vs_naive | uncond_vs_naive: {diff, t, n}}}},
  n_shock_years, misses: [{origin, asset, realized, p5, p50, p95, z, cause: shock | macro | pricing, why}],
  text,
  macro_skill: {rule, split: "2004-12", min_t: 1.0, n_origins: 42, refs: ["uncond", "naive"], skilled: [ids],
                vars: {k: {name, unit, skilled, beats: {uncond, naive}, coverage90: {analog, uncond, naive},
                           all | val | test | ex_shock: {n, crps_analog, crps_uncond, skill, t},
                           naive: {all | val | test | ex_shock: {n, crps_analog, crps_naive, skill, t}}}}},
- live: {origin, state: {key_state}, z_today, analog_ens, bandwidth, display_ens,
+ live: {origin, state: {key_state}, z_today, analog_ens, bandwidth, analog_share, flat, n_starts, display_ens,
         analogs: [{date, weight, distance, next12: {asset}, macro}],
         assets: {asset: {uncond | analog | scenarios | scenarios_calibrated: {p5, p25, p50, p75, p95, mean, prob_loss,
                                                                             real_p50}}},   # scenarios_calibrated only when calibrated
@@ -1018,7 +1318,7 @@ T = 180, A = 13.
                          macro: {k: {name, unit, analog_mean, uncond_mean, scenarios_mean, calibrated_mean, skilled,
                                      skill, t, skill_naive, t_naive}},
                          sensitivity: [{vars, skilled, kl, ens, converged, shrink, us_equity: {p50, mean, prob_loss}}]}},
- ledger: {dir, n_entries, entries: [{origin, created, matures, status: pending | matured, version, model, analog_ens,
+ ledger: {dir, n_entries, entries: [{origin, created, matures, status: pending | matured, version, model, analog_ens, analog_share,
                                      methods: {m: {asset: bands, no q}}, realized, scores: {m: {asset: {covered, pit,
                                      crps, err_p50}}}}],
           matured, pending, first_maturity, scores: {m: {assets, risk_avg, n_entries}, crps_skill_risk} | null,
@@ -1030,9 +1330,23 @@ the latest such month (42 origins, 1984-12..2025-09). At each origin the
 model, MonthDB, anchor and CMA are refit on the months up to it. uncond = one
 12-month block drawn under the prior; analog = kernel weights on block starts
 whose origin state (KEY_STATES: cpi_yoy, unrate, real_ff, term_spread, spread,
-div_yield, ip_yoy, oil_yoy) resembles today's, with the effective number of
-starts chosen from ENS_GRID on origins up to 2004-12 (576 now); naive = a
-normal with the training mean and sd of 12-month returns. Returns are 12-month
+div_yield, ip_yoy, oil_yoy) resembles today's; naive = a normal with the
+training mean and sd of 12-month returns. The analog kernel's effective number
+of starts is a share of the starts available at the origin (every start but
+the first: 131 at 1984-12, 632 today), chosen from ANALOG_SHARES (1/32 .. 1/2,
+so every value is reachable at every origin) by the lowest validation risk
+CRPS on origins up to 2004-12; the test origins only check it. Today the
+choice is 1/2 (66 effective starts at 1984-12, 310 at 2025-09, 316 live),
+the flattest candidate: every share is worse than uncond, less so toward
+flat, and `selection.text` says both (generated: 「选中的 1/2 是候选里最平的一档（最接近
+无条件抽样），而验证期每一档的 CRPS 都比无条件抽样高（技能 …，t …）」). uncond and analog draw with the same seed at each origin (seed + i;
+common random numbers), so they differ only by their weights and a flat
+kernel (bandwidth at the cap, FLAT_BANDWIDTH 999; `origins[].flat`) gives the
+unconditional forecast bit for bit; `selection.flat_origins` counts those (0
+of 42 now). Texts are generated from the numbers: a CRPS gain or loss is
+stated only when |skill| > CLAIM_SKILL 0.5% and the paired |t| >= CLAIM_T 2,
+and no gain is claimed when half the origins or more are flat (today
+「相似起点法与无条件抽样差不多（技能 -0.8%，t = -0.7，在随机误差之内）」). Returns are 12-month
 total returns (decimal); macro changes are pp (unrate, ff, cpi_yoy, spread)
 or a log change (oil). CRPS: lower is better; skill = 1 - CRPS / CRPS of the
 benchmark, on the risk-asset average. `misses` are the 15 largest misses of
@@ -1050,20 +1364,22 @@ months' 12-month changes over [MODEL_START, origin] (`naive_macro`).
 12-month change beats both benchmarks, the unconditional draw and that naive
 normal: CRPS skill > 0 over all 42 origins and in both halves (split 2004-12),
 with a paired t >= SKILL_MIN_T 1.0 against each. The naive benchmark matters:
-both engine methods draw past months' CPI changes without re-anchoring them,
-so over the 42 origins the analog CPI y/y forecast beats the unconditional
-draw (skill +1.3%, t 1.4) but is 45.1% worse than naive (t -3.0), while
-unemployment, the policy rate and the credit spread beat naive (+15.3%,
-+15.5%, +11.2%) but not the unconditional draw, and oil beats neither. Today
+both engine methods draw past months' CPI changes without re-anchoring them.
+Over the 42 origins the analog CPI y/y forecast beats the unconditional draw
+(skill +31.8%, t 5.5) but only ties naive (-0.3%, t 0.0); unemployment and the
+policy rate beat naive (+15.2%, +15.6%) but not the unconditional draw, and
+the credit spread and oil beat neither. Today
 no variable is skilled, so `calibration.available` is false,
 `scenario_probs_calibrated` is null and `assets[a].scenarios_calibrated` is
 absent; the 「按一年期预测校准」 choice of the portfolio and withdrawal tabs is
 then disabled with `calibration.reason`, and 模型后验 stays the default.
 
 Reconciliation (情景概率与一年期预测的对账). The mixture's first year is more
-bearish than the scored analog forecast (美股大盘 median +4.6% against +7.8%,
-P(loss) 40% against 32%), because the shock scenarios put their shocks in the
-first year. `contrib_mean` and `contrib_prob_loss` split the gap exactly by
+bearish than the scored analog forecast (美股大盘 median +4.6% against +8.3%,
+P(loss) 40% against 27%; the analog's 0.265 is written 27% in
+the sentence and in the tables alike: the text rounds a half up, as the page does), because the shock scenarios put their shocks in the
+first year (7 scenarios with 48% combined probability; their first-year
+unemployment rises 0.60 pp on average, the analog's -0.01 pp). `contrib_mean` and `contrib_prob_loss` split the gap exactly by
 scenario (probability x the scenario's first-year value minus the analog
 value; each sums to its gap). Each built-in is re-run from its detail spec at
 its library seed to get the 12-month macro changes of the same paths
@@ -1072,8 +1388,8 @@ variable is skilled, is entropy pooling over the 13 scenarios with the model
 posterior as the prior and, as views, the analog method's live mean 12-month
 change of each skilled variable; an LP finds the largest reachable shrink
 lambda (each q >= 0.001 x its prior). `sensitivity` is a what-if per
-candidate variable and for all five together (unemployment alone: KL 0.26,
-美股大盘 median +7.2%); it is never used.
+candidate variable and for all five together (unemployment alone: KL 0.63,
+美股大盘 median +7.5%); it is never used.
 
 `ledger` is the scored view of data/ledger/ (see "Forecast ledger"): today
 1 entry (origin 2026-09, pending, matures when the data reach 2027-09),
@@ -1089,7 +1405,8 @@ and `run(ledger_dir=None)` turns the ledger off. Schema 1:
 
 ```text
 {schema: 1, origin: "2026-09", matures: "2027-09", horizon_months: 12, created (UTC), version, model,
- analog_ens, n_paths, seed, taus (q[i] = the (i + 0.5)% quantile, i = 0..99), units,
+ analog_ens, analog_share?, common_random_numbers?, n_paths, seed,
+ taus (q[i] = the (i + 0.5)% quantile, i = 0..99), units,
  methods: {analog | uncond | scenarios | scenarios_calibrated: {name, assets: {asset: {p5, p25, p50, p75, p95,
                                                                                      mean, prob_loss, q[100]}}},
            naive: {name, assets: {asset: {mu, sd}}}},
@@ -1097,6 +1414,11 @@ and `run(ledger_dir=None)` turns the ledger off. Schema 1:
  scenario_probs, scenario_probs_calibrated}
 ```
 
+* `analog_share` (the share of the available starts the analog used) and
+  `common_random_numbers: true` (uncond and analog drew with the same seed)
+  were added after the 2026-09 entry, which keeps its recorded form; readers
+  treat both as optional. Method names are the forecast module's display names
+  (`METHOD_CN`: 相似起点法, 无条件抽样, 历史均值基准, 情景加权, 情景加权（校准）).
 * Written to a unique temporary file and hard-linked into place: an entry
   appears complete or not at all, is never replaced, and a rebuild on the same
   panel adds nothing (two builds racing on one origin: one wins).
@@ -1115,11 +1437,14 @@ and `run(ledger_dir=None)` turns the ledger off. Schema 1:
   0.005 of the sample scores). This is the true out-of-sample record: the
   rolling scorecard above is a replay with today's code and model.
 * The ledger lives in data/, so it is git-ignored: each installation keeps its
-  own. The first entry (origin 2026-09, created 2026-11-01T16:06:16Z) was
-  written while the calibration still accepted CPI y/y on the unconditional
-  benchmark alone, so it carries a `scenarios_calibrated` method and
-  `scenario_probs_calibrated` (KL 0.019) that today's forecast no longer has;
-  its analog, uncond and scenarios bands equal today's live forecast exactly.
+  own. The entry for origin 2026-09 was recorded once more on 2026-11-01
+  (created 2026-11-01T23:04:51Z), before it could mature: the first recording
+  carried a calibrated method set that was later withdrawn and the analog
+  setting the feasible share grid replaced (ENS 576), so it was removed by hand
+  and the corrected forecast went in through the module's own append path
+  (methods uncond, analog, scenarios, naive; analog_ens 316; no calibrated
+  probabilities). Its uncond, scenarios and naive bands equal the first
+  recording's; its bands equal today's live forecast exactly.
 
 ### ablation.json (analysis/ablation.py; opt-in)
 
@@ -1156,6 +1481,61 @@ variant config.RESIDUALS matches (partial_50 now), and
 `baseline` variant is the engine before the adoption (coupled residuals), so
 its numbers no longer match either file.
 
+### regime_forecast.json (analysis/regime_forecast.py; opt-in)
+
+Does knowing today's real-time regime improve the one-year forecast out of
+sample? The pre-registered walk-forward of the regime study, against the
+current forecast. About 100 s (`--only regime_forecast`, or `python -m
+scenariolab.analysis.regime_forecast`).
+
+```text
+{version, data_end: "2026-09", question, text,
+ settings: {n_paths: 1000, seed_bases: [23, 1023, 2023, 3023, 4023], origins (42), split: "2004-12",
+            share_grid, share_labels, lambdas: [0, 0.25, 0.5], guard: {min_ens: 30, min_episodes: 6},
+            common_random_numbers: true, claim: {min_skill: 0.005, min_t: 2.0}},
+ baseline: {name, share, share_label, flat_origins, val_crps_by_share,
+            forecast_json: {same_share, max_abs_diff_us_equity_p50}, risk_crps_seed23, coverage90_seed23,
+            uncond_risk_crps_seed23, aa_noise: {seed: {all | val | test: {diff, t}}}, aa_note},
+ families: [{id: a1 | a2 | b | bc | c | cc, name, selected_by_seed, selected_text,
+             risk_crps_rel | risk_crps_diff: {val | test | all | ex_shock: {mean, min, max}}, t: {val, test},
+             rank_ic_delta, coverage90, coverage90_current, macro: {cpi_yoy | unrate | ff: {rel_vs_current,
+             skill_vs_naive}}, fragility_seed23: {test, test_rel, best_origins, best_contrib, test_without_best,
+             test_without_best_rel}, better_both_halves_seeds, checks, passes}],
+ oracle: {c_oracle | cc_oracle: {name, eligible: false, risk_crps_rel, better_both_halves_seeds}},
+ guard_tests: {truncation, scrambled_future, power, code_guards},
+ by_label_seed23, labels_at_origins, verdict: {adopted, rule, text}, seconds}
+```
+
+Every origin i draws every method with seed base + i (common random numbers
+with the current forecast, which uses the forecast module's own selection:
+the share 1/2 today; `baseline.forecast_json` checks that it reproduces
+forecast.json exactly). Families: a1 / a2 add real-time regime indicators to
+the analog state; b / bc weight the analog kernel by 1 for starts with the
+origin's real-time label (6 labels or 3 groups) and lambda otherwise; c / cc
+draw only from such starts; a thin pool shrinks toward the plain kernel or
+the prior. Adoption: lower risk-asset CRPS than the current forecast in both
+halves in every seed set, the seed-averaged rank IC down by at most 0.05 and
+90% coverage by at most 0.02. The look-ahead guards: `check_frame` refuses a
+frame past the origin or with ex-post / NBER columns; truncation (150 months
+checked) and a scrambled future (42 origins: weights and forecasts unmoved)
+pass, and the power check shows the ex-post labels and the oracle do move.
+Which forecast the file tested: `data_end`, `settings.origins[-1]` and
+`baseline.share`. The 宏观体制 tab compares them with regimes.json `data_end`
+and forecast.json (`origins[-1].date`, `analog_share`); when one differs (the
+step is opt-in, so a default build that refreshes the forecast leaves it
+behind) it marks the result 旧结果, names the current forecast and the
+command, and the forward-return section no longer says the test failed. A
+test-half gain in `text` (and on the tab) carries its seed-averaged t and,
+unless it passes the forecast module's claim rule (`settings.claim`: beyond
+0.5% with |t| >= 2), 「在随机误差之内」 (`gain_note`).
+Today: adopted none; no family is better in both halves in any seed set
+(validation / test relative CRPS, positive = worse: a1 +0.47% / +0.21%, a2
++0.60% / +0.05%, b +0.57% / -0.22%, bc +0.66% / -0.28%, c +1.77% / -0.96%, cc
++4.08% / -2.83%, the cc test gain resting on 2007-12 and 2021-12); the
+oracle c_oracle (ex-post labels of the whole panel) is better in both halves
+in 5 of 5 seed sets, which is what a look-ahead would be worth. Real-time
+labels at the 42 origins: 扩张 32, 通胀 8, 衰退 2.
+
 ### valuation.json (analysis/valuation.py)
 
 ```text
@@ -1189,7 +1569,7 @@ its numbers no longer match either file.
                                              max_abs_us_equity_delta, max_scenario, pd_end_p50_prob_weighted}},
                     baseline_matches_results},
  settings: {n_paths, seeds, validation, test, coverage_drop, min_gain, fan_drop, fan_paths, forecast_tol,
-            forecast_ic_tol, forecast_paths, forecast_split, analog_ens, n_origins, residuals,
+            forecast_ic_tol, forecast_paths, forecast_split, analog_share, n_origins, residuals,
             engine_valuation, baseline_reproduces_backtest, baseline_reproduces_forecast, seconds},
  units, notes}
 ```
@@ -1277,6 +1657,7 @@ path per row instead of 600 shared ones, the comparison with history).
  variables: [{var, name, kind: state | factor | shock, unit, p2, median, p98, mean, sd,
               block_p2, block_p98, block_sd, asset_driver, today, today_date, outside_support | last12_mean}],
  factor_drift_bounds: {factor: +- per year}, asset_drift: {bound: 0.08, assets},
+ regime_support: {id: {name, column, months, runs, episodes, max_delivered, shrink, …}},   # the 8 ids + cpi_neg
  schema: SPEC_JSON_SCHEMA, examples: [LLM-form spec], translation: null}
 ```
 
@@ -1410,17 +1791,20 @@ Sharpe and Sortino are medians of per-path ratios against the cash asset;
 
 `python -m scenariolab.server` serves http://127.0.0.1:8765 (`MSL_PORT`
 changes the port; it binds to 127.0.0.1 only). It loads .env at import, and a
-background thread fits the EngineContext and loads the scenario paths at
-startup so the first requests are fast.
+background thread fits the EngineContext, runs the engine's reference
+simulation (`runner.reference_simulation`, about 1 s; every custom run's
+regime readout compares with it, and a request that arrives meanwhile waits
+for this copy) and loads the scenario paths at startup so the first requests
+are fast; a failure of one part only makes its first request slower.
 
 | Method | Path | Body -> result |
 |---|---|---|
 | GET | `/`, `/js/…`, `/css/…`, `/vendor/…` | the static UI from web/ (`Cache-Control: no-cache` on `/`, `/index.html`, `/js/*`, `/css/*`, so edited tab modules are revalidated; `/vendor/echarts/*` gets ETag and Last-Modified, a conditional GET a 304, and no Cache-Control; a directory such as `/vendor/` is a 404, no listing) |
-| GET | `/api/meta` | meta.json |
-| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, scenarios, forecast, ablation, portfolio_default, llm_translator, valuation |
+| GET | `/api/meta` | meta.json plus `results`: the result names (of the list below) whose file exists at request time, so pages skip a missing optional file instead of requesting it (`api.optional`) |
+| GET | `/api/{name}` | results/{name}.json for name in eras, causality, backtest, diagnostics, scenarios, regimes, forecast, ablation, regime_forecast, portfolio_default, llm_translator, valuation |
 | GET | `/api/scenarios/{id}` | results/scenarios/{id}.json, else results/custom/{id}.json (built-ins win) |
 | GET | `/api/scenarios/custom` | `{scenarios: [{id, name, summary, source, created, prior_prob, prob}]}`, newest first |
-| POST | `/api/scenarios/custom/run` | `{spec, save = true, n_paths = 600 (clamped 100..2000), seed = 7, source = "custom"}` -> the detail JSON + `created`; with `save`, also custom/{id}.json + .npz |
+| POST | `/api/scenarios/custom/run` | `{spec, save = true, n_paths = 600 (clamped 100..2000), seed = 7, source = "custom"}` -> the detail JSON (with `regimes`; W8-W11 in `validation.warnings`; a phase's `regime` key in the dict or list form) + `created`; with `save`, also custom/{id}.json + .npz |
 | DELETE | `/api/scenarios/custom/{id}` | `{deleted: id}` |
 | POST | `/api/portfolio/evaluate` | the keyword arguments of `evaluate_portfolio` (`weights` required) -> its result |
 | POST | `/api/withdrawal/evaluate` | the keyword arguments of `evaluate_withdrawal` (`weights` required; `horizon_years` 10..40, default 30) -> its result |
@@ -1455,7 +1839,7 @@ Errors are JSON `{"detail": "<Chinese text>"}`:
 | 400 | translate: empty narrative / longer than 20000 characters / horizon_months not an integer in 12..600 (checked before the credentials; null means 180) | narrative 不能为空 / 叙事过长（… 字），请控制在 20000 字以内 / horizon_months 必须是 12 到 600 之间的整数（情景总月数）… |
 | 400 | backtest/run: unknown or missing parameters; train_end not YYYY-MM or outside the panel (a year pandas cannot format, such as 0000, included); fewer than 15 training years (earliest 1987-12); a test past the last panel month (the message gives the room left); months / n_paths / seed out of range or not integers; a training sample the model cannot be fitted on | 不认识的参数：… / 缺少参数：months（…） / train_end … 不在数据范围内（1947-01 至 2026-09） / 训练期至少需要 15 年：… 最早可选 1987-12 / 测试期会到 …，超出数据的最后一个月 …：… / months 必须是 12 到 180 之间的整数（测试期月数），收到 … / 这个窗口无法回测：… |
 | 400 | withdrawal: horizon_years not a whole number in 10..40 | 期限（horizon_years）必须是 10 到 40 之间的整数年（收到 …） / 期限（horizon_years）必须是数字 |
-| 404 | a result file is missing | `<file> 还没有生成：请在项目根目录运行 python -m scenariolab.build（或只补这一步：python -m scenariolab.build --only <step>）`; ablation.json names `--only ablation（引擎消融约需 6 分钟，默认构建不包含这一步）` |
+| 404 | a result file is missing | `<file> 还没有生成：请在项目根目录运行 python -m scenariolab.build（或只补这一步：python -m scenariolab.build --only <step>）`; ablation.json names `--only ablation（引擎消融约需 5 分钟，默认构建不包含这一步）`, regime_forecast.json `--only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）` |
 | 404 | unknown result name | 没有名为「…」的结果 |
 | 404 | built-in scenario not built / unknown scenario / unknown custom id on delete | the build hint with `--only scenarios` / 没有找到情景「…」：… / 没有找到自定义情景「…」（可能已被删除） |
 | 404 / 405 | unknown path / wrong method | 找不到这个地址：<path> / 这个地址不支持该请求方法：<path> |
@@ -1493,13 +1877,29 @@ to the results.
   the real-oil target computed per build, about $68 a barrel, and today's $97
   drifting toward it in phases without an oil view), the hard rules, every
   variable's support (6-month block p2 / median / p98 / sd) and today's
-  value, the eras, the drift bounds, and two built-in specs in the LLM form
-  (oil_war, k_shaped; calibrations resolved). The examples' narratives,
+  value, the eras, the drift bounds, the section 「## 宏观体制（regime 字段）」
+  (between 历史时期 and 覆盖项; `regime_views.TRANSLATOR_RULE` via
+  `translator.regime_rule`), and two built-in specs in the LLM form
+  (oil_war, k_shaped; calibrations resolved). The regime section states the
+  classifier's rule from config.REGIMES, what a 12-month phase can deliver per
+  regime from the MonthDB support table (e.g. 衰退（recession）37%，1 段（2001）),
+  and ten usage rules (prefer contraction, high_infl and continuous views;
+  stagflation <= 0.8 and <= 18 months; 萧条 = depression <= about 0.76, one
+  episode 2008-09; 通缩 = f_cpi near its lower support with contraction 0 and an
+  f_unrate view, never the deflation label; share x months <= 18 for the
+  contraction types; …). Its study numbers (12-month stagflation 0.8 is 60%
+  simulated 滞胀, the f_cpi recipe ends with median unemployment 2.3%, the
+  conflict example's lambda 0.65) are read from regimes.json `engine.studies`
+  only when its `data_end` equals the anchor month (rows matched on views and
+  months; the parsed file is cached by mtime); otherwise those clauses keep
+  their rule without the number, so the prompt never states a number the
+  build did not compute. The variable table does not list rg_ columns: the
+  `regime` key is the only way the model targets regimes. The examples' narratives,
   summaries and causal chains contain engine numbers filled in after the run;
   the prompt says to restate only the model's own views and overrides and to
   keep the narrative to 2-4 paragraphs. The residual rule (item 4 and the
   resid_scale line: half of the residual follows the drawn months) is
-  `residual_rule()`, generated from config.RESIDUALS; the prompt is 20,882
+  `residual_rule()`, generated from config.RESIDUALS; the prompt is 22,613
   characters now. `llm_form(spec, source, narrative_chars=1200)` and
   `few_shot_examples(ctx, horizon, narrative_chars)` cut the examples'
   narratives (None keeps all); `lab_examples(ctx)` keeps them whole for
@@ -1514,7 +1914,8 @@ to the results.
   `TranslatorError`s; then `repair` -> validate_spec -> `preview` (per phase:
   ens, shrink, era weights, top months, and every view's `drawn_mean`, the
   exact expectation over simulate()'s draws, with `realized_share` = (drawn -
-  prior) / (target - prior)).
+  prior) / (target - prior)), which appends the regime checks W8-W11 to the
+  validation warnings.
 * CLI: `python -m scenariolab.llm.translator "叙事" --run` prints the spec,
   the validation and the engine's headline; `--yaml OUT` writes it in the
   built-in format; `--print-prompt` prints the system prompt without calling
@@ -1532,8 +1933,8 @@ check it against the registry's `dist.integrity`, keep only
 `dist/echarts.min.js`, LICENSE and NOTICE, and update the version comment in
 index.html and the README.
 
-* **Router** (app.js). `TABS` lists 12 tabs in four groups: 历史与因果
-  (overview 总览, eras 历史时代画像, causality 因果传导), 验证 (forecast
+* **Router** (app.js). `TABS` lists 13 tabs in four groups: 历史与因果
+  (overview 总览, eras 历史时代画像, regimes 宏观体制, causality 因果传导), 验证 (forecast
   一年期预测, backtest 回测：模拟 vs 实际, diagnostics 诊断与迭代, valuation
   估值与盈利), 未来 (scenarios 未来情景, lab 情景实验室（LLM）, portfolio
   组合评估, withdrawal 提取与破产概率), 说明 (method 方法与数据). A route
@@ -1558,25 +1959,35 @@ index.html and the README.
   custom window runs again on load; a `custom=` token that does not parse
   shows a notice and the built-in windows),
   `#valuation?answer | today | history | regression | kappa | variants |
-  factors | scenarios`, `#eras?today`, `#diagnostics?ablation`. Pages that
+  factors | scenarios`, `#regimes?today | words | timeline | validation |
+  assets | episodes | factors | transitions | forward | eras | engine |
+  forecast | conventions`, `#eras?today`, `#diagnostics?ablation`. Pages that
   rewrite their own deep link use `ui.setRoute(tab, param, alive)`, which
   replaces the address without a re-render and only while that page is still
   current.
 * **api.js**: `get(path, {fresh})` caches GET promises per page load (a failed
-  one is evicted), `post`, `del`, `invalidate(prefix)`; an error carries
+  one is evicted), `optional(name, meta)` (null without a request when
+  `meta.results` says the file is missing, else `get` with errors as null),
+  `post`, `del`, `invalidate(prefix)`; an error carries
   `status` and the server's `detail`; strings in every response lose a
   rounded negative zero.
 * **ui.js**: `h()` (element builder), `esc`, `card`, `chartBox`, `wideChart`
   (a dense chart scrolls inside its card, never the page), `kpi`, `table`
-  (`stack` turns rows into labelled blocks on phones), `seg`, `select`,
+  (`stack` turns rows into labelled blocks on phones), `watchTables(root)` /
+  `fitTable(wrap)` (app.js watches the page once: a table wider than its card
+  first wraps its cells, `.fit-wrap`, then stacks its rows into labelled
+  blocks, `.fit-stack`, and each step is undone once the card is wide enough
+  again; a table with merged cells keeps scrolling), `seg`, `select`,
   `setRoute`, `buildHint`, `loading`, `notice`, `chip`; formats `fmtPct`,
   `fmtPP`, `fmtNum`, `fmtMoney` (never "-0.0"); `signCls(x)` -> `pos` / `neg`
   by the sign of a number, `goodCls(ok)` -> `is-good` / `is-bad` for a
   judgement; META lookups filled from /api/meta (`assetName`, `factorName`,
   `stateName`, `eraName`, `varName`).
 * **charts.js**: `mount` / `unmount` / `disposeWithin(root)` (app.js disposes
-  every chart and observer of the previous page), `line`, `fan`, `candles`,
-  `heatmap`, `bars`, `dag` / `dagLayout`, `scatter`, `assetColor`, `palette`,
+  every chart and observer of the previous page), `line` (`xValue` puts numeric
+  x on a value axis, spaced by value), `fan`, `candles`, `heatmap` (cell labels
+  white on dark cells and ink on light ones, whichever contrasts more), `bars`
+  (`valueMax` fixes the value axis, 1 for stacked shares), `dag` / `dagLayout`, `scatter`, `assetColor`, `palette`,
   `fmtValue`; options are only ever added, so existing calls keep working.
   When `window.echarts` is missing (the vendor file blocked or deleted),
   `mount()` puts 「图表库 ECharts 没有加载，这里的图表无法显示（表格和文字不受影响）。」 in
@@ -1588,9 +1999,12 @@ index.html and the README.
   `body.kline-cn` / `body.kline-us`, which set the CSS `--up` / `--down`
   tokens. `.pos` / `.neg` (the sign of a number) follow them; `.is-good` /
   `.is-bad` (a judgement, green better and red worse) do not.
-* **Tabs and the files they read**: overview (eras, forecast, scenarios),
-  eras (eras, causality, meta), causality (causality), forecast (forecast,
-  scenarios), backtest (backtest, POST backtest/run), diagnostics
+* **Tabs and the files they read**: overview (eras, forecast, scenarios,
+  optional regimes), eras (eras, causality, meta, optional regimes), regimes
+  (regimes; optional regime_forecast, forecast for the current baseline's name
+  and to check that regime_forecast.json tested it, and scenarios for the
+  library mix),
+  causality (causality), forecast (forecast, scenarios), backtest (backtest, POST backtest/run), diagnostics
   (diagnostics, optional ablation), valuation (valuation, optional
   scenarios), scenarios (scenarios, scenarios/{id}, scenarios/custom), lab
   (llm/status, llm_translator, scenarios, scenarios/{id}, scenarios/custom,
@@ -1598,8 +2012,16 @@ index.html and the README.
   scenarios/custom/{id}), portfolio and withdrawal (portfolio_default,
   scenarios, scenarios/custom, forecast for the calibrated probabilities, POST
   portfolio/evaluate or withdrawal/evaluate), method (meta, optional
-  valuation). `_scenario_detail.js` renders one scenario detail for the
-  scenarios and lab tabs (its P/D card fetches valuation once); `_weights.js`
+  valuation and regimes); optional files go through `api.optional`, so a
+  missing one is not requested (and the regimes tab shows its build hint
+  without requesting regimes.json when `meta.results` lacks it). `_scenario_detail.js` renders one scenario detail for the
+  scenarios and lab tabs (its P/D card fetches valuation once) and exports
+  the regime helpers the scenarios, eras and lab tabs share: `REGIME_LABELS`,
+  `regimeLabels` / `regimeName` / `regimeColor` / `regimeVarName`, `regimeRequest`
+  (a phase's `regime` key in either form as {id: share}), `regimeMix` (chips of
+  the shares that show as 1% or more), `roundShares` (whole percents adding up to
+  100, largest remainder), `regimeBars` (100% stacked bars with a wrapping legend
+  and row labels that wrap on a phone) and `fitTable`; `_weights.js`
   holds the weight, probability and custom-scenario inputs shared by
   portfolio and withdrawal. The valuation tab injects its own styles
   (`style#style-valuation`; app.css is unchanged), and its scenario section
@@ -1637,7 +2059,44 @@ index.html and the README.
   becomes a shareable deep link and 复制链接 copies it. Exogenous shocks are
   shaded on the main, small, macro and transmission charts (legend item 外生冲击),
   named in tooltips and listed under the main chart.
-* **一年期预测**: new sections 情景概率与一年期预测的对账 (the gap split by
+* **宏观体制** (`regimes.js`, after 历史时代画像). Sections A-M: 今天处在什么体制
+  (the real-time label with 「单边、修订后数据」, the readings and the signed
+  distance to every threshold, the last 36 months, the provisional and
+  interpolation notes); 你问的四个词怎么对应到数据 (the 3 x 3 grid of
+  `definitions.grid`, the user's four words 通胀 / 通缩 / 滞胀 / 萧条 mapped to the
+  labels, 通缩 -> 物价负增长 and 萧条 -> 深度衰退 explicitly, and the six labels'
+  counts); the 1948+ timeline (ex post or real time, NBER bands for comparison
+  only); the NBER validation (in and out of sample, alternatives, revisions,
+  2024 as 「接近触发」); assets by regime (a K-line-coloured heatmap, contraction
+  cells outlined as 包含先跌后涨); 收缩期的逐段路径 (every contraction as a real
+  equity path from the month before its start: the fall to the equity low and
+  the rebound, never 「滞胀对股票不坏」); factors (fingerprint palette); transitions
+  and the walk-forward 「对新的收缩没有预测力」; forward returns with the
+  publication lag, the recession-onset mechanism and the joint placebo next
+  to every number; eras; 引擎里的体制 (the support table, history vs engine
+  mixes, what a request delivers, co-movement); 一年期预测里用不用体制 (the
+  regime_forecast families and verdict, or the opt-in command when the file
+  is missing; the current baseline's name from forecast.json, and a 旧结果 notice
+  naming the command when the file tested another forecast: data month, last origin or analog share); 口径说明 (`definitions.conventions`).
+  Every number in a sentence is filled from the JSON; † marks thin cells with
+  the episode list in its tooltip; regime categories use the
+  `definitions.labels[].color` palette, never K-line red / green; tables stack
+  on phones. The eras tab adds a 这一时代的宏观体制 card (ex post / real time
+  bars and the runs) and 各时代的宏观体制构成 when regimes.json exists (omitted
+  without an error otherwise). The scenario detail (`_scenario_detail.js`)
+  adds 宏观体制：模拟路径处在什么状态 after 分阶段视图 (year-1 contraction
+  probability against the reference and history, the anchor's real-time
+  label, the 15 yearly mixes, the per-phase table 要求 / 抽中月份 / 模拟路径 /
+  出现收缩的路径 / 引擎无条件 / 历史基准, and the notes N1-N4); a detail without
+  `regimes` (an older build) says how to get it. The scenario list adds
+  各情景第 1 年的宏观体制 from the index fields; the lab's phase table shows a 体制
+  column when a phase sets `regime`; the overview adds one line linking to
+  `#regimes?today`; the method page adds step 11 宏观体制 and a limitation line.
+* **一年期预测**: the selection table by share of the available starts (with
+  each share's flat origins and paired t; the KPI is coloured only when the
+  claim rule passes, and every selection sentence comes from
+  `selection.text`); the tables wrap or stack instead of scrolling at 900 and
+  390 px; sections 情景概率与一年期预测的对账 (the gap split by
   scenario for every asset, each scenario's first year against its own 15
   years, macro skill against both benchmarks, the calibration and the
   what-ifs) and 实时样本外记录 (the ledger table per asset, stacked on phones,
@@ -1670,9 +2129,9 @@ index.html and the README.
 
 ## Testing
 
-`.venv/bin/python -m pytest -q` runs the whole suite: 309 tests in 15 files
-at the time of writing, about 80 s (309 passed in 82 s after the full build of
-2026-11-01, none skipped). Tests that need local data skip themselves until
+`.venv/bin/python -m pytest -q` runs the whole suite: 412 tests in 18 files
+at the time of writing, about 3 minutes (412 passed in 167 s after the full
+build of 2026-11-02, none skipped). Tests that need local data skip themselves until
 it exists: `needs_panel` / an inline check skip without
 data/processed/panel_monthly.csv; test_server.py's `needs_build` skips
 without data/results/meta.json; others check the specific result file they
@@ -1682,22 +2141,39 @@ needs the `anthropic` package (the llm extra) and never calls the API: it
 injects fake clients and checks that the system prompt is deterministic.
 test_build.py covers the build steps and the sources with the network mocked.
 The server tests that run a custom scenario write into data/results/custom (and
-delete it) or into a temporary directory. A fresh clone (no data/) runs 202
-passed / 107 skipped with the llm extra and 199 passed / 91 skipped without it
-(about 30 s).
+delete it) or into a temporary directory. A fresh clone (no data/) runs 253
+passed / 159 skipped with the llm extra and 248 passed / 140 skipped without it
+(about 30 s). The exact check-value tests of the regime layer skip unless
+panel_meta.json ends in 2026-09 (`CHECK_MONTH` in tests/test_regimes.py), so a
+data update skips them instead of failing.
 
 Files: test_ablation, test_attribution (bit-identity of simulate and run_spec
 with and without the attribution, additivity, the reconciliation, a pure oil
 shock, the structural assets, the lagged-spec fallback, the valuation pull, and
 that the factor terms use the simulated, not the drawn, factor changes),
 test_backtest (incl. the custom windows: validation, no look-ahead, the setup
-cache), test_build, test_causality, test_diagnostics, test_engine, test_eras
-(incl. era_attribution on synthetic and real data), test_forecast (incl. the
-ledger: append-only, refusals, duplicates, scoring on stored quantiles; the
-skill rule and the calibration), test_portfolio (incl. the continuation: the
+cache), test_build (incl. the STEPS order and OPT_IN), test_causality,
+test_diagnostics, test_engine, test_eras (incl. era_attribution on synthetic
+and real data), test_forecast (incl. the ledger: append-only, refusals,
+duplicates, scoring on stored quantiles; the skill rule and the calibration;
+a flat kernel equals uncond bit for bit, every share reachable, the claim
+rule of every generated text), test_portfolio (incl. the continuation: the
 first 15 years bit-identical, one path per row, stale and old-format files
-refused), test_scenarios, test_server, test_translator, test_valuation,
-test_withdrawal.
+refused), test_regime_forecast (the look-ahead guards: check_frame refusals,
+truncation equality, a scrambled future moves no weight at any origin; the
+adoption rule on synthetic score tables; a test-half gain stated with its t
+and the claim rule), test_regimes (46 tests: synthetic
+cases, real time = the ex-post rule on data through t, the own-month unknown
+mask, the labels of 945 months, nowcast with trailing gaps, an empty panel,
+provisional_from, the rg_ columns and the MonthDB as-of window, bit-identity
+with and without rg_ columns and REGIME_READOUT, NBER scores, the
+conventions, the check values, REGIMES high_inflation_pct = the transmission
+threshold), test_regimes_analysis (the regimes.json contract and its check
+values; the forecast test counts only for the same data month), test_scenarios
+(incl. the regime key, W1-W11 and the pools a second check reuses, the readout
+and the index fields), test_server (incl. /api/regimes, the regime_forecast 404
+hint and `results` in /api/meta), test_translator (incl. the regime schema, repair and the prompt
+section), test_valuation, test_withdrawal.
 
 CI (.github/workflows/ci.yml) runs on every push and pull request, on Python
 3.10 and 3.12: `pip install -e ".[dev]"` (no llm extra), `python -m

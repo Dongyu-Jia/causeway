@@ -259,12 +259,12 @@ def scenario_engine_parts(ctx: EngineContext, variant: dict) -> tuple[dict, Valu
 
 # ---------------------------------------------------------------- one-year forecast
 
-def forecast_rows(panel: pd.DataFrame, spec: ModelSpec, dates: list, variant: dict, ens: float,
+def forecast_rows(panel: pd.DataFrame, spec: ModelSpec, dates: list, variant: dict, share: float,
                   n_paths: int = FORECAST_PATHS, seed: int = fc.SEED) -> list[dict]:
-    """The 42 rolling one-year forecasts of a variant (seeds and analog bandwidth as forecast.json)."""
+    """The 42 rolling one-year forecasts of a variant (seeds and analog share of the starts as forecast.json)."""
     settings = variant["settings"]
     return [fc.forecast_origin(panel, spec, t, n_paths, seed + i, cma_method=variant["forecast_cma"],
-                               analog_ens=ens, valuation=settings if settings else {"enabled": False})
+                               valuation=settings if settings else {"enabled": False}, analog_share=share)
             for i, t in enumerate(dates)]
 
 
@@ -740,7 +740,7 @@ def scenario_effects(ctx: EngineContext, variants: list[dict], scen_dir: Path, n
         settings = v["settings"] or track_settings("valuation_adjusted" if v["id"] == "baseline" else v["cma"])
         out = scen_dir / v["id"]
         with scenario_mode(settings):
-            index = library.run(c, n_paths=n_paths, out_dir=out)
+            index = library.run(c, n_paths=n_paths, out_dir=out, regimes=False)
         heads[v["id"]] = _headlines(index, out)
         shutil.rmtree(out, ignore_errors=True)
     base = heads["baseline"]
@@ -1124,12 +1124,12 @@ def run(ctx: EngineContext, n_paths: int = bt.N_PATHS, seeds=SEEDS, variants: li
     base_fan = forward_fan(ctx, vlist[0])
     dates = fc.forecast_origins(panel)
     try:
-        ens = float(jsonio.load(config.RESULTS_DIR / "forecast.json")["analog_ens"])
+        share = float(jsonio.load(config.RESULTS_DIR / "forecast.json")["analog_share"])
     except (OSError, KeyError, ValueError, TypeError):
-        ens = fc.ANALOG_ENS
+        share = fc.ANALOG_SHARE
     f_scores, f_base, f_repro = {}, None, None
     if forecast:
-        rows_base = forecast_rows(panel, spec, dates, vlist[0], ens, forecast_paths)
+        rows_base = forecast_rows(panel, spec, dates, vlist[0], share, forecast_paths)
         f_base = forecast_scores(rows_base)
         f_scores["baseline"] = f_base
         try:
@@ -1177,7 +1177,7 @@ def run(ctx: EngineContext, n_paths: int = bt.N_PATHS, seeds=SEEDS, variants: li
             if v["id"] == "baseline" or (not v["settings"] and v["forecast_cma"] == vlist[0]["forecast_cma"]):
                 sc = f_base                                  # the same one-year engine as the baseline
             elif v["adoptable"] or v["id"] in ("cma_historical", "cma_va"):
-                sc = forecast_scores(forecast_rows(panel, spec, dates, v, ens, forecast_paths))
+                sc = forecast_scores(forecast_rows(panel, spec, dates, v, share, forecast_paths))
                 log(f"forecast {v['id']}")
             else:
                 sc = None
@@ -1263,7 +1263,7 @@ def run(ctx: EngineContext, n_paths: int = bt.N_PATHS, seeds=SEEDS, variants: li
         "settings": {"n_paths": n_paths, "seeds": seeds, "validation": list(val), "test": list(tst),
                      "coverage_drop": COVERAGE_DROP, "min_gain": MIN_GAIN, "fan_drop": FAN_DROP, "fan_paths": FAN_PATHS,
                      "forecast_tol": FORECAST_TOL, "forecast_ic_tol": FORECAST_IC_TOL, "forecast_paths": forecast_paths,
-                     "forecast_split": fc.SPLIT, "analog_ens": ens, "n_origins": len(dates),
+                     "forecast_split": fc.SPLIT, "analog_share": share, "n_origins": len(dates),
                      "residuals": config.RESIDUALS, "engine_valuation": config.VALUATION,
                      "baseline_reproduces_backtest": reproduces, "baseline_reproduces_forecast": f_repro,
                      "seconds": round(time.time() - t0, 1)},

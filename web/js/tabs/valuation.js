@@ -166,7 +166,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
   ensureStyle();
   root.append(h('p', { class: 'lead' },
     '这一页回答一个问题：标普500 / 纳指（QQQ）的市盈率、ROIC、自由现金流，要不要当成宏观因子放进模型？还需不需要再加别的宏观因子？',
-    '先给结论，后面每一节是支撑它的证据，包括对结论不利的部分（公允值回归的系数符号、时期稳定性、拉力的速度）。数字全部来自估值分析（valuation.json）。'));
+    '先给结论，后面每一节是支撑它的证据，包括对结论不利的部分（公允值回归的系数符号、时期稳定性、拉力的速度）。数字全部来自估值分析这一步的构建结果。'));
 
   const wait = ui.loading('读取估值分析结果…');
   root.append(wait);
@@ -175,7 +175,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     [v, scen] = await Promise.all([api.get('valuation'), api.get('scenarios').catch(() => null)]);
   } catch (err) {
     wait.remove();
-    if (err.status === 404) root.append(ui.notice('估值分析结果（valuation.json）还没有生成。', 'info'), ui.buildHint(err));
+    if (err.status === 404) root.append(ui.notice('估值分析结果还没有生成。', 'info'), ui.buildHint(err));
     else root.append(ui.notice(`读取估值分析结果失败：${err.message}`, 'error'));
     return null;
   }

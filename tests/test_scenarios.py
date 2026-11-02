@@ -411,6 +411,22 @@ def test_each_regime_warning_fires_on_its_example(ctx, regime_examples):
 
 
 @needs_panel
+def test_a_second_check_of_the_same_spec_reuses_the_pools(ctx, regime_examples, monkeypatch):
+    """translator.preview and runner.run_spec check the same clean spec: the second check pools nothing (the
+    conflicting stagflation phase needs a pool per pair and per left-out view, seconds each)."""
+    from scenariolab.scenarios.runner import phase_pools
+    stag = next(s for s in library.resolved_specs(ctx) if s["id"] == "stagflation")
+    stag["phases"][0]["regime"] = {"stagflation": 0.8}
+    clean, report = validate_spec(stag, ctx.db.frame)
+    pools = phase_pools(ctx, clean, report["warnings"])
+    calls = []
+    real = rv.pool_phase
+    monkeypatch.setattr(rv, "pool_phase", lambda *a, **k: calls.append(1) or real(*a, **k))
+    again = report["warnings"] + rv.spec_checks(ctx.db, clean, pools, report["clipped"])
+    assert again == regime_examples["spiral"] and not calls
+
+
+@needs_panel
 @check_values
 def test_regime_warnings_check_values(regime_examples):
     ex = regime_examples

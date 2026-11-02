@@ -35,6 +35,29 @@ def test_ui_modules_are_revalidated():
         assert r.headers.get("cache-control") == "no-cache", path
 
 
+def test_regimes_tab_is_routed_after_the_eras_tab():
+    """宏观体制 sits in 历史与因果 right after 历史时代画像, and every deep link of its sections exists."""
+    app_js = client.get("/js/app.js").text
+    assert "{ id: 'regimes', name: '宏观体制' }" in app_js
+    assert app_js.index("id: 'eras'") < app_js.index("id: 'regimes'") < app_js.index("id: 'causality'")
+    r = client.get("/js/tabs/regimes.js")
+    assert r.status_code == 200 and "export async function render" in r.text
+    for key in ("today", "words", "timeline", "validation", "assets", "episodes", "factors", "transitions",
+                "forward", "eras", "engine", "forecast", "conventions"):
+        assert f"['{key}', " in r.text and f"anchor('{key}'" in r.text, key
+    # the tab reads the optional files without failing (or requesting them) when they are missing
+    assert "api.optional('regime_forecast', meta)" in r.text and "api.optional('scenarios', meta)" in r.text
+
+
+def test_tables_that_do_not_fit_wrap_then_stack():
+    """Every tab's tables are watched: too wide for the card -> cells wrap -> rows become labelled blocks."""
+    assert "ui.watchTables(view)" in client.get("/js/app.js").text
+    ui_js = client.get("/js/ui.js").text
+    assert "export function watchTables" in ui_js and "export function fitTable" in ui_js
+    css = client.get("/css/app.css").text
+    assert ".table-wrap.fit-wrap table.tbl td" in css and ".table-wrap.fit-stack table.tbl thead { display: none; }" in css
+
+
 def test_scenario_errors_are_explained_in_chinese():
     r = client.get("/api/scenarios/Bad-Id")
     assert r.status_code == 400 and "不合法" in r.json()["detail"]
@@ -88,6 +111,19 @@ def test_regime_results_are_served_and_a_missing_file_names_its_step(monkeypatch
     (tmp_path / "regimes.json").write_text('{"version": 1, "data_end": "2026-09"}', encoding="utf-8")
     r = client.get("/api/regimes")
     assert r.status_code == 200 and r.json() == {"version": 1, "data_end": "2026-09"}
+
+
+def test_meta_lists_the_result_files_that_exist(monkeypatch, tmp_path):
+    """Pages skip an optional result that is missing (no 404 in the console): /api/meta says which exist."""
+    monkeypatch.setattr(server, "RESULTS", tmp_path)
+    assert client.get("/api/meta").status_code == 404
+    (tmp_path / "meta.json").write_text('{"data_end": "2026-09-01"}', encoding="utf-8")
+    (tmp_path / "regimes.json").write_text('{"version": 1}', encoding="utf-8")
+    (tmp_path / "forecast.json").write_text('{}', encoding="utf-8")
+    r = client.get("/api/meta")
+    assert r.status_code == 200 and r.json() == {"data_end": "2026-09-01", "results": ["forecast", "regimes"]}
+    api_js = (config.ROOT / "web" / "js" / "api.js").read_text(encoding="utf-8")
+    assert "export function optional(name, meta)" in api_js
 
 
 def test_the_startup_thread_also_runs_the_reference_simulation(monkeypatch):

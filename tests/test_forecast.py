@@ -129,6 +129,23 @@ def test_selection_text_never_claims_a_gain_within_noise_or_on_flat_kernels():
     assert "选中 1/2" in noise and "1/32 为 80%" in noise and "_" not in noise     # numbers from the table, no code ids
 
 
+def test_selection_text_says_where_the_choice_sits_in_the_grid():
+    table = _grid(0.0, 0.5, flat=0)
+    for r in table:
+        r["val_crps_uncond"] = 0.11                    # every share scores worse than the unconditional draw
+    best = {**table[-1], "gain_val": 1 - table[-1]["val_crps_analog"] / 0.11, "gain_test": 0.0}
+    txt = fc.selection_text(table, best, fc.SPLIT, 42, 0)[0]
+    assert "选中的 1/2 是候选里最平的一档（最接近无条件抽样），而验证期每一档的 CRPS 都比无条件抽样高（技能 -9.1% 到 -1.8%" in txt
+    narrow = fc.selection_text(table, {**table[0], "gain_val": 0.0, "gain_test": 0.0}, fc.SPLIT, 42, 0)[0]
+    assert "最平的一档" not in narrow and "验证期每一档的 CRPS 都比无条件抽样高" in narrow
+    assert "最平的一档" in _text(0.012, 1.3, flat=0) and "每一档" not in _text(0.012, 1.3, flat=0)
+
+
+def test_ledger_method_names_are_the_display_names():
+    assert all(fc.METHOD_CN[m] == fc.METHODS[m]["name"] for m in ("analog", "uncond", "naive"))
+    assert fc._pct_ui(0.265) == "27%" and fc._pct_ui(0.2649) == "26%" and fc._pct_ui(0.395) == "40%"
+
+
 def test_summary_text_follows_the_same_rule():
     sc = {"analog": {"risk_avg": {"coverage90": 0.9}, "rank_ic": {"mean": 0.2, "t": 3.0},
                      "direction": {"hit_rate": 0.7, "base_rate_up": 0.7}},

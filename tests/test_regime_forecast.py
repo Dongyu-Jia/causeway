@@ -117,3 +117,17 @@ def test_settings_and_their_names():
     assert len(rf.settings_of("b")) == 15 and rf.settings_of("cc") == ["cc"]
     assert rf.setting_text("b50_2") == "λ 0.5，可用起点的 1/2" and rf.setting_text("a2_8") == "可用起点的 1/8"
     assert rf.setting_text("b0_4") == "λ 0，可用起点的 1/4"
+
+
+def test_a_test_half_gain_is_stated_with_the_forecast_modules_claim_rule():
+    """Relative CRPS changes and paired t: negative = better. A gain is claimed only beyond CLAIM_SKILL with
+    |t| >= CLAIM_T; otherwise the text says it is within the noise (the cc family today: -2.83%, t -1.29)."""
+    assert rf.gain_note(-0.0283, -1.29) == "（t = -1.3，在随机误差之内）"
+    assert rf.gain_note(-0.03, -2.4) == "（t = -2.4）"
+    assert rf.gain_note(-0.003, -2.4) == "（t = -2.4，在随机误差之内）"           # below CLAIM_SKILL
+    assert rf.gain_note(-0.03, None) == "（在随机误差之内）"
+    fam = {"id": "cc", "name": "只从同一实时体制的起点抽（3 组）", "passes": False, "better_both_halves_seeds": 0,
+           "risk_crps_rel": {"val": {"mean": 0.0408}, "test": {"mean": -0.0283}}, "t": {"val": 1.31, "test": -1.29},
+           "fragility_seed23": {"best_origins": ["2007-12", "2021-12"], "test_without_best_rel": -0.0089}}
+    text, verdict = rf.report_text([fam], {"name": "现行一年期预测"}, {}, 42, 5, fc.SPLIT)
+    assert "检验期 -2.83%（t = -1.3，在随机误差之内）、验证期 +4.08%" in text and verdict.startswith("未采用")

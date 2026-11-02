@@ -114,6 +114,45 @@ details.scenarios-more[open] > summary { margin-bottom: 8px; }
 /* phase names wrap in the header, so four phases plus 全程 fit a 900 px screen without a side scroll */
 .scenarios-attr-table table.tbl th { white-space: normal; vertical-align: bottom; }
 .scenarios-edge-num { color: var(--accent); font-size: 12px; margin-top: 3px; }
+/* regime mixes: compact chips with the label colour */
+.scenarios-rg { display: flex; flex-wrap: wrap; gap: 3px 8px; font-size: 12px; color: var(--ink-2); line-height: 1.5; }
+.scenarios-rg > span { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.scenarios-rg i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 3px; vertical-align: 0; }
+.scenarios-rg-sub { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+.scenarios-rg-kpi { display: inline-flex; align-items: center; gap: 6px; }
+.scenarios-rg-kpi i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.scenarios-rg-notes { display: grid; gap: 8px; margin-top: 12px; }
+.scenarios-rg-cell { display: flex; flex-direction: column; }
+/* tables that would scroll inside their card: below the box's width (fitTable) every row becomes a block of
+   labelled cells; -sm stacks only on phone-width cards, -md also on a 900 px screen */
+.scenarios-fit-sm, .scenarios-fit-md { container-type: inline-size; }
+@container (max-width: 480px) {
+  .scenarios-fit-sm table.tbl thead { display: none; }
+  .scenarios-fit-sm table.tbl, .scenarios-fit-sm table.tbl tbody, .scenarios-fit-sm table.tbl td { display: block; width: auto; }
+  .scenarios-fit-sm table.tbl tr { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+    column-gap: 16px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+  .scenarios-fit-sm table.tbl td { border: 0; padding: 2px 0; text-align: left !important; white-space: normal; min-width: 0 !important; }
+  .scenarios-fit-sm table.tbl td:first-child { grid-column: 1 / -1; font-weight: 600; }
+  .scenarios-fit-sm table.tbl td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 84px;
+    margin-right: 8px; font-size: 11px; color: var(--ink-3); vertical-align: top; font-weight: 400; }
+  .scenarios-fit-sm table.tbl td:first-child::before { display: none; }
+  .scenarios-fit-sm table.tbl tr.scenarios-why td { grid-column: 1 / -1; }
+  .scenarios-fit-sm table.tbl td > div, .scenarios-fit-sm table.tbl td > .scenarios-rg { display: inline-flex; vertical-align: top; }
+  .scenarios-fit-sm table.tbl td > .scenarios-var { display: inline-flex; }
+}
+@container (max-width: 760px) {
+  .scenarios-fit-md table.tbl thead { display: none; }
+  .scenarios-fit-md table.tbl, .scenarios-fit-md table.tbl tbody, .scenarios-fit-md table.tbl td { display: block; width: auto; }
+  .scenarios-fit-md table.tbl tr { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
+    column-gap: 18px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+  .scenarios-fit-md table.tbl td { border: 0; padding: 2px 0; text-align: left !important; white-space: normal; min-width: 0 !important; }
+  .scenarios-fit-md table.tbl td:first-child { grid-column: 1 / -1; font-weight: 600; }
+  .scenarios-fit-md table.tbl td[data-label]::before { content: attr(data-label); display: inline-block; min-width: 92px;
+    margin-right: 8px; font-size: 11px; color: var(--ink-3); vertical-align: top; font-weight: 400; }
+  .scenarios-fit-md table.tbl td:first-child::before { display: none; }
+  .scenarios-fit-md table.tbl td > div, .scenarios-fit-md table.tbl td > .scenarios-rg { display: inline-flex; vertical-align: top; max-width: calc(100% - 100px); }
+  .scenarios-fit-md table.tbl td > .scenarios-rg-cell { flex-direction: column; }
+}
 `;
 
 // ---------------------------------------------------------------- small shared helpers
@@ -192,6 +231,108 @@ export function table(columns, rows, opts) {
   return el;
 }
 
+// A table that would scroll sideways inside a narrow card becomes a list of labelled blocks instead:
+// 'sm' below about 480 px of card width (a phone), 'md' below about 760 px (also a 900 px screen).
+// el is what ui.table / table() / viewsTable returned; rows that span the table (a view's reason) get no label.
+export function fitTable(el, size = 'sm') {
+  const heads = [...el.querySelectorAll('thead th')].map(th => th.textContent.trim());
+  el.querySelectorAll('tbody tr').forEach((tr) => {
+    if (tr.children.length !== heads.length) return;
+    [...tr.children].forEach((td, i) => { if (heads[i]) td.dataset.label = heads[i]; });
+  });
+  return h('div', { class: `scenarios-fit-${size}` }, el);
+}
+
+// ---------------------------------------------------------------- macro regimes
+
+// The six regime labels in code order (config.REGIMES labels); a result's own `labels` list wins.
+export const REGIME_LABELS = [
+  { id: 'expansion', name: '扩张', term: null, color: '#a5d8ff' },
+  { id: 'inflation', name: '通胀', term: null, color: '#fab005' },
+  { id: 'deflation', name: '物价负增长', term: '通缩', color: '#15aabf' },
+  { id: 'recession', name: '衰退', term: null, color: '#9775fa' },
+  { id: 'depression', name: '深度衰退', term: '萧条', color: '#343a40' },
+  { id: 'stagflation', name: '滞胀', term: null, color: '#b35c00' },
+];
+const REGIME_FLAGS = { contraction: '收缩', severe: '深度收缩', high_infl: '高通胀', cpi_neg: 'CPI 同比为负' };
+export function regimeLabels(list) {
+  return Array.isArray(list) && list.length && list.every(l => l && l.id) ? list : REGIME_LABELS;
+}
+export const regimeName = (id, labels = REGIME_LABELS) => regimeLabels(labels).find(l => l.id === id)?.name || REGIME_FLAGS[id] || id || '—';
+export const regimeColor = (id, labels = REGIME_LABELS) => regimeLabels(labels).find(l => l.id === id)?.color || '#adb5bd';
+
+// "rg_stagflation" -> "体制：滞胀", "rg_contraction" -> "体制标记：收缩" (a rg_rt_ column: 实时…); null otherwise.
+export function regimeVarName(v) {
+  const s = String(v || '');
+  if (!s.startsWith('rg_')) return null;
+  const rt = s.startsWith('rg_rt_');
+  const id = s.slice(rt ? 6 : 3);
+  const isLabel = REGIME_LABELS.some(l => l.id === id);
+  return `${rt ? '实时' : ''}${isLabel ? '体制' : '体制标记'}：${regimeName(id)}`;
+}
+
+// A phase's `regime` request ({id: share}, or the LLM list form [{id, share}]) as {id: share}; null without one.
+export function regimeRequest(x) {
+  const out = {};
+  if (Array.isArray(x)) { for (const d of x) if (d && d.id && isNum(Number(d.share))) out[d.id] = Number(d.share); }
+  else if (x && typeof x === 'object') { for (const [k, v] of Object.entries(x)) if (isNum(Number(v))) out[k] = Number(v); }
+  return Object.keys(out).length ? out : null;
+}
+
+// A mix {id: share} that sums to 1 as whole percents that sum to 100 (largest remainder: 1.7 / 65.8 / 32.5 ->
+// 2 / 66 / 32, where rounding each would print 2 / 66 / 33 = 101).
+export function roundShares(mix, ids = Object.keys(mix || {})) {
+  const raw = ids.map(id => ({ id, v: isNum(mix?.[id]) ? mix[id] * 100 : 0 }));
+  const total = Math.round(raw.reduce((t, x) => t + x.v, 0));
+  raw.forEach((x) => { x.n = Math.floor(x.v + 1e-9); x.r = x.v - x.n; });
+  let left = total - raw.reduce((t, x) => t + x.n, 0);
+  [...raw].sort((a, b) => b.r - a.r).forEach((x) => { if (left > 0) { x.n += 1; left -= 1; } });
+  return Object.fromEntries(raw.map(x => [x.id, x.n]));
+}
+
+// A share mix {id: share} as compact colour chips, largest first, shares of at least `min` (default: every
+// share that shows as 1% or more after rounding, as DESIGN's year-1 table counts them; 0.51% -> "1%").
+export function regimeMix(mix, labels = REGIME_LABELS, { min = 0.005 } = {}) {
+  const items = regimeLabels(labels).map(l => ({ l, v: mix?.[l.id] }))
+    .filter(x => isNum(x.v) && x.v >= min - 1e-9).sort((a, b) => b.v - a.v);
+  if (!items.length) return h('span', { class: 'muted' }, '—');
+  return h('div', { class: 'scenarios-rg' }, items.map(({ l, v }) =>
+    h('span', { title: `${l.name} ${pct(v, 1)}` }, h('i', { style: { background: l.color } }), `${l.name} ${pct(v, 0)}`)));
+}
+
+// Horizontal 100% stacked bars of regime mixes, one row per mix, in the label colours.
+// extra(i) adds tooltip lines (HTML, escaped by the caller) for row i.
+export function regimeBars(el, { rows, mixes, labels = REGIME_LABELS, extra, rowH = 24 }) {
+  const labs = regimeLabels(labels);
+  const used = labs.filter(l => mixes.some(m => (m?.[l.id] || 0) > 0.0005));
+  // a wrapping legend (a scrolling one hides labels at narrow widths): estimate its rows
+  const legendW = used.reduce((t, l) => t + String(l.name).length * 12 + 34, 0);
+  const width = el.clientWidth || 600;
+  const legendRows = Math.max(1, Math.ceil(legendW / Math.max(width - 40, 200)));
+  // row labels wrap inside their slot (a phone would cut "中东战争与石油供给  9.0%"): rows as tall as the
+  // longest label needs at charts.bars' label width
+  const lw = Math.round(Math.min(190, Math.max(64, width * 0.38)));
+  const px = (s) => [...String(s)].reduce((t, ch) => t + (/[\x00-\xff]/.test(ch) ? 6.6 : 11), 0);
+  const rh = Math.max(rowH, Math.max(1, ...rows.map(r => Math.ceil(px(r) / lw))) * 14 + 8);
+  el.style.height = `${rows.length * rh + 44 + legendRows * 22}px`;
+  const chart = charts.bars(el, {
+    x: rows, horizontal: true, wrap: lw, fmt: (v) => `${Math.round(Number(v) * 100)}%`,
+    series: used.map(l => ({ name: l.name, stack: 'rg', color: l.color, data: mixes.map(m => +((m?.[l.id]) || 0).toFixed(4)) })),
+  });
+  chart.setOption({
+    xAxis: { max: 1 }, grid: { top: 12 + legendRows * 22 }, legend: { type: 'plain' },
+    tooltip: { formatter: (ps) => {
+      const i = (Array.isArray(ps) ? ps[0] : ps)?.dataIndex;
+      if (!isNum(i)) return '';
+      const m = mixes[i] || {};
+      const lines = labs.filter(l => (m[l.id] || 0) >= 0.005)
+        .map(l => `<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${l.color};margin-right:5px"></span>${esc(l.name)} <b>${pct(m[l.id], 0)}</b>`);
+      return [`<b>${esc(rows[i])}</b>`, ...lines, ...(extra ? [extra(i)].flat().filter(Boolean) : [])].join('<br/>');
+    } },
+  });
+  return chart;
+}
+
 // Correlations and z-scores: never print "-0.00".
 const f2 = (x) => (isNum(x) ? (Math.abs(x) < 0.005 ? 0 : x).toFixed(2) : '—');
 
@@ -203,6 +344,7 @@ function unitOf(v) {
   if (v.startsWith('s_')) return ui.META.states[id]?.unit || '';
   if (v.startsWith('f_')) return id === 'cpi' ? 'Δlog' : (ui.META.factors[id]?.unit || '');
   if (v.startsWith('e_')) return SHOCK_UNIT;
+  if (v.startsWith('rg_')) return 'share';
   return '';
 }
 
@@ -216,6 +358,7 @@ const logPct = (y) => { const p = (Math.exp(y) - 1) * 100; return `${sfx(p, Math
 export function fmtVar(v, x, { annual = true } = {}) {
   if (!isNum(x)) return '—';
   const unit = unitOf(v);
+  if (unit === 'share') return pct(x, 0);          // a regime column: share of the drawn months
   if (v.startsWith('f_')) {
     const y = annual ? x * 12 : x, per = annual ? '/年' : '/月';
     if (unit === 'Δpp') return `${sfx(y, 2)}pp${per}`;
@@ -236,15 +379,16 @@ export function fmtVar(v, x, { annual = true } = {}) {
 const UNIT_HINT = { Δlog: '年化涨跌幅', Δpp: '年化百分点变化', Δ: '年化点数变化' };
 export function varCell(v) {
   const unit = unitOf(v);
-  const hint = v.startsWith('f_') ? (UNIT_HINT[unit] || '年化变化') : v.startsWith('e_') ? '标准差 σ' : unit === 'pp' ? '%' : unit;
-  return h('div', { class: 'scenarios-var' }, ui.varName(v) || v, h('span', { class: 'mono' }, hint ? `${v} · ${hint}` : v));
+  const hint = v.startsWith('f_') ? (UNIT_HINT[unit] || '年化变化') : v.startsWith('e_') ? '标准差 σ'
+    : unit === 'share' ? '抽中月份的占比' : unit === 'pp' ? '%' : unit;
+  return h('div', { class: 'scenarios-var' }, regimeVarName(v) || ui.varName(v) || v, h('span', { class: 'mono' }, hint ? `${v} · ${hint}` : v));
 }
 
 // What a spec view asks for, in words (keys as in schema.TARGET_KEYS).
 export function viewSpecText(view) {
   const v = view.var || '';
   const parts = [];
-  if (isNum(view.mean)) parts.push(`均值 ${fmtVar(v, view.mean)}`);
+  if (isNum(view.mean)) parts.push(`${v.startsWith('rg_') ? '占抽中月份' : '均值'} ${fmtVar(v, view.mean)}`);
   if (isNum(view.mean_annual)) parts.push(`年化均值 ${fmtVar(v, view.mean_annual / 12)}`);
   if (isNum(view.shift_sd)) parts.push(`比历史均值 ${sfx(view.shift_sd, 2)} 个标准差`);
   if (isNum(view.min)) parts.push(`均值 ≥ ${fmtVar(v, view.min)}`);
@@ -357,7 +501,7 @@ export function phaseCard(ph, k, { labels = [], startYm = null } = {}) {
     const moved = changed(x, r.e.target) || r.e.clipped;
     return h('span', { class: moved ? 'scenarios-changed' : '', title: moved ? `要求 ${fmtVar(r.v.var, r.e.target)}，引擎实际使用 ${fmtVar(r.v.var, x)}` : '' }, fmtVar(r.v.var, x));
   };
-  const viewTable = viewRows.length ? viewsTable(viewRows, used)
+  const viewTable = viewRows.length ? fitTable(viewsTable(viewRows, used))
     : ui.notice('这一阶段没有视图：按 1973 年以来的历史先验抽样（每个 6 个月区块的机会基本均等，只有 2020 年封锁月份被降权）。', 'info');
 
   const ovr = overrideItems(ph.overrides);
@@ -376,6 +520,7 @@ export function phaseCard(ph, k, { labels = [], startYm = null } = {}) {
     ['抽样区块', isNum(ep.block) ? `${ep.block} 个月` : '—', ep.converged === false ? '熵池未完全收敛' : '连续月份一起抽'],
   ].filter(Boolean);
   const oil = oilNote(ph);
+  const req = regimeRequest(ph.regime);
 
   const right = h('div', {},
     h('div', { class: 'scenarios-facts' }, facts.map(([l, v, s]) =>
@@ -397,7 +542,10 @@ export function phaseCard(ph, k, { labels = [], startYm = null } = {}) {
     h('div', { class: 'card-head' }, h('div', {},
       h('h3', { class: 'card-title' }, `阶段 ${k + 1} · ${ph.name || ''}`), h('div', { class: 'card-sub' }, sub))),
     h('div', { class: 'scenarios-phase-grid' },
-      h('div', {}, viewTable,
+      h('div', {},
+        req ? h('div', { style: { marginBottom: '10px' } }, h('div', { class: 'scenarios-sub', style: { marginTop: 0 } }, '要求的宏观体制（占这一阶段抽中月份的比例；对应的体制视图列在下表）'),
+          regimeMix(req, REGIME_LABELS, { min: 0 })) : null,
+        viewTable,
         oil ? h('p', { class: 'scenarios-note scenarios-oil' }, oil) : null,
         ovr.length ? h('div', {}, h('div', { class: 'scenarios-sub' }, '覆盖项（超出历史支撑、有上限的部分）'),
           h('ul', { class: 'scenarios-ovr' }, ovr.map(t => h('li', {}, t)))) : null),
@@ -577,7 +725,7 @@ function headerCard(d, opts) {
 export function validationCard(v) {
   const val = v || {};
   const errors = val.errors || [], warnings = val.warnings || [], clipped = val.clipped || [];
-  const sub = '规格校验（validate_spec）是叙事和引擎之间的护栏：不认识的变量被忽略，超出历史 2%–98% 区间的目标被截断，阶段补齐到 180 个月，所有改动都列在这里。';
+  const sub = '规格校验是叙事和引擎之间的护栏：不认识的变量被忽略，超出历史 2%–98% 区间的目标被截断，阶段补齐到 180 个月，所有改动都列在这里。';
   if (!v) return card({ title: '校验与截断', sub }, ui.notice('这个结果没有附带校验报告。', 'info'));
   if (!errors.length && !warnings.length && !clipped.length) {
     return card({ title: '校验与截断', sub }, ui.notice('校验通过：所有视图和覆盖项都在历史可支撑的范围内，没有被忽略、截断或收缩。', 'info'));
@@ -588,20 +736,21 @@ export function validationCard(v) {
     if (s.startsWith('asset_drift.')) return `资产漂移 · ${ui.assetName(s.slice(12))}`;
     if (s === 'resid_scale') return '残差缩放';
     if (s === 'r_star') return '中性实际利率 r*';
-    return `${ui.varName(s) || s}（${s}）`;
+    if (s.startsWith('regime.')) return `宏观体制要求 · ${regimeName(s.slice(7))}`;
+    return `${regimeVarName(s) || ui.varName(s) || s}（${s}）`;
   };
   return card({ title: '校验与截断', sub },
     errors.length ? ui.notice(`错误：${errors.join('；')}`, 'error') : null,
     warnings.length ? h('ul', { class: 'list', style: { margin: '6px 0 0' } }, warnings.map(w => h('li', {}, w))) : null,
     clipped.length ? h('div', { style: { marginTop: '10px' } },
       h('div', { class: 'scenarios-sub' }, `被截断的数值（${clipped.length} 处）`),
-      table([
+      fitTable(table([
         { key: 'phase', label: '阶段', fmt: (x) => (x ? `阶段 ${x}` : '—') },
         { key: 'var', label: '变量 / 参数', fmt: varLabel, left: true },
         { key: 'key', label: '键', fmt: (x) => x || '—', left: true },
         { key: 'requested', label: '要求值', fmt: (x) => (isNum(x) ? String(Number(x.toPrecision(4))) : '—') },
         { key: 'used', label: '实际使用', fmt: (x) => (isNum(x) ? String(Number(x.toPrecision(4))) : '—'), cls: 'scenarios-changed' },
-      ], clipped)) : null);
+      ], clipped))) : null);
 }
 
 function narrativeCard(d) {
@@ -662,7 +811,7 @@ const ATTR_HINT = {
   intercept: '所有因子变动为零时传导模型给出的价格回报（1973 年以来全样本回归的常数）；每个情景都一样',
   unattributed: '传导模型不是同月因子的线性组合（神经网络、滞后或通胀状态交互项），系统性部分不拆分',
   cma: '资本市场假设：去掉历史上估值抬升的顺风，并向中位数估值部分回归；每个情景都一样',
-  overrides: '情景的资产额外漂移（asset_drift，超出历史支撑、有上限）；因子漂移通过因子路径体现在因子项里',
+  overrides: '情景的资产额外漂移（超出历史支撑、有上限）；因子漂移通过因子路径体现在因子项里',
   valuation_pull: '估值状态模式下价格被拉向合理估值的部分',
   residual: '抽到的历史月份里因子解释不了的部分（残差部分耦合：一半来自同一批月份，一半来自独立抽样）',
   income: '股息或利息收入（按今天的收益率）',
@@ -1128,7 +1277,7 @@ function assetSection(d, state, labels, later) {
         actions: ui.seg([{ value: 'nominal', label: '名义' }, { value: 'real', label: '实际' }], state.fan, (v) => { state.fan = v; drawFan(); }) },
       fanBox, fanNote)),
     card({ title: '各资产 15 年年化回报（CAGR）分布', sub: 'p5 / p50 / p95 是所有路径的 5% / 50% / 95% 分位；实际 = 按每条路径自己的 CPI 折算；收入回报是股息或利息的年化平均。点击一行切换上方图表。' },
-      statsBody),
+      fitTable(statsBody, 'md')),
   ];
 }
 
@@ -1252,14 +1401,14 @@ function corrSection(d, state, later) {
           drawPost();
         }) }, ui.wideChart(postBox, 520)),          // 13 x 13 cells: a phone scrolls the matrix sideways
       card({ title: '历史相关性（先验，1973 年以来）', sub: '所有历史月份等权的相关系数，作为对照：两图的差别来自情景抽到的历史月份不同（例如通胀时期股债同涨同跌）。' },
-        prior ? ui.wideChart(priorBox, 520) : ui.notice('结果里没有先验相关性（corr_prior）。', 'info'))),
+        prior ? ui.wideChart(priorBox, 520) : ui.notice('结果里没有历史（先验）相关性。', 'info'))),
     prior ? card({ title: '情景改变最多的资产联动', sub: '按 |后验 − 先验| 排序；股债相关由负转正意味着债券在这个情景里不再是股票的对冲。' },
-      table([
+      fitTable(table([
         { key: 'pair', label: '资产对' },
         { key: 'prior', label: '历史（先验）', fmt: f2 },
         { key: 'post', label: '情景（后验）', fmt: f2 },
         { key: 'diff', label: '变化', fmt: (x) => (isNum(x) ? sfx(x, 2) : '—'), cls: (x) => (Math.abs(x) >= 0.1 ? 'scenarios-changed' : '') },
-      ], pairs.slice(0, 8))) : null,
+      ], pairs.slice(0, 8)))) : null,
   ];
 }
 
@@ -1301,7 +1450,7 @@ function calibrationSection(d, later) {
       h('p', { class: 'scenarios-note' }, `无冲击基准（最近 12 个月均值）：工业产出同比 ${pp(base.ip_yoy, 2)}，服务通胀 ${pp(base.services_yoy, 2)}；阶段长度 ${isNum(imp.years) ? imp.years.toFixed(1) : '—'} 年。`));
     const chartCard = card({ title: '各收入组对总消费变化的贡献', sub: '橙色是工资和岗位（劳动收入渠道），蓝色是股票财富效应：K 型结构下前 10% 的财富效应可以抵消中层白领收入下降对消费的拖累，但也让消费依赖股市。' }, box);
 
-    const groupTable = ui.table([
+    const groupTable = fitTable(ui.table([
       { key: 'name', label: '收入组' },
       { key: 'consumption_share', label: '消费占比', fmt: (x) => pct(x, 0) },
       { key: 'labor_income_shock', label: '劳动收入冲击', fmt: pct2, cls: ui.signCls },
@@ -1312,7 +1461,7 @@ function calibrationSection(d, later) {
       { key: 'consumption_change_wealth', label: '本组消费：财富渠道', fmt: pct2, cls: ui.signCls },
       { key: 'contribution', label: '对总消费的贡献', fmt: pct2, cls: ui.signCls },
       { key: 'unemployment_direct_pp', label: '直接失业', fmt: (x) => (isNum(x) ? `${sfx(x, 2)}pp` : '—') },
-    ], groups);
+    ], groups), 'md');
 
     const ec = c.engine_check || {};
     const checkRows = [
@@ -1331,15 +1480,15 @@ function calibrationSection(d, later) {
       Object.keys(ovDrift).length ? h('div', {}, h('div', { class: 'scenarios-sub' }, '写入该阶段的因子漂移'),
         h('ul', { class: 'scenarios-ovr' }, Object.entries(ovDrift).map(([f, x]) => h('li', {}, `${factorLabel(f)} ${driftText(f, x)}${notes[f] ? `：${notes[f]}` : ''}`)))) : null);
     const checkCard = card({ title: '计算器假设 vs 引擎模拟', sub: '同一阶段里引擎实际模拟出来的数值（含抽到的历史月份自带的背景波动）；两者接近说明视图和漂移把计算器的结论落实了。' },
-      ui.table([
-        { key: 'item', label: '指标' },
+      fitTable(ui.table([
+        { key: 'item', label: '指标', wrap: true },
         { key: 'assumed', label: '计算器假设' },
         { key: 'engine', label: '引擎模拟', wrap: true },
-      ], checkRows));
+      ], checkRows)));
 
-    const params = imp.params || {}, pnotes = c.param_notes || {};
+    const params = imp.params || {}, pnotes = c.param_notes || {}, pnames = c.param_names || {};
     const paramRows = Object.entries(params).map(([k, v]) => ({
-      key: k,
+      key: k, name: pnames[k] || null,
       value: v && typeof v === 'object' ? Object.entries(v).map(([g, x]) => `${groups.find(gg => gg.id === g)?.name || g} ${x}`).join('；') : String(v),
       note: pnotes[k] || '',
     }));
@@ -1348,11 +1497,12 @@ function calibrationSection(d, later) {
       groupTable,
       h('details', { class: 'scenarios-more' }, h('summary', {}, '公式、参数来源与局限'),
         h('ul', { class: 'list' }, (c.formulae || []).map(t => h('li', {}, t))),
-        paramRows.length ? table([
-          { key: 'key', label: '参数', fmt: (x) => h('span', { class: 'mono' }, x) },
-          { key: 'value', label: '取值', left: true },
+        // the Chinese name (calibrate.PARAM_NAMES); a result built before it existed shows the key
+        paramRows.length ? fitTable(table([
+          { key: 'key', label: '参数', wrap: true, fmt: (x, r) => (r.name ? r.name : h('span', { class: 'mono' }, x)) },
+          { key: 'value', label: '取值', left: true, wrap: true },
           { key: 'note', label: '说明', wrap: true, fmt: (x) => x || '—' },
-        ], paramRows) : null,
+        ], paramRows)) : null,
         (c.caveats || []).length ? h('ul', { class: 'list', style: { marginTop: '8px' } }, c.caveats.map(t => h('li', { class: 'muted' }, t))) : null)),
       h('div', { class: 'scenarios-pair' }, mapCard, checkCard)));
   }
@@ -1365,8 +1515,8 @@ function probabilitySection(d, later) {
   if (!p || !p.z || !Object.keys(p.z).length) {
     const custom = (d.source || 'builtin') !== 'builtin';
     return [card({ title: '概率从哪里来', sub },
-      ui.notice(custom ? `这是自定义情景：概率只对内置情景库统一计算（先验 × 似然再归一化），这里没有后验概率。规格里的主观先验 prior_prob = ${pct(d.prior_prob, 0)}。`
-        : `结果里没有概率明细（probability.z）：后验概率 ${pct(d.prob, 1)}，主观先验 ${pct(p?.prior ?? d.prior_prob, 1)}。`, 'info'))];
+      ui.notice(custom ? `这是自定义情景：概率只对内置情景库统一计算（先验 × 似然再归一化），这里没有后验概率。规格里的主观先验是 ${pct(d.prior_prob, 0)}。`
+        : `结果里没有概率明细：后验概率 ${pct(d.prob, 1)}，主观先验 ${pct(p?.prior ?? d.prior_prob, 1)}。`, 'info'))];
   }
   const states = Object.keys(p.z);
   const name = (s) => ui.META.states[s]?.name || PROB_STATES[s] || s;
@@ -1389,14 +1539,104 @@ function probabilitySection(d, later) {
         ui.kpi('主观先验', pct(p.prior, 1), '规格作者给的先验（已在情景库内归一化）'),
         ui.kpi('似然 L', isNum(p.likelihood) ? p.likelihood.toFixed(3) : '—', `L = exp(−½·平均 z²)，距离 ${isNum(p.distance) ? p.distance.toFixed(2) : '—'}`),
         ui.kpi('后验概率', pct(p.posterior, 1), '先验 × L^γ，再在情景库内归一化')),
-      table([
+      fitTable(table([
         { key: 'state', label: '状态', fmt: name },
         { key: 'today', label: '今天（近 6 个月均值）', fmt: (x) => pp(x, 2) },
         { key: 'mean', label: '情景第一阶段均值', fmt: (x) => pp(x, 2) },
         { key: 'z', label: 'z', fmt: (x) => (isNum(x) ? sfx(x, 2) : '—'), cls: (x) => (Math.abs(x) >= 1 ? 'scenarios-changed' : '') },
-      ], rows),
+      ], rows)),
       p.method ? h('details', { class: 'scenarios-more' }, h('summary', {}, '完整的计算说明'), h('p', { class: 'muted', style: { margin: 0 } }, p.method)) : null),
     card({ title: '今天与情景开局的距离 z（按状态）', sub: 'z = (今天 − 情景第一阶段均值) / 历史标准差；虚线是 ±1，橙色条说明今天在这个维度上不太像该情景的开局，会压低它的概率。' }, box))];
+}
+
+// The regime readout (detail.regimes, scenarios/regime_views.readout): every simulated path is labelled
+// by the same rules as history, next to the drawn months' own labels, the engine's unconditional
+// reference run over the same months and the historical base rate.
+function regimeSection(d, later) {
+  const r = d.regimes;
+  if (!r || typeof r !== 'object' || !Array.isArray(r.phases)) {
+    return [ui.notice('这个结果没有宏观体制读数（由旧版本生成）：内置情景运行 python -m scenariolab.build --only scenarios regimes 后可见，自定义情景重新运行一次即可。', 'info')];
+  }
+  const labels = regimeLabels(r.labels);
+  const name = (id) => regimeName(id, labels);
+  const w1 = r.windows?.year1 || {}, whole = r.windows?.whole || {};
+  const phases = r.phases;
+  const argmax = (m) => Object.entries(m || {}).filter(([, v]) => isNum(v)).sort((a, b) => b[1] - a[1])[0] || [null, null];
+
+  // KPI 1: paths with a contraction month in year 1. The 12-month historical base rate comes with the
+  // phase that is exactly year 1, otherwise from the library index (cached by api.js).
+  const p1 = phases.find(p => p.start_month === 0 && p.months === 12);
+  const histText = (x) => (isNum(x) ? `，历史 ${pct(x, 1)}` : '');
+  const sub1 = h('span', {}, `引擎无条件 ${pct(w1.reference?.paths_with_contraction, 1)}${histText(p1?.history_base_rate)}`);
+  if (!p1) {
+    api.get('scenarios').then((ix) => {
+      const x = ix?.regimes?.history?.p_contraction_12m_window;
+      if (isNum(x) && sub1.isConnected) sub1.append(histText(x));
+    }).catch(() => {});
+  }
+  const a = r.anchor || {};
+  const mix = a.label_expost_mix || {};
+  const mixIds = Object.keys(mix).filter(k => (mix[k] || 0) > 0);
+  const anchorSub = `${a.month || '—'} 实时（单边、修订后数据）`
+    + (mixIds.length === 1 && mixIds[0] === a.label_rt ? `；各路径的事后标签也都是${name(a.label_rt)}`
+      : mixIds.length ? `；事后标签随路径而定：${mixIds.sort((x, y) => mix[y] - mix[x]).map(k => `${name(k)} ${pct(mix[k], 0)}`).join('、')}` : '');
+  const [domId, domShare] = argmax(whole.simulated);
+  const domRef = whole.reference?.simulated?.[domId];
+  const kpis = h('div', { class: 'scenarios-kpis' },
+    ui.kpi('第 1 年出现收缩的路径', pct(w1.paths_with_contraction, 1), sub1),
+    ui.kpi('起点（今天）', a.label_rt ? h('span', { class: 'scenarios-rg-kpi' }, h('i', { style: { background: regimeColor(a.label_rt, labels) } }), name(a.label_rt)) : '—', anchorSub),
+    ui.kpi('全程主导', domId ? h('span', { class: 'scenarios-rg-kpi' }, h('i', { style: { background: regimeColor(domId, labels) } }), name(domId)) : '—',
+      domId ? `15 年模拟月份里占 ${pct(domShare, 0)}${isNum(domRef) ? `（引擎无条件 ${pct(domRef, 0)}）` : ''}` : ''));
+
+  // chart: each simulated year's mix
+  const years = Array.isArray(r.years) ? r.years : [];
+  const box = h('div', { class: 'chart' });
+  if (years.length) {
+    later.push([box, () => regimeBars(box, {
+      rows: years.map(y => `第 ${y.year} 年`), mixes: years.map(y => y.simulated || {}), labels,
+      extra: (i) => (isNum(years[i]?.paths_with_contraction) ? `这一年出现收缩的路径 <b>${pct(years[i].paths_with_contraction, 0)}</b>` : ''),
+    })]);
+  }
+
+  // per-phase table
+  const mixCell = (m) => regimeMix(m, labels);
+  const tbl = fitTable(table([
+    { value: (x) => x, label: '阶段', left: true, wrap: true, minWidth: 104, fmt: (x) => `${x.k + 1}. ${x.p.name || ''}` },
+    { value: (x) => x.p.months, label: '月数' },
+    { value: (x) => x.p.requested, label: '要求', left: true, wrap: true, minWidth: 44, fmt: (m) => (m ? regimeMix(m, labels, { min: 0 }) : '—') },
+    { value: (x) => x.p.drawn, label: '抽中月份', left: true, wrap: true, fmt: mixCell },
+    { value: (x) => x.p.simulated, label: '模拟路径', left: true, wrap: true, fmt: mixCell },
+    { value: (x) => x.p.paths_with_contraction, label: '出现收缩的路径', fmt: (v) => pct(v, 0) },
+    { value: (x) => x.p.reference, label: '引擎无条件（同一时段）', left: true, wrap: true,
+      fmt: (ref) => h('div', { class: 'scenarios-rg-cell' }, mixCell(ref?.simulated), h('div', { class: 'scenarios-rg-sub' }, `出现收缩的路径 ${pct(ref?.paths_with_contraction, 0)}`)) },
+    { value: (x) => x.p.history_base_rate, label: '历史基准',
+      fmt: (v, x) => h('span', { title: `1973 年以来的历史里，每个 ${x.p.months} 个月窗口中含收缩月份的窗口占比` }, pct(v, 0)) },
+  ], phases.map((p, k) => ({ p, k }))), 'md');
+
+  // contraction episodes over the 15 years against the reference run and history
+  const ep = r.episodes || {};
+  const er = ep.reference || {}, eh = ep.history || {};
+  const hn = isNum(eh.episodes) ? eh.episodes : null;
+  const ofHist = (k) => (hn !== null && isNum(eh[k]) ? `历史 ${hn} 段中 ${eh[k]} 段` : '');
+  const epText = isNum(ep.per_path)
+    ? `收缩段：每条路径 15 年里平均 ${ep.per_path.toFixed(2)} 段（引擎无条件 ${isNum(er.per_path) ? er.per_path.toFixed(2) : '—'}，历史每 15 年 ${isNum(eh.per_15y) ? eh.per_15y.toFixed(2) : '—'}）；`
+      + `平均 ${isNum(ep.length_mean) ? ep.length_mean.toFixed(1) : '—'} 个月（引擎无条件 ${isNum(er.length_mean) ? er.length_mean.toFixed(1) : '—'}，历史 ${isNum(eh.length_mean) ? eh.length_mean.toFixed(1) : '—'}）；`
+      + `${pct(ep.share_longer_than_18m, 0)} 超过 18 个月（引擎无条件 ${pct(er.share_longer_than_18m, 0)}${ofHist('longer_than_18m') ? `，${ofHist('longer_than_18m')}` : ''}）；`
+      + `${pct(ep.share_severe, 0)} 达到深度收缩（引擎无条件 ${pct(er.share_severe, 0)}${ofHist('severe') ? `，${ofHist('severe')}` : ''}）。`
+    : '';
+  const notes = (r.notes || []).filter(Boolean);
+  return [card({
+    title: '每年与每个阶段的宏观体制',
+    sub: '每条模拟路径都按同一套规则贴标签；“抽中月份”是模拟月份取自的那个历史月份本身的标签——两者不同，因为模拟的 CPI 同比和工业产出是从今天的水平累加出来的。',
+    actions: h('a', { href: '#regimes' }, '宏观体制 →'),
+  },
+  kpis,
+  years.length ? h('div', { class: 'scenarios-sub' }, '模拟路径每一年的体制构成') : null,
+  years.length ? box : null,
+  h('div', { class: 'scenarios-sub' }, '各阶段：要求、抽中月份、模拟路径和两个对照'),
+  tbl,
+  epText ? h('p', { class: 'scenarios-note' }, epText) : null,
+  notes.length ? h('div', { class: 'scenarios-rg-notes' }, notes.map(n => ui.notice(n, 'info'))) : null)];
 }
 
 function specSection(d) {
@@ -1404,7 +1644,7 @@ function specSection(d) {
   let text = '';
   try { text = JSON.stringify(d.spec, null, 2); } catch (_) { text = String(d.spec); }
   return [h('details', { class: 'scenarios-more card' },
-    h('summary', {}, '查看引擎实际运行的情景规格（validate_spec 校验之后的 JSON）'),
+    h('summary', {}, '查看引擎实际运行的情景规格（校验之后的 JSON）'),
     h('pre', { class: 'code' }, text))];
 }
 
@@ -1433,6 +1673,8 @@ export function renderScenarioDetail(root, d, ctx = {}, opts = {}) {
     h('div', { class: 'scenarios-stack' }, narrativeCard(d), chainCard(d, later, state, bus), attributionCard(d, state, later, bus)),
     section('分阶段视图：每一阶段像历史上的哪些月份'),
     h('div', { class: 'scenarios-stack' }, phaseSection(d, labels, later)),
+    section('宏观体制：模拟路径处在什么状态'),
+    h('div', { class: 'scenarios-stack' }, regimeSection(d, later)),
     section('资产：K 线与分布（全部由引擎从真实历史月份生成）'),
     h('div', { class: 'scenarios-stack' }, assetSection(d, state, labels, later)),
     section('宏观路径'),

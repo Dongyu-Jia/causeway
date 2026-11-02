@@ -1,7 +1,11 @@
 // Future scenarios: the built-in library ranked by posterior probability, a cross-scenario
 // comparison of 15-year median returns, and the full detail of the selected scenario
-// (shared renderer in _scenario_detail.js). Deep link: #scenarios?<id> (built-in or custom).
-import { renderScenarioDetail, disposeCharts, ensureStyle, ensureDetailStyle, shortName, errorText, isNum, pct, pp, esc } from './_scenario_detail.js';
+// (shared renderer in _scenario_detail.js), plus each scenario's year-1 macro regime mix from the
+// index. Deep link: #scenarios?<id> (built-in or custom).
+import {
+  renderScenarioDetail, disposeCharts, ensureStyle, ensureDetailStyle, shortName, errorText, isNum, pct, pp, esc,
+  REGIME_LABELS, regimeBars,
+} from './_scenario_detail.js';
 
 const CSS = `
 .scenarios-list { grid-template-columns: repeat(auto-fill, minmax(255px, 1fr)); }
@@ -95,7 +99,7 @@ export async function render(root, ctx) {
     '再按今天的利率、估值和股息率把抽到的月份拼成 15 年路径。K 线、扇形图和年化回报全部由引擎计算；',
     '概率是透明的启发式（主观先验 × 与今天状态的吻合度），不是预测。'));
   if (!list.length) {
-    root.append(ui.notice('情景库是空的（scenarios.json 里没有情景）。在项目根目录运行 python -m scenariolab.build。', 'info'));
+    root.append(ui.notice('情景库是空的。在项目根目录运行 python -m scenariolab.build。', 'info'));
     return;
   }
 
@@ -152,6 +156,32 @@ export async function render(root, ctx) {
     actions: ui.seg(MODES.map(m => ({ value: m.value, label: m.label })), mode, (v) => { mode = v; drawCompare(); }) },
   h('div', { class: 'scenarios-scroll' }, cmpBox), cmpNote));
   cmpBox.append(ui.loading('正在载入全部情景的结果…'));
+
+  // ---- each scenario's year-1 macro regime mix: index fields only (scenarios[].regimes, regimes)
+  const rgList = list.filter(s => s.regimes?.year1);
+  const rgIdx = index.regimes || {};
+  const rgBox = h('div', { class: 'chart' });
+  const rgNote = h('p', { class: 'scenarios-note' });
+  const nRef = rgIdx.reference?.n_paths;
+  root.append(h('div', { style: { height: '16px' } }), card({ title: '各情景第 1 年的宏观体制', cls: 'scenarios-card',
+    sub: `每一行是一个情景第 1 年模拟路径的体制构成（事后标签，和历史月份用同一套规则）；“按概率加权”按后验概率平均，`
+      + `“引擎无条件”是不加任何视图的引擎参考运行${isNum(nRef) ? `（${nRef} 条路径）` : ''}。悬停查看第 1 年出现收缩的路径占比，点击条形查看该情景。`,
+    actions: h('a', { href: '#regimes' }, '宏观体制 →') },
+  rgList.length ? [rgBox, rgNote]
+    : ui.notice('情景库里没有宏观体制读数（由旧版本生成）：运行 python -m scenariolab.build --only scenarios regimes 后可见。', 'info')));
+  if (rgList.length) {
+    const rows = rgList.map(s => ({ label: `${shortName(s.name)}  ${pct(s.prob, 1)}`, mix: s.regimes.year1, p: s.regimes.p_contraction_year1, s }));
+    if (rgIdx.year1_weighted) rows.push({ label: '按概率加权', mix: rgIdx.year1_weighted, p: rgIdx.p_contraction_year1_weighted });
+    if (rgIdx.reference?.year1) rows.push({ label: '引擎无条件', mix: rgIdx.reference.year1, p: rgIdx.reference.p_contraction_year1 });
+    const rgChart = regimeBars(rgBox, { rows: rows.map(r => r.label), mixes: rows.map(r => r.mix), labels: REGIME_LABELS, rowH: 26,
+      extra: (i) => [rows[i]?.s ? `后验概率 ${pct(rows[i].s.prob, 1)}` : '',
+        isNum(rows[i]?.p) ? `第 1 年出现收缩的路径 <b>${pct(rows[i].p, 1)}</b>` : '', rows[i]?.s ? '点击查看这个情景' : ''] });
+    rgChart.on('click', (p) => { const s = rows[p.dataIndex]?.s; if (s) select(s.id, { scroll: true }); });
+    const hist = rgIdx.history?.p_contraction_12m_window;
+    rgNote.textContent = `第 1 年出现收缩的路径：按概率加权 ${pct(rgIdx.p_contraction_year1_weighted, 1)}，引擎无条件 ${pct(rgIdx.reference?.p_contraction_year1, 1)}`
+      + `${isNum(hist) ? `，历史上任意 12 个月窗口里含收缩月份的比例 ${pct(hist, 1)}` : ''}。`
+      + '引擎无条件抽样的 CPI 同比本身偏高，模拟路径里“通胀”的占比因此系统性偏大，比较时请对照“引擎无条件”这一行。';
+  }
 
   // ---- the P/D each scenario's paths imply 15 years on (recorded at κ=0, no valuation pull; the
   // evidence for that is on 估值与盈利)

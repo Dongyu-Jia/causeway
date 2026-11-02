@@ -27,24 +27,24 @@ const CHECK = { coverage: '覆盖率', forward_fan: '长期分布', gain: '改�
 
 // The ablation prose (ablation.json) names engine variants, scenarios and settings by id: "recentered_50（验证
 // 3.40%…）", "变化最大的是 financial_crisis", "相对 historical 的改善", "H6 MIN_ENS". Show their names instead.
-// An id the text puts in parentheses right after its name ("「部分耦合（50% 混合）」（partial_50）") is a deliberate
-// cross-reference and stays; a space next to a replaced id is dropped where it would sit between Chinese characters.
+// An id the text puts in parentheses right after its name ("「部分耦合（50% 混合）」（partial_50）") is dropped with
+// its parentheses (the name is already there); a space next to a replaced id is dropped where it would sit between
+// Chinese characters.
 function humanIds(variants, scen) {
   const names = new Map();
   // "baseline" is both the reference variant and a scenario id: the text's own wording is kept for it
   for (const v of variants || []) if (v?.id && v.name && v.id !== 'baseline') names.set(v.id, `「${v.name}」`);
   for (const s of scen?.scenarios || []) if (s?.id && s.name && s.id !== 'baseline' && !names.has(s.id)) names.set(s.id, `「${s.name}」`);
   for (const [k, x] of Object.entries({ historical: '历史漂移', valuation_adjusted: '估值调整', MIN_ENS: '最少有效月份', spec: '情景规格',
-    'backtest.json': '回测页', 'config.RESIDUALS': '引擎的残差设定' })) {
+    'backtest.json': '回测页', 'config.RESIDUALS': '引擎的残差设定', asset_drift: '资产漂移覆盖项' })) {
     if (!names.has(k)) names.set(k, x);
   }
   if (!names.size) return (t) => t;
   const alts = [...names.keys()].sort((a, b) => b.length - a.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
   const rx = new RegExp(`( ?)(?<!\\w)(${alts})(?!\\w)( ?)`, 'g');
+  const named = new RegExp(`（(?:${alts})）`, 'g');                     // "「name」（id）" -> "「name」"
   const wide = (ch) => !!ch && /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/.test(ch);
-  return (t) => (typeof t !== 'string' ? t : t.replace(rx, (m, sp1, id, sp2, off, str) => {
-    const start = off + sp1.length, end = start + id.length;
-    if (str[start - 1] === '（' && str[end] === '）') return m;          // "「name」（id）": already named
+  return (t) => (typeof t !== 'string' ? t : t.replace(named, '').replace(rx, (m, sp1, id, sp2, off, str) => {
     return `${sp1 && !wide(str[off - 1]) ? ' ' : ''}${names.get(id)}${sp2 && !wide(str[off + m.length]) ? ' ' : ''}`;
   }).replace(/历史漂移漂移/g, '历史漂移'));                                // "historical 漂移"
 }
@@ -179,7 +179,9 @@ table.diagnostics-heat td.h { white-space: normal; text-align: left; color: var(
 .diagnostics-select { border: 1px solid #cdd7ff; background: #f7f9ff; border-radius: 8px; padding: 12px 14px; }
 table.tbl td.diagnostics-nowrap { white-space: nowrap; font-weight: 600; color: var(--ink); vertical-align: top; }
 table.tbl td.diagnostics-top { vertical-align: top; }
-.diagnostics-hyp { min-width: 320px; line-height: 1.7; color: var(--ink-2); }
+.diagnostics-hyp { min-width: min(320px, 100%); line-height: 1.7; color: var(--ink-2); }
+/* stacked rows (a phone) take the card's width: the 320 px floor only holds the column open on wider cards */
+.table-wrap.fit-stack .diagnostics-hyp, .tbl-stack .diagnostics-hyp { min-width: 0; }
 .diagnostics-hyp details { margin-top: 4px; }
 .diagnostics-hyp details p { margin: 4px 0; }
 table.diagnostics-var td { vertical-align: top; }
@@ -877,7 +879,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
     if (res.e) {
       abBox.append(res.e.status === 404
         ? ui.notice(/python -m/.test(String(res.e.message)) ? `引擎消融结果尚未生成：${res.e.message}`
-          : '引擎消融结果尚未生成：在项目根目录运行 python -m scenariolab.build --only ablation（约 6 分钟，默认构建不包含这一步）。', 'info')
+          : '引擎消融结果尚未生成：在项目根目录运行 python -m scenariolab.build --only ablation（约 5 分钟，默认构建不包含这一步）。', 'info')
         : ui.notice(`读取引擎消融结果失败：${res.e.message || res.e}`, 'error'));
       return;
     }
@@ -915,7 +917,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
       `每个数字是 ${nSeeds} 个随机种子的平均${isNum(set.n_paths) ? `（每个种子 ${set.n_paths} 条路径）` : ''}，各方案用同一批种子，差别只来自改动本身`
       + `${reproduces === true ? `；现行引擎${switched ? `「${c.vName(engineId)}」` : ''}的结果与回测页一致` : reproduces === false ? '；注意：现行引擎的结果与回测页不完全一致（可能是回测或消融其中一个还没有重新生成）' : ''}。`) : null,
     switched ? h('div', { style: { marginTop: '10px' } }, ui.notice(
-      `引擎已经改用消融选出的「${c.vName(engineId)}」（${engineId}）：回测、未来情景和一年期预测都在用它。下面的“基准引擎（采用前）”是原来的设置，各方案的改善都相对它计算。`, 'info')) : null,
+      `引擎已经改用消融选出的「${c.vName(engineId)}」：回测、未来情景和一年期预测都在用它。下面的“基准引擎（采用前）”是原来的设置，各方案的改善都相对它计算。`, 'info')) : null,
     W.length ? h('div', { class: 'diagnostics-chips', style: { marginTop: '10px' } },
       W.map(w => ui.chip(`${c.wLabel(w)} ${Array.isArray(w.test) ? `${w.test[0] || ''} 至 ${w.test[1] || ''}` : ''}`, w.role === 'test' ? 'good' : 'accent'))) : null));
 
@@ -967,7 +969,7 @@ export async function render(root, { api, charts, ui, param, alive = () => root.
         h('dl', { class: 'kv' },
           h('dt', {}, '选择规则'), h('dd', {}, c.human(show(sel.rule))),
           h('dt', {}, '选中方案'), h('dd', {}, c.vName(sel.chosen)),
-          engineId ? [h('dt', {}, '引擎现在用的'), h('dd', {}, `${c.vName(engineId)}（${engineId}）`,
+          engineId ? [h('dt', {}, '引擎现在用的'), h('dd', {}, c.vName(engineId),
             switched ? '：回测、未来情景和一年期预测都已改用它' : '')] : null,
           elig !== null ? [h('dt', {}, '满足条件的候选'), h('dd', {}, elig || '无')] : null,
           h('dt', {}, '理由'), h('dd', {}, c.human(show(sel.reason))))));

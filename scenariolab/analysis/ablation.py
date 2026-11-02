@@ -336,7 +336,7 @@ def scenario_effects(ctx: EngineContext, variants: list[dict], out_dir: Path, n_
     heads = {}
     for vid, params, c in runs:
         with scenario_engine(params):
-            heads[vid] = _headlines(library.run(c, n_paths=n_paths, out_dir=out_dir / vid))
+            heads[vid] = _headlines(library.run(c, n_paths=n_paths, out_dir=out_dir / vid, regimes=False))
     base = heads["baseline"]
     # built-ins that state an equity de-rating as a bounded asset_drift (the residual of the analog months no
     # longer carries a whole bust once only half of it is coupled)

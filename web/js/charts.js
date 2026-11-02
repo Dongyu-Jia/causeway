@@ -158,8 +158,9 @@ const markLineOf = (data, extra = {}, fmt, position) => ({ silent: true, symbol:
 // ---------------------------------------------------------------- line
 
 // series: [{name, data, color?, dashed?, width?, area?, yAxisIndex?, step?, symbol?}]
+// xValue: x holds numbers on a value axis (spaced by value, e.g. 6, 12, 18, 24, 36, 48 months), formatted by xFmt.
 export function line(el, { x, series, yName = '', yFmt, log = false, legend = true, zoom = false,
-  markAreas, yAxis2, yMin, yMax, tooltipFmt, markLines } = {}) {
+  markAreas, yAxis2, yMin, yMax, tooltipFmt, markLines, xValue = false, xFmt } = {}) {
   const chart = mount(el);
   const yAxes = [{ type: log ? 'log' : 'value', name: yName, nameTextStyle: { color: INK3, fontSize: 11 }, scale: !log,
     min: yMin, max: yMax, ...axisCommon, axisLabel: { ...axisCommon.axisLabel, formatter: (v) => fmtValue(v, yFmt) } }];
@@ -170,11 +171,15 @@ export function line(el, { x, series, yName = '', yFmt, log = false, legend = tr
     legend: legend ? legendCommon : undefined,
     tooltip: { trigger: 'axis', confine: true, valueFormatter: (v) => fmtValue(v, tooltipFmt || yFmt) },
     grid: baseGrid({ right: yAxis2 ? 56 : 24, bottom: zoom ? 56 : 32 }),
-    xAxis: { type: 'category', data: x, boundaryGap: false, ...axisCommon, splitLine: { show: false } },
+    xAxis: xValue
+      ? { type: 'value', scale: true, ...axisCommon, splitLine: { show: false },
+        axisLabel: { ...axisCommon.axisLabel, formatter: (v) => fmtValue(v, xFmt) } }
+      : { type: 'category', data: x, boundaryGap: false, ...axisCommon, splitLine: { show: false } },
     yAxis: yAxes,
     dataZoom: zoom ? [{ type: 'inside' }, { type: 'slider', height: 16, bottom: 8 }] : undefined,
     series: series.map((s, i) => ({
-      name: s.name, type: 'line', data: s.data, showSymbol: false, symbol: s.symbol || 'none', step: s.step,
+      name: s.name, type: 'line', data: xValue ? (s.data || []).map((v, k) => [x[k], v]) : s.data,
+      showSymbol: false, symbol: s.symbol || 'none', step: s.step,
       yAxisIndex: s.yAxisIndex || 0, smooth: false,
       lineStyle: { width: s.width || 1.6, type: s.dashed ? 'dashed' : 'solid', color: s.color || palette(i) },
       itemStyle: { color: s.color || palette(i) },
@@ -355,6 +360,32 @@ const textPx = (s, size = 11) => [...String(s ?? '')].reduce((t, ch) => t + (/[\
 //   labelFmt(v, r, c)  -> cell label text (default fmt)
 //   colors, labelShow, rowLabelWidth
 // Column labels turn steeper (and thin out) as the columns narrow.
+// "#rrggbb" or "rgb(r, g, b)" -> [r, g, b] (null for anything else)
+function rgbOf(c) {
+  const s = String(c ?? '').trim();
+  let m = /^#([0-9a-f]{6})$/i.exec(s);
+  if (m) { const n = parseInt(m[1], 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; }
+  m = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i.exec(s);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+// WCAG relative luminance of [r, g, b]
+function luminance(rgb) {
+  return rgb.map((c) => { const s = c / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; })
+    .reduce((t, c, i) => t + c * [0.2126, 0.7152, 0.0722][i], 0);
+}
+const INK_LUM = luminance(rgbOf(INK));
+// The label colour with the better contrast on the cell a continuous visual map paints for v (colour stops
+// spread evenly over [lo, hi], linear in RGB as ECharts does): white on dark cells, INK on the rest.
+function labelInk(stops, lo, hi, v) {
+  const rgb = stops.map(rgbOf);
+  if (!rgb.length || rgb.some(c => !c) || !(hi > lo)) return INK;
+  const t = Math.min(1, Math.max(0, (v - lo) / (hi - lo))) * (rgb.length - 1);
+  const k = Math.min(Math.floor(t), rgb.length - 2), f = t - k;
+  const cell = rgb.length === 1 ? rgb[0] : rgb[k].map((c, i) => c + (rgb[k + 1][i] - c) * f);
+  const L = luminance(cell);
+  return 1.05 / (L + 0.05) > (L + 0.05) / (INK_LUM + 0.05) ? '#fff' : INK;
+}
+
 export function heatmap(el, { rows, cols, values, min, max, fmt, rowLabels, colLabels, diverging = true, height,
   cellStyle, tip, labelFmt, colors, labelShow, rowLabelWidth } = {}) {
   if (height) el.style.height = `${height}px`;
@@ -372,6 +403,10 @@ export function heatmap(el, { rows, cols, values, min, max, fmt, rowLabels, colL
   }));
   if (lo > hi) { lo = -1; hi = 1; }
   const bound = Math.max(Math.abs(lo), Math.abs(hi)) || 1;
+  const stops = colors || (diverging ? ['#1c7ed6', '#a5d8ff', '#f8f9fa', '#ffc9c9', '#e03131'] : ['#f8f9fa', '#bac8ff', '#3b5bdb']);
+  const vLo = min ?? (diverging ? -bound : lo), vHi = max ?? (diverging ? bound : hi);
+  // labels keep a readable contrast on the darkest cells (small type needs about 4.5:1)
+  data.forEach((item) => { if (isNum(item.value[2])) item.label = { color: labelInk(stops, vLo, vHi, item.value[2]) }; });
   const width = el.clientWidth || 600;
   const rowW = Math.round(rowLabelWidth ?? Math.min(240, Math.max(80, width * 0.3)));
   const rowPx = Math.min(rowW, Math.max(16, ...rl.map(s => textPx(s))));
@@ -405,8 +440,8 @@ export function heatmap(el, { rows, cols, values, min, max, fmt, rowLabels, colL
     yAxis: { type: 'category', data: rl, inverse: true, ...axisCommon,
       axisLabel: { ...axisCommon.axisLabel, interval: 0, width: rowW, overflow: 'truncate' } },
     visualMap: {
-      min: min ?? (diverging ? -bound : lo), max: max ?? (diverging ? bound : hi), calculable: false, show: false, dimension: 2,
-      inRange: { color: colors || (diverging ? ['#1c7ed6', '#a5d8ff', '#f8f9fa', '#ffc9c9', '#e03131'] : ['#f8f9fa', '#bac8ff', '#3b5bdb']) },
+      min: vLo, max: vHi, calculable: false, show: false, dimension: 2,
+      inRange: { color: stops },
     },
     series: [{ type: 'heatmap', data,
       label: { show, fontSize, color: INK,
@@ -419,12 +454,13 @@ export function heatmap(el, { rows, cols, values, min, max, fmt, rowLabels, colL
 // ---------------------------------------------------------------- bars
 
 // series: [{name, data, color?, stack?}]
+// valueMax: fixed top of the value axis (1 for stacked shares).
 // wrap: category labels wrap inside their own slot instead of being cut (horizontal: a number sets
 // the label width in px, default up to 190); markLine: [{xAxis | yAxis, label?}].
 // Labels adapt to the box: horizontal bars give the category labels at most ~38% of the width and
 // thin out the value ticks; vertical bars keep labels flat while they fit their slot, then turn
 // them 40° or 90° and show every k-th one when even turned labels would collide.
-export function bars(el, { x, series, horizontal = false, fmt, legend = true, markLine, wrap = false } = {}) {
+export function bars(el, { x, series, horizontal = false, fmt, legend = true, markLine, wrap = false, valueMax } = {}) {
   const chart = mount(el);
   const n = Math.max(x.length, 1);
   const width = el.clientWidth || 500;
@@ -452,7 +488,7 @@ export function bars(el, { x, series, horizontal = false, fmt, legend = true, ma
     if (rotate) bottom = Math.min(120, Math.round(longest * Math.sin((rotate * Math.PI) / 180) + 24));
   }
   const cat = { type: 'category', data: x, ...axisCommon, splitLine: { show: false }, axisLabel: { ...axisCommon.axisLabel, ...catLabel } };
-  const val = { type: 'value', splitNumber, ...axisCommon, axisLabel: { ...axisCommon.axisLabel, hideOverlap: true, formatter: (v) => fmtValue(v, fmt) } };
+  const val = { type: 'value', splitNumber, max: valueMax, ...axisCommon, axisLabel: { ...axisCommon.axisLabel, hideOverlap: true, formatter: (v) => fmtValue(v, fmt) } };
   chart.setOption({
     legend: legend && series.length > 1 ? legendCommon : undefined,
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true, valueFormatter: (v) => fmtValue(v, fmt) },

@@ -1,4 +1,5 @@
-// Overview: today's macro state, which historical eras it resembles, and the scenario set.
+// Overview: today's macro state (with the real-time macro regime from regimes.json, optional), which
+// historical eras it resembles, and the scenario set.
 const KEY_STATES = ['cpi_yoy', 'core_yoy', 'goods_yoy', 'ff', 'y10', 'spread', 'unrate', 'real_oil',
   'labor_share', 'profit_share', 'div_yield', 'sentiment'];
 
@@ -16,10 +17,11 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     '从历史月度数据出发：先看清每个时代的宏观“指纹”和因果传导，再用回测检验引擎能否复现实际走势，',
     '最后从今天出发生成 ', nScen(), ' 个情景，评估组合和提取策略。所有情景数字都来自引擎，LLM 只负责把文字翻译成约束。'));
 
-  const [eras, scen, fc] = await Promise.all([
-    api.get('eras').catch(() => null),
-    api.get('scenarios').catch(() => null),
-    api.get('forecast').catch(() => null),
+  const [eras, scen, fc, rg] = await Promise.all([
+    api.optional('eras', meta),
+    api.optional('scenarios', meta),
+    api.optional('forecast', meta),
+    api.optional('regimes', meta),
   ]);
   if (!alive()) return;                  // the user moved on while the results loaded
   const paintCount = () => {
@@ -44,6 +46,19 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     tiles.some(t => t.querySelector('.kpi-value.is-bad'))
       ? h('span', { class: 'muted', style: { fontWeight: 400, marginLeft: '8px' } }, '红色数字 = 处在 1955 年以来最高或最低的 10%') : null));
   root.append(h('div', { class: 'grid cols-4' }, tiles));
+  // the real-time macro regime of the last complete month, and how far CPI y/y is from the high-inflation line
+  const nc = rg?.nowcast;
+  if (nc?.month && nc.name) {
+    const hi = (nc.checks || []).find(c => c.id === 'high_infl');
+    const d = hi && Number.isFinite(hi.distance) ? Math.abs(hi.distance).toFixed(2) : null;
+    const thr = hi && Number.isFinite(hi.threshold) ? `${Number(hi.threshold.toFixed(2))}%` : '';
+    const lab = (rg.definitions?.labels || []).find(l => l.id === nc.label);
+    root.append(h('p', { style: { margin: '10px 0 0', fontSize: '13px' } },
+      h('a', { href: '#regimes?today', style: { color: 'inherit' } },
+        lab?.color ? h('span', { style: { display: 'inline-block', width: '10px', height: '10px', borderRadius: '2px', background: lab.color, marginRight: '6px', verticalAlign: '-1px' } }) : null,
+        h('b', {}, '宏观体制：'), `${nc.name}（实时，${nc.month}；单边、修订后数据）`,
+        d !== null ? ` · CPI 同比${hi.on ? `高出 ${thr} 门槛` : `距 ${thr} 门槛`} ${d} 个百分点` : '', ' →')));
+  }
   // valuation is a state, not a factor: one line to the page that shows the evidence
   const pdNow = meta?.cma?.pd_now, pdMed = meta?.cma?.pd_median;
   if (typeof pdNow === 'number' && Number.isFinite(pdNow)) {
@@ -77,7 +92,7 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     const eraChart = charts.bars(box, { x: entries.map(([e]) => ui.eraName(e)), series: [{ name: '权重', data: entries.map(([, w]) => +w.toFixed(4)) }], horizontal: true, fmt: 'pct', legend: false });
     eraChart.on('click', (p) => { const e = entries[p.dataIndex]?.[0]; if (e) location.hash = `eras?${e}`; });
   } else {
-    root.append(ui.notice('还没有时代画像结果（eras.json）。', 'info'));
+    root.append(ui.notice('还没有时代画像结果。', 'info'));
   }
 
   // ---- scenarios
@@ -104,7 +119,7 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
     });
     probChart.on('click', (p) => { const s = sorted[p.dataIndex]; if (s) location.hash = `scenarios?${s.id}`; });
   } else {
-    root.append(ui.notice('还没有情景结果（scenarios.json）。', 'info'));
+    root.append(ui.notice('还没有情景结果。', 'info'));
   }
 
   // ---- next 12 months
@@ -131,6 +146,7 @@ export async function render(root, { api, charts, ui, meta, alive = () => root.i
   root.append(h('div', { class: 'section-title' }, '从哪里开始'));
   const links = [
     ['eras', '历史时代画像', '每个时代的因子指纹、资产表现和传导特征'],
+    ['regimes', '宏观体制', '你问的通胀、通缩、滞胀、萧条在数据里对应什么，今天处在哪一种'],
     ['causality', '因果传导', '石油、需求、货币、金融冲击和劳动收入冲击怎么传导'],
     ['forecast', '一年期预测', '每年只用当时的数据预测下一年：准不准、为什么不准'],
     ['backtest', '回测：模拟 vs 实际', '如果当时知道宏观情景，引擎能不能复现资产走势'],

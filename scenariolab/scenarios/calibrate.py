@@ -59,6 +59,14 @@ DEFAULTS: dict = {
     "services_slope": 0.2,
     "months": 48,
 }
+# Chinese display names of the parameters (the UI's parameter table shows these, not the keys).
+PARAM_NAMES = {
+    "consumption_share": "消费占比", "labor_income_shock": "劳动收入冲击", "mpc_labor": "劳动收入的边际消费倾向",
+    "labor_income_ratio": "劳动收入 / 消费", "equity_ownership": "持股份额", "worker_share": "就业人口占比",
+    "wealth_mpc": "财富效应系数", "equity_wealth_change": "股票财富变化", "equity_wealth_to_consumption": "股票财富 / 消费",
+    "consumption_gdp_share": "消费占 GDP", "job_loss_fraction": "失业比例", "okun": "奥肯系数",
+    "ip_beta": "工业产出弹性", "services_slope": "服务通胀斜率", "months": "阶段月数",
+}
 PARAM_NOTES = {
     "consumption_share": "各组占全美消费支出的比例；Moody's 估计 2025 年收入前 10% 约占 49.7%",
     "labor_income_shock": "本阶段累计的劳动收入变化（小数，-0.05 = 下降 5%）；白领替代主要冲击 50-90% 和前 10%",
@@ -213,7 +221,7 @@ def distribution_views(params: dict | None = None, base: dict | None = None) -> 
         "kind": "distribution", "title": "人员收入对宏观经济的影响",
         "text": text, "base": b, "impact": imp, "views": views,
         "overrides": overrides, "override_notes": drift_notes,
-        "param_notes": PARAM_NOTES,
+        "param_names": PARAM_NAMES, "param_notes": PARAM_NOTES,
         "formulae": [
             "各组消费变化（劳动渠道）= 边际消费倾向 × 劳动收入冲击 × 劳动收入/消费",
             "各组消费变化（财富渠道）= 财富效应系数 × 股票财富变化 × 持股份额 × 股票财富/消费",

@@ -232,7 +232,10 @@ def counts_section(lab: pd.DataFrame, masks: dict) -> dict:
         known = win & (ex != "")
         trend = lab["infl_trend_12m"].to_numpy(float)
         inf = known & (ex == "inflation") & np.isfinite(trend)
-        block["inflation_falling"] = {"months_with_trend": int(inf.sum()), "falling": int((inf & (trend <= 0)).sum())}
+        # the trend needs CPI y/y 12 months earlier, so it starts a year after the window (1949-01 for "1948")
+        has_trend = np.flatnonzero(known & np.isfinite(trend))
+        block["inflation_falling"] = {"months_with_trend": int(inf.sum()), "falling": int((inf & (trend <= 0)).sum()),
+                                      "first_month": _ym(lab.index[has_trend[0]]) if has_trend.size else None}
         out[wid] = block
     known48 = masks["1948"] & (ex != "")
     out["agreement_rt_expost"] = {wid: float((ex[win & (ex != "")] == rt[win & (ex != "")]).mean())
@@ -416,7 +419,7 @@ def ip_legs(panel: pd.DataFrame, lab: pd.DataFrame) -> list[dict]:
     p = CFG["params"]
     ip = panel["lvl_ip"].to_numpy(float)
     u3 = pd.Series(panel["lvl_unrate"].to_numpy(float)).rolling(int(p["u_smooth_months"]), min_periods=1).mean()
-    fw = R._forward(ip[None, :], u3.to_numpy()[None, :], p["ip_swing_pct"])
+    fw = R.zigzag(ip, u3.to_numpy(), p["ip_swing_pct"])
     piv = np.flatnonzero(fw["pivot"][0])
     kinds = fw["pivot"][0, piv]
     rec = R.nber_months(panel.index)
@@ -1314,8 +1317,26 @@ def forward_section(P: pd.DataFrame, lab: pd.DataFrame, masks: dict) -> dict:
         w["base"] = _forward_variant(P, lab, wid, masks[wid], "base")
         out["windows"][wid] = w
     out["mechanism"] = _mechanism(P, lab, masks["1973"])
+    out["forecast_test"] = forecast_test_status(_ym(P.index.max()))
+    return out
+
+
+def forecast_test_status(data_end: str) -> dict:
+    """Whether results/regime_forecast.json is this build's forecast test: it exists and was computed on the panel
+    that ends at `data_end`. That step runs after this one, so the first build of a new data month reports it as
+    not available (and states no verdict) until `--only regimes` runs again after it."""
     path = config.RESULTS_DIR / "regime_forecast.json"
-    out["forecast_test"] = {"available": path.exists(), "file": path.name}
+    out = {"available": False, "file": path.name, "data_end": None, "adopted": None}
+    try:
+        rf = jsonio.load(path)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(rf, dict):
+        return out
+    out["data_end"] = rf.get("data_end")
+    if out["data_end"] == data_end and isinstance((rf.get("verdict") or {}).get("adopted"), list):
+        out["available"] = True
+        out["adopted"] = list(rf["verdict"]["adopted"])
     return out
 
 
@@ -1841,8 +1862,9 @@ def definitions_section(panel: pd.DataFrame, lab: pd.DataFrame, masks: dict, par
         {"from": "扩张（金发姑娘）", "to": "扩张",
          "why": f"它包括所有未收缩、CPI 同比在 {neg:g}–{hi:g}% 之间的月份：既有繁荣，也有复苏缓慢、通胀偏低的年份，“金发姑娘”只是其中一部分"},
         {"from": "通胀（过热）", "to": "通胀",
-         "why": f"1948 年以来 {fall['months_with_trend']} 个通胀月份里有 {fall['falling']} 个月 CPI 同比低于 12 个月前（通胀在回落，"
-                "常见于衰退之后）" + (f"；引擎无条件模拟里的通胀月份有 {share:.0%} 抽自历史上的扩张月份" if share is not None else "")},
+         "why": f"{str(fall['first_month'] or '1948')[:4]} 年以来 {fall['months_with_trend']} 个通胀月份里有 {fall['falling']} 个月 "
+                "CPI 同比低于 12 个月前（通胀在回落，常见于衰退之后）"
+                + (f"；引擎无条件模拟里的通胀月份有 {share:.0%} 抽自历史上的扩张月份" if share is not None else "")},
         {"from": "通缩", "to": "物价负增长",
          "why": f"1948 年以来的 {len(defl_runs)} 段都是衰退之后的复苏或油价暴跌后的基数效应"
                 + (f"，美股实际年化 {_fmt_pct(a48['ann_real']['value'])}" if a48 and a48["ann_real"]["value"] is not None else "")
@@ -1873,12 +1895,39 @@ def model_use_section(parts: dict) -> dict:
         trans_reason += (f"样本内按上月高通胀拆分，{split['n_tests']} 个斜率差异里 {split['n_sig_5pct']} 个 |t| ≥ 1.96，"
                          f"去掉插值的劳动收入占比后是 {split['n_tests_excl_labor_share']} 个里 {split['n_sig_excl_labor_share']} 个"
                          f"（偶然约 {split['expected_5pct_excl_labor_share']:.1f} 个）。")
-    # the forecast test is its own opt-in step that runs after this one; its result lives in its own file
-    fc_reason = "一年期预测按现行设定运行，不使用宏观体制；体制特征的样本外检验是可选构建步骤，结果单独给出。"
-    return {"transmission": {"used": False, "reason": trans_reason, "oos_r2_delta": deltas or None},
-            "forecast": {"used": False, "reason": fc_reason, "test_file": "regime_forecast.json"},
+    # the forecast test is its own opt-in step that runs after this one: its verdict is stated only when its file
+    # was computed on this build's data (forward.forecast_test)
+    ft = parts["forward"].get("forecast_test") or {}
+    fc_reason = "一年期预测按现行设定运行，不使用宏观体制；"
+    if ft.get("available") and not ft.get("adopted"):
+        fc_reason += "体制特征的样本外检验（可选构建步骤）里没有一类做法通过采用条件。"
+    elif ft.get("available"):
+        fc_reason += f"体制特征的样本外检验里有 {len(ft['adopted'])} 类做法通过了采用条件，还没有并入一年期预测。"
+    else:
+        fc_reason += "体制特征的样本外检验是可选构建步骤，这次构建没有与当前数据对应的检验结果。"
+    return {"transmission": {"used": False, "reason": trans_reason, "oos_r2_delta": deltas or None,
+                             "tested": bool(deltas)},
+            "forecast": {"used": False, "reason": fc_reason, "test_file": "regime_forecast.json",
+                         "tested": bool(ft.get("available")), "adopted": ft.get("adopted")},
             "scenarios": {"used": True, "reason": "情景的每个阶段可以要求多抽某种体制的历史月份（熵池化里的普通均值视图）；"
                                                   "每个情景的结果都附有模拟路径的体制读数，并和引擎的无条件抽样、历史基准对照。"}}
+
+
+def model_use_note(use: dict) -> str:
+    """The last note: what the out-of-sample tests behind 'regimes stay out of the models' say, stating a test's
+    verdict only when this build has it (the transmission walk-forward from diagnostics, the forecast test from
+    a regime_forecast.json of the same data month)."""
+    tr, fc = use["transmission"], use["forecast"]
+    if tr.get("tested") and fc.get("tested") and not fc.get("adopted"):
+        return "体制不进入传导模型和一年期预测：两者都做过样本外检验，没有通过。"
+    parts = ["传导模型的样本外检验没有通过" if tr.get("tested") else "传导模型这次构建没有走步检验结果"]
+    if fc.get("tested") and not fc.get("adopted"):
+        parts.append("一年期预测的样本外检验没有通过")
+    elif fc.get("tested"):
+        parts.append("一年期预测的样本外检验里有做法通过了采用条件，还没有并入预测")
+    else:
+        parts.append("一年期预测的样本外检验是可选构建步骤，这次构建没有与当前数据对应的检验结果")
+    return f"体制不进入传导模型和一年期预测：{'；'.join(parts)}。"
 
 
 def run(ctx, **_) -> dict:
@@ -1912,6 +1961,7 @@ def run(ctx, **_) -> dict:
     parts["episodes"] = episodes
     timed("definitions", lambda: definitions_section(panel, lab, masks, parts))
     db = ctx.db
+    use = model_use_section(parts)
     timings["total"] = time.time() - t_all
     return {
         "version": 1, "data_end": _ym(panel.index.max()),
@@ -1920,7 +1970,7 @@ def run(ctx, **_) -> dict:
         "counts": parts["counts"], "validation": parts["validation"], "assets": parts["assets"],
         "episodes": episodes, "episodes_summary": ep_summary, "factors": parts["factors"],
         "transitions": parts["transitions"], "forward": parts["forward"], "eras": parts["eras"],
-        "transmission": parts["transmission"], "engine": parts["engine"], "model_use": model_use_section(parts),
+        "transmission": parts["transmission"], "engine": parts["engine"], "model_use": use,
         "settings": {"bootstrap": B, "seed": int(CFG["bootstrap"]["seed"]), "ci": list(CI), "min_episodes": THIN,
                      "hac_lags": dict(CFG["hac_lags"]), "placebo_min_shift": MIN_SHIFT, "forward_lag_months": LAG,
                      "seconds": timings},
@@ -1932,7 +1982,7 @@ def run(ctx, **_) -> dict:
             "CPI、工业产出和失业率本身就是判定规则的一部分，它们在各体制里的均值部分是定义出来的；其余因子与定义无关。",
             "收缩期里股市通常先跌后涨，同月年化回报只适合在资产之间比较，不代表持有体验，请看逐段路径。",
             "† 表示少于 " + str(THIN) + " 段历史：不给置换检验 p 值，少于 2 段不给区间。",
-            "体制不进入传导模型和一年期预测：两者都做过样本外检验，没有通过。",
+            model_use_note(use),
         ],
     }
 

@@ -86,6 +86,84 @@ export function table(columns, rows, { onRowClick, rowClass, dataLabels = false,
   return h('div', { class: `tbl-stackbox${typeof stack === 'string' ? ` ${stack}` : ''}` }, h('div', { class: 'table-wrap' }, tbl));
 }
 
+// Tables that do not fit their card. Every `.table-wrap` inside `root` is watched; one whose table is wider
+// than the card first lets its header and body cells wrap (.fit-wrap); if it still does not fit and every row
+// has one cell per column (or one cell across all of them: a group heading or a note), its rows become blocks
+// of labelled cells (.fit-stack, labels copied from the header).
+// Each step remembers the width it needed and is undone once the card is that wide again, so it never flips
+// back and forth. A table that fits is left exactly as it is; a table with merged cells keeps scrolling.
+const FIT_RO = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+  // measured in the next frame: changing a class inside the callback would re-trigger it in the same frame
+  const wraps = new Set(entries.map(e => e.target.closest('.table-wrap')).filter(Boolean));
+  requestAnimationFrame(() => wraps.forEach(fitTable));
+}) : null;
+const fitWatched = new Set();
+
+function stackableTable(tbl) {
+  const head = tbl.tHead;
+  if (!head || head.rows.length !== 1) return false;
+  const n = head.rows[0].cells.length;
+  if ([...head.rows[0].cells].some(c => c.colSpan > 1)) return false;
+  const plain = (r) => r.cells.length === n && [...r.cells].every(c => c.colSpan === 1 && c.rowSpan === 1);
+  const across = (r) => r.cells.length === 1 && r.cells[0].colSpan >= n;
+  return [...tbl.tBodies].every(b => [...b.rows].every(r => plain(r) || across(r)));
+}
+
+export function fitTable(wrap) {
+  if (!wrap.isConnected) { unwatch(wrap); return; }
+  const tbl = wrap.querySelector(':scope > table');
+  const w = wrap.clientWidth;
+  if (!tbl || !w) return;                                   // hidden: measured again when it is shown
+  const over = () => wrap.scrollWidth > wrap.clientWidth + 1;
+  if (wrap.dataset.fitStack && w >= Number(wrap.dataset.fitStack)) { wrap.classList.remove('fit-stack'); delete wrap.dataset.fitStack; }
+  if (wrap.dataset.fitWrap && w >= Number(wrap.dataset.fitWrap) && !wrap.classList.contains('fit-stack')) {
+    wrap.classList.remove('fit-wrap'); delete wrap.dataset.fitWrap;
+  }
+  if (!wrap.classList.contains('fit-wrap') && over()) { wrap.dataset.fitWrap = String(wrap.scrollWidth); wrap.classList.add('fit-wrap'); }
+  if (wrap.classList.contains('fit-wrap') && !wrap.classList.contains('fit-stack') && over() && stackableTable(tbl)) {
+    const heads = [...tbl.tHead.rows[0].cells].map(c => c.textContent.trim());
+    [...tbl.tBodies].forEach(b => [...b.rows].forEach(r => [...r.cells].forEach((td, i) => { if (!td.dataset.label) td.dataset.label = heads[i] || ''; })));
+    wrap.dataset.fitStack = String(wrap.scrollWidth);
+    wrap.classList.add('fit-stack');
+  }
+}
+
+// The wrapper keeps its size when only the table grows (text filled in later), so both are observed.
+function unwatch(wrap) {
+  FIT_RO?.unobserve(wrap);
+  if (wrap._fitTbl) { FIT_RO?.unobserve(wrap._fitTbl); wrap._fitTbl = null; }
+  fitWatched.delete(wrap);
+}
+
+// Watch every table wrapper under root, now and as tabs add or replace tables (app.js calls this once on #view).
+export function watchTables(root) {
+  if (!FIT_RO || !root || root._fitMO) return;
+  const scan = (node) => {
+    if (!(node instanceof Element)) return;
+    const wraps = node.matches('.table-wrap') ? [node] : [...node.querySelectorAll('.table-wrap')];
+    for (const w of wraps) {
+      if (fitWatched.has(w)) continue;
+      fitWatched.add(w);
+      FIT_RO.observe(w);
+      w._fitTbl = w.querySelector(':scope > table');
+      if (w._fitTbl) FIT_RO.observe(w._fitTbl);
+    }
+    const own = node.closest('.table-wrap');          // rows replaced inside a table that is already watched
+    if (own && fitWatched.has(own)) requestAnimationFrame(() => fitTable(own));
+  };
+  root._fitMO = new MutationObserver((muts) => {
+    for (const m of muts) {
+      m.addedNodes.forEach(scan);
+      m.removedNodes.forEach((n) => {
+        if (!(n instanceof Element)) return;
+        for (const w of [...fitWatched]) if (!w.isConnected) unwatch(w);
+      });
+    }
+  });
+  root._fitMO.observe(root, { childList: true, subtree: true });
+  scan(root);
+}
+
 // Segmented control. options: [{value, label}]
 export function seg(options, value, onChange) {
   const wrap = h('div', { class: 'seg' });

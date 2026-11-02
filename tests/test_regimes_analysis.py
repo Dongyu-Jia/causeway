@@ -124,6 +124,29 @@ def test_every_share_dict_sums_to_one(result):
                 assert sum(row) == pytest.approx(1.0)
 
 
+def test_the_forecast_test_counts_only_for_the_same_data_month(tmp_path, monkeypatch):
+    """forward.forecast_test and the last note state the forecast test's verdict only when regime_forecast.json
+    was computed on this build's data month (that step runs after regimes)."""
+    from scenariolab import jsonio
+    monkeypatch.setattr(config, "RESULTS_DIR", tmp_path)
+    assert A.forecast_test_status("2026-09") == {"available": False, "file": "regime_forecast.json",
+                                                 "data_end": None, "adopted": None}
+    jsonio.dump({"verdict": {"adopted": []}}, tmp_path / "regime_forecast.json")            # older file: no month
+    assert A.forecast_test_status("2026-09")["available"] is False
+    jsonio.dump({"data_end": "2026-08", "verdict": {"adopted": []}}, tmp_path / "regime_forecast.json")
+    assert A.forecast_test_status("2026-09") == {"available": False, "file": "regime_forecast.json",
+                                                 "data_end": "2026-08", "adopted": None}
+    jsonio.dump({"data_end": "2026-09", "verdict": {"adopted": []}}, tmp_path / "regime_forecast.json")
+    st = A.forecast_test_status("2026-09")
+    assert st["available"] is True and st["adopted"] == []
+    tr = {"tested": True}
+    assert A.model_use_note({"transmission": tr, "forecast": {"tested": True, "adopted": []}}) \
+        == "体制不进入传导模型和一年期预测：两者都做过样本外检验，没有通过。"
+    stale = A.model_use_note({"transmission": tr, "forecast": {"tested": False, "adopted": None}})
+    assert "传导模型的样本外检验没有通过" in stale and "一年期预测的样本外检验没有通过" not in stale
+    assert "没有与当前数据对应的检验结果" in stale
+
+
 @needs_panel
 def test_no_code_ids_in_the_chinese_texts(result):
     """UI prose names things in Chinese: no snake_case ids, file names or function names."""
@@ -259,7 +282,9 @@ def test_counts_episodes_transitions_and_walk_forward(result):
     assert c["1948"]["expost"]["labels"]["inflation"] == {"months": 214, "share": pytest.approx(0.2265, abs=5e-5), "runs": 18}
     assert c["1973"]["realtime"]["labels"]["stagflation"]["months"] == 42
     assert c["agreement_rt_expost"] == {"1948": pytest.approx(0.8942, abs=5e-5), "1973": pytest.approx(0.9053, abs=5e-5)}
-    assert c["1948"]["inflation_falling"] == {"months_with_trend": 207, "falling": 59}
+    assert c["1948"]["inflation_falling"] == {"months_with_trend": 207, "falling": 59, "first_month": "1949-01"}
+    why = next(x["why"] for x in result["definitions"]["names_changed"] if x["to"] == "通胀")
+    assert why.startswith("1949 年以来 207 个通胀月份里有 59 个月")
     eps = result["episodes"]
     assert len(eps) == 12 and eps[5]["start"] == "1973-12" and eps[5]["label"] == "stagflation"
     assert round(100 * eps[5]["equity_real_to_low"], 1) == -39.1 and round(100 * eps[5]["equity_real_after_low"], 1) == 43.2

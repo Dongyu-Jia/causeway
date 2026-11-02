@@ -271,6 +271,12 @@ def _forward(ip: np.ndarray, u3: np.ndarray, swing_pct: float) -> dict[str, np.n
             "below_peak": below_peak, "leg_decline": leg_decline}
 
 
+def zigzag(ip, u3, swing_pct: float) -> dict[str, np.ndarray]:
+    """The causal IP zigzag and unemployment tracker that classify() runs, for (T,) or (n, T) levels of IP and
+    of the smoothed unemployment rate (keys pivot, down, peak_idx, rise, lastmin, below_peak, leg_decline)."""
+    return _forward(_as2d(ip), _as2d(u3), swing_pct)
+
+
 def _expost(ip: np.ndarray, cs: np.ndarray, cn: np.ndarray, fw: dict, p: dict,
             first_needed: int = 0) -> dict[str, np.ndarray]:
     """Two-sided contraction episodes from the confirmed legs (and an unfinished last leg): months, depth
@@ -361,6 +367,10 @@ def classify(cpi_yoy, unrate, ip, core_yoy=None, n_hist: int = 0, params: dict |
     if not (cpi.shape == ur.shape == lvl.shape):
         raise ValueError("cpi_yoy, unrate and ip must have the same shape")
     T = lvl.shape[1]
+    if T == 0:                       # no months: every key with its dtype and no columns (one unknown month dropped)
+        nan = np.full((n, 1), np.nan)
+        r = classify(nan, nan, nan, None if core_yoy is None else nan, params=params)
+        return {k: (v[0, :0] if one_d else v[:, :0]) for k, v in r.items()}
     u3 = _rolling(ur, int(p["u_smooth_months"]), "mean")
     fw = _forward(lvl, u3, p["ip_swing_pct"])
     zero = np.zeros((n, 1))
@@ -547,7 +557,10 @@ def provisional_from(panel: pd.DataFrame, params: dict | None = None):
 
     Outside a confirmed down-leg, the months up to the current IP reference peak (the running maximum since
     the last confirmed trough) are final: a later 3% fall dates a contraction from the month after
-    max(peak, unemployment low). Inside an unfinished confirmed down-leg the leg's months stay open."""
+    max(peak, unemployment low). Inside an unfinished confirmed down-leg the leg's months stay open. An empty
+    panel has no months to change: None."""
+    if not len(panel):
+        return None
     p = _params(params)
     ur = _as2d(panel[INPUTS["unrate"]].to_numpy(float))
     ip = _as2d(panel[INPUTS["ip"]].to_numpy(float))
@@ -563,10 +576,12 @@ def nowcast(panel: pd.DataFrame, params: dict | None = None) -> dict:
     "Complete" means the month has its own CPI y/y, unemployment and IP readings. Later months (a
     release-order gap or a missing print at the panel's end) are listed in missing_after =
     {series: [months]}; a trailing gap never makes the label unknown or raises. ValueError only when no
-    month is complete."""
+    month is complete (an empty panel included)."""
     p = _params(params)
     sw, ur_th, um = p["ip_swing_pct"], p["u_rise_pp"], int(p["u_smooth_months"])
     hi, neg, sev, core = p["high_inflation_pct"], p["cpi_neg_pct"], p["severe_ip_decline_pct"], p["core_low_pct"]
+    if not len(panel):
+        raise ValueError("没有同时有 CPI 同比、失业率和工业产出读数的月份")
     df = classify_panel(panel, params)
     known = (df["label_rt"] != "").to_numpy()
     if not known.any():

@@ -123,6 +123,21 @@ table.tbl td.wrap, table.tbl th.wrap { white-space: normal; text-align: left; }
   .tbl-stackbox table.tbl-stack td:first-child::before { display: none; }
 }
 
+/* ui.watchTables(): a table wider than its card first wraps its cells, then (if it still does not fit)
+   turns every row into a block of labelled cells, the same layout as the phone stack above */
+.table-wrap.fit-wrap table.tbl th, .table-wrap.fit-wrap table.tbl td { white-space: normal; }
+.table-wrap.fit-wrap table.tbl th { line-height: 1.35; vertical-align: bottom; }
+.table-wrap.fit-stack table.tbl thead { display: none; }
+.table-wrap.fit-stack table.tbl, .table-wrap.fit-stack table.tbl tbody, .table-wrap.fit-stack table.tbl td { display: block; width: auto; }
+.table-wrap.fit-stack table.tbl tr { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+  column-gap: 16px; padding: 8px 2px; border-bottom: 1px solid var(--line); }
+.table-wrap.fit-stack table.tbl td { border: 0; padding: 2px 0; text-align: left !important; white-space: normal; min-width: 0 !important; max-width: none !important; }
+.table-wrap.fit-stack table.tbl td:first-child { grid-column: 1 / -1; font-weight: 600; }
+.table-wrap.fit-stack table.tbl td::before { content: attr(data-label); display: inline-block; min-width: 84px;
+  margin-right: 8px; font-size: 11px; color: var(--ink-3); vertical-align: top; }
+.table-wrap.fit-stack table.tbl td:first-child::before { display: none; }
+.table-wrap.fit-stack table.tbl tr:hover td { background: none; }
+
 /* controls */
 select, input[type=number], input[type=text], textarea {
   font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; }
@@ -147,6 +162,8 @@ input[type=range] { accent-color: var(--accent); }
 .chip.good { background: #e7f7ef; border-color: #bfe8d3; color: var(--good); }
 .chip.bad { background: #fdecee; border-color: #f6c7cc; color: var(--bad); }
 .chip.warn { background: #fff4e0; border-color: #f5d9a8; color: var(--warn); }
+/* a chip in a table cell stays on one line when the table wraps its cells (.fit-wrap) */
+table.tbl .chip { white-space: nowrap; }
 .notice { border: 1px solid #f5d9a8; background: #fff8eb; color: #7a4d00; padding: 10px 14px; border-radius: 8px; font-size: 13px; }
 .notice.info { border-color: #cdd7ff; background: #f3f6ff; color: #283c8c; }
 .notice.error { border-color: #f6c7cc; background: #fdf1f2; color: #8a1c24; }

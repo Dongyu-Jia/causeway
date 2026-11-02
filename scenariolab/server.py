@@ -39,7 +39,7 @@ BUILD_STEP = {"meta": "meta", "eras": "eras", "causality": "causality", "backtes
               "valuation": "valuation", "portfolio_default": "portfolio", "llm_translator": "llm",
               "regimes": "regimes"}
 BUILD_HINT = {
-    "ablation": f"{BUILD} --only ablation（引擎消融约需 6 分钟，默认构建不包含这一步）",
+    "ablation": f"{BUILD} --only ablation（引擎消融约需 5 分钟，默认构建不包含这一步）",
     "regime_forecast": f"{BUILD} --only regime_forecast（宏观体制的一年期预测检验约需 2 分钟，默认构建不包含这一步）",
 }
 NO_CACHE_PREFIXES = ("/js/", "/css/")
@@ -133,7 +133,15 @@ def _json(obj) -> Response:
 
 @app.get("/api/meta")
 def meta():
-    return _json_file(RESULTS / "meta.json")
+    """meta.json plus `results`: the result names whose file exists now, so a page skips an optional file that
+    is missing instead of requesting it (a 404 in the browser console)."""
+    path = RESULTS / "meta.json"
+    if not path.exists():
+        return _json_file(path)
+    m = jsonio.load(path)
+    if isinstance(m, dict):
+        m["results"] = sorted(n for n in RESULT_NAMES if (RESULTS / f"{n}.json").exists())
+    return _json(m)
 
 
 @app.get("/api/{name}")

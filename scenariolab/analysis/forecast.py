@@ -118,7 +118,9 @@ RANKED_ASSETS = [a for a in ASSETS if a != "cash"]
 MACRO = {"unrate": ("lvl_unrate", "diff"), "ff": ("lvl_ff", "diff"), "cpi_yoy": ("s_cpi_yoy", "diff"),
          "spread": ("s_spread", "diff"), "oil": ("lvl_oil", "log")}
 MACRO_CN = {"unrate": "失业率", "ff": "政策利率", "cpi_yoy": "CPI 同比", "spread": "信用利差", "oil": "油价"}
-METHOD_CN = {"analog": "相似起点", "uncond": "无条件", "naive": "历史均值", "scenarios": "情景加权",
+# method names in the ledger and its report: the display names of METHODS (scenario weighting is always today's
+# forecast in the ledger, so its name carries no 「仅今天」)
+METHOD_CN = {"analog": "相似起点法", "uncond": "无条件抽样", "naive": "历史均值基准", "scenarios": "情景加权",
              "scenarios_calibrated": "情景加权（校准）"}
 # A macro change is forecastable (and may become a calibration view) when the analog CRPS beats both
 # benchmarks (SKILL_REFS: the unconditional draw and the naive normal) over all origins and in both halves,
@@ -914,6 +916,12 @@ def _sp(name: str) -> str:
     return f" {name}" if name[:1].isascii() else name
 
 
+def _pct_ui(x: float) -> str:
+    """A probability as a whole percent rounded the way the page rounds it (toFixed: a half goes up, 0.265 -> 27%),
+    so a sentence and the tables beside it never differ by a point (Python's format gives 26%)."""
+    return f"{int(np.floor(x * 100 + 0.5))}%"
+
+
 def _calibration_line(cal: dict, skill: dict | None, n_scen: int) -> str:
     """One line for the probability editor: what the calibrated set is, with its KL."""
     if not cal["available"]:
@@ -932,7 +940,7 @@ def _reconcile_text(rec: dict, cal: dict, skill: dict | None, calibrated: bool) 
     eq = S["us_equity"]
     an, mx = eq["analog"], eq["scenarios"]
     out = [f"同一个起点、同一套引擎，情景加权的第一年比相似起点法悲观：美股大盘中位数 {mx['p50']:+.1%} 对 {an['p50']:+.1%}，"
-           f"均值 {mx['mean']:+.1%} 对 {an['mean']:+.1%}，P(亏损) {mx['prob_loss']:.0%} 对 {an['prob_loss']:.0%}。"]
+           f"均值 {mx['mean']:+.1%} 对 {an['mean']:+.1%}，P(亏损) {_pct_ui(mx['prob_loss'])} 对 {_pct_ui(an['prob_loss'])}。"]
     if "nasdaq" in S:
         nq = S["nasdaq"]
         out[0] += f"纳指100 中位数 {nq['scenarios']['p50']:+.1%} 对 {nq['analog']['p50']:+.1%}。"
@@ -986,7 +994,7 @@ def _reconcile_text(rec: dict, cal: dict, skill: dict | None, calibrated: bool) 
         out.append(f"校准只能用相似起点法有预测能力的宏观变量：{why}；{others}没有。"
                    f"只对齐{_sp(views_txt)}（KL {cal['kl']:.3f}，有效情景数 {cal['ens_prior']:.1f} → {cal['ens']:.1f}）"
                    + (f"，{moved}" if moved else "")
-                   + f"；校准后美股中位数 {ce['p50']:+.1%}、P(亏损) {ce['prob_loss']:.0%}，" + verdict)
+                   + f"；校准后美股中位数 {ce['p50']:+.1%}、P(亏损) {_pct_ui(ce['prob_loss'])}，" + verdict)
     elif cal.get("reason"):
         out.append(f"未校准：{cal['reason']}（逐个变量的成绩见下方「校准」）。")
     sens = {tuple(x["vars"]): x for x in rec["sensitivity"]}
@@ -1114,14 +1122,17 @@ def _ledger_quantiles(panel: pd.DataFrame, origin: pd.Timestamp, runs: dict, yea
 
 
 def ledger_entry(live: dict, quantiles: dict, ctx: EngineContext, n_paths: int = N_PATHS, seed: int = SEED) -> dict:
-    """What a build records about its live forecast: per method and asset the bands and quantiles."""
+    """What a build records about its live forecast: per method and asset the bands and quantiles, and which
+    analog it used (the share of the available starts and today's ENS; uncond and analog draw with the same seed).
+    analog_share and common_random_numbers were added after the first entries: readers treat them as optional."""
     from .. import __version__
     origin = pd.Timestamp(f"{live['origin']}-01")
     return {
         "schema": LEDGER_SCHEMA, "origin": live["origin"],
         "matures": (origin + pd.DateOffset(months=HORIZON)).strftime("%Y-%m"), "horizon_months": HORIZON,
         "created": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "version": __version__,
-        "model": ctx.spec.describe(), "analog_ens": live["analog_ens"], "n_paths": n_paths, "seed": seed,
+        "model": ctx.spec.describe(), "analog_ens": live["analog_ens"], "analog_share": live.get("analog_share"),
+        "common_random_numbers": True, "n_paths": n_paths, "seed": seed,
         "taus": "q[i] = 第 (i + 0.5)% 分位，i = 0..99", "units": "12 个月总回报（小数）；宏观为 12 个月变化（pp，油价为对数变化）",
         "methods": {m: {"name": METHOD_CN.get(m, m), "assets": v} for m, v in quantiles["methods"].items()},
         "macro": quantiles["macro"], "state": live["state"],
@@ -1248,6 +1259,7 @@ def score_ledger(entries: list[dict], panel: pd.DataFrame) -> dict:
         methods = e.get("methods") or {}
         row = {"origin": e["origin"], "created": e.get("created"), "matures": e.get("matures"), "status": "pending",
                "version": e.get("version"), "model": e.get("model"), "analog_ens": e.get("analog_ens"),
+               "analog_share": e.get("analog_share"),
                "methods": {m: {a: {k: v[k] for k in ("p5", "p25", "p50", "p75", "p95", "mean", "prob_loss") if k in v}
                                for a, v in (x.get("assets") or {}).items()}
                            for m, x in methods.items() if m != "naive"},
@@ -1415,6 +1427,18 @@ def selection_text(table: list[dict], best: dict, split: str, n: int, flat: int)
         body += (f"{n} 个起点中有 {flat} 个的相似起点权重是平的（带宽碰到上限），在这些起点上相似起点法就是无条件抽样。" if flat
                  else f"{n} 个起点的相似起点权重都不是平的（带宽都没有碰到上限）。")
         verdict = _verdict(gt, tt)
+    # where the choice sits: the largest share is the flattest kernel of the grid (the closest to the unconditional
+    # draw), and the selection may only have picked the least bad candidate
+    worse = [r for r in table if r["val_crps_analog"] > r["val_crps_uncond"]]
+    edge = []
+    if best["share"] >= max(r["share"] for r in table) - 1e-12 and len(table) > 1:
+        edge.append(f"选中的 {label} 是候选里最平的一档（最接近无条件抽样）")
+    if len(worse) == len(table):
+        sk = [1.0 - r["val_crps_analog"] / r["val_crps_uncond"] for r in table]
+        ts = [r["val_t"] for r in table if r.get("val_t") is not None]
+        edge.append(f"验证期每一档的 CRPS 都比无条件抽样高（技能 {min(sk):+.1%} 到 {max(sk):+.1%}"
+                    + (f"，t {min(ts):.1f} 到 {max(ts):.1f}" if ts else "") + "）")
+    body += f"{'，而'.join(edge)}。" if edge else ""
     cover = "、".join(f"{r['label']} 为 {r['test_coverage']:.0%}" for r in table if r.get("test_coverage") is not None)
     cover = f"检验期风险资产 90% 区间的覆盖率（理想值 90%）：{cover}。" if cover else ""
     if verdict > 0:

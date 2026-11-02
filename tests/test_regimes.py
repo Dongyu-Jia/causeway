@@ -311,6 +311,19 @@ def test_nowcast_without_a_complete_month_raises_a_clear_error():
         R.nowcast(P)
 
 
+def test_an_empty_panel_has_no_labels_no_provisional_months_and_no_nowcast():
+    full = R.classify(np.ones(3), np.full(3, 4.0), np.full(3, 100.0))
+    r = R.classify(np.array([]), np.array([]), np.array([]))
+    assert set(r) == set(full) and all(r[k].shape == (0,) and r[k].dtype == full[k].dtype for k in r)
+    assert R.classify(np.zeros((2, 0)), np.zeros((2, 0)), np.zeros((2, 0)))["label_rt"].shape == (2, 0)
+    P = pd.DataFrame({"s_cpi_yoy": [], "lvl_unrate": [], "lvl_ip": [], "s_core_yoy": []},
+                     index=pd.DatetimeIndex([]), dtype=float)
+    assert R.provisional_from(P) is None
+    assert R.classify_panel(P).empty and R.regime_columns(P).empty
+    with pytest.raises(ValueError):
+        R.nowcast(P)
+
+
 def _synthetic_panel():
     c, u, ip, th = _synthetic()
     idx = pd.date_range("1990-01-01", periods=len(ip), freq="MS")

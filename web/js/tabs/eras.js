@@ -1,5 +1,8 @@
 // Historical eras: each era's macro fingerprint, asset returns and transmission features,
 // a cross-era comparison, how unusual today's income distribution is, and which eras today resembles.
+// With results/regimes.json (optional) each era also shows its macro regime mix (ex post / real time).
+import { REGIME_LABELS, regimeBars, roundShares } from './_scenario_detail.js';
+
 const INK = '#1d2433', INK3 = '#7a8396', LINE = '#e3e6ec';
 const AX = {
   axisLine: { lineStyle: { color: LINE } }, axisTick: { show: false },
@@ -98,6 +101,11 @@ const CSS = `
 .eras-callout li { margin: 3px 0; }
 .eras-mini .card-head { margin-bottom: 4px; }
 .eras-detail .card-head .chip, .eras-tile .chip { white-space: nowrap; flex-shrink: 0; }
+.eras-runs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.eras-runs .chip { font-size: 11px; padding: 1px 7px; font-variant-numeric: tabular-nums; }
+.eras-runs .chip i, .eras-rgmix i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+.eras-rgmix { font-size: 12px; color: var(--ink-2); margin: 4px 0 0; line-height: 1.7; }
+.eras-rgmix span { white-space: nowrap; margin-right: 8px; }
 .eras-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
 /* a wide table collapses into labelled blocks when its card is narrow */
 .eras-stackbox { container-type: inline-size; }
@@ -144,7 +152,7 @@ function disposeCharts(el) {
 function loadError(ui, err) {
   const { h } = ui;
   if (err.status === 404) {
-    return h('div', {}, ui.notice('还没有时代画像结果（eras.json）。', 'info'), ui.buildHint(err));
+    return h('div', {}, ui.notice('还没有时代画像结果。', 'info'), ui.buildHint(err));
   }
   return ui.notice(`读取时代画像失败：${err.message}`, 'error');
 }
@@ -298,15 +306,31 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     '先选一个时代看细节，再横向对比所有时代，最后看今天哪些地方是 1955 年以来从未出现过的。'));
 
   let data;
+  const regP = api.optional('regimes', meta);
   try {
     data = await api.get('eras');
   } catch (err) {
     root.append(loadError(ui, err));
     return;
   }
+  const rg = await regP;
   if (!alive()) return;                  // the user moved on while the results loaded
   const eras = data.eras || [];
-  if (!eras.length) { root.append(ui.notice('eras.json 里没有时代记录。', 'info')); return; }
+  if (!eras.length) { root.append(ui.notice('时代画像结果里没有时代记录。', 'info')); return; }
+  // regime mixes per era (regimes.json eras; ids match eras.json, plus 1948–54 before the first era)
+  const rgEras = Array.isArray(rg?.eras) ? rg.eras : [];
+  const rgById = Object.fromEntries(rgEras.map(x => [x.id, x]));
+  const rgLabels = Array.isArray(rg?.definitions?.labels) && rg.definitions.labels.length ? rg.definitions.labels : REGIME_LABELS;
+  const rgName = (id) => rgLabels.find(l => l.id === id)?.name || id;
+  const rgColor = (id) => rgLabels.find(l => l.id === id)?.color || '#adb5bd';
+  const rgByName = Object.fromEntries(rgLabels.map(l => [l.name, l]));
+  const pct0 = (x) => `${Math.round(x * 100)}%`;
+  // a mix in whole percents that add up to 100 (largest remainder), labels from 1% up
+  const mixLine = (m) => {
+    const n = roundShares(m, rgLabels.map(l => l.id));
+    return rgLabels.filter(l => n[l.id] >= 1)
+      .map(l => h('span', {}, h('i', { style: { background: l.color, marginRight: '4px' } }), `${l.name} ${n[l.id]}%`));
+  };
   const byId = Object.fromEntries(eras.map(e => [e.id, e]));
   const fp = data.fingerprint || null;
   const tl = data.timeline || null;
@@ -446,7 +470,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
       + '颜色按 K 线配色（涨色为正）。';
     if (!attrEras.length || !assetsWith.length) {
       return { el: card({ title: '传导归因：各时代的价格回报从哪条渠道来', sub },
-        ui.notice('eras.json 里还没有传导归因：运行 python -m scenariolab.build --only eras 后可见。', 'info')), draw: () => {} };
+        ui.notice('时代画像结果里还没有传导归因：运行 python -m scenariolab.build --only eras 后可见。', 'info')), draw: () => {} };
     }
     const pick = ui.select(assetsWith.map(a => ({ value: a, label: ui.assetName(a) })), attrAsset, (v) => { attrAsset = v; draw(); });
     const el = card({ title: '传导归因：各时代的价格回报从哪条渠道来', sub, cls: 'eras-anchor',
@@ -558,10 +582,33 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
           { key: 'vol', label: '波动率', fmt: (v) => ui.fmtPct(v, 1) },
           { key: 'max_dd', label: '最大回撤', fmt: (v) => ui.fmtPct(v, 1) },
           { key: 'avg_income', label: '收入率', fmt: (v, r) => (ui.META.assets[r.id]?.income === 'none' ? '—' : ui.fmtPct(v, 1)) },
-        ], rows) : ui.notice('这一时期没有完整的资产数据。', 'info'),
+        ], rows, { stack: true }) : ui.notice('这一时期没有完整的资产数据。', 'info'),
         missing.length ? h('p', { class: 'eras-note' }, `没有每个月数据、不参与统计：${missing.map(ui.assetName).join('、')}。`) : null,
         administered ? h('p', { class: 'eras-note' }, '1973 年以前黄金（布雷顿森林）和原油（挂牌价）价格受管制，波动率和回撤都很小，不能和后来直接比较。') : null),
       card({ title: '实际年化回报', sub: '每根柱子 = 扣除通胀后的年化总回报：这一时代的宏观组合让谁赢、让谁输。' }, barBox)));
+
+    // ---- macro regimes of this era (regimes.json eras[]; omitted without the file)
+    const re = rgById[e.id];
+    const rgBox = ui.chartBox();
+    if (re) {
+      const runs = (re.runs_expost || []).map((t) => {
+        const lab = rgByName[String(t).split(' ').pop()];
+        return h('span', { class: 'chip' }, lab ? h('i', { style: { background: lab.color } }) : null, String(t));
+      });
+      const fl = re.flags || {};
+      const flagText = isNum(fl.contraction)
+        ? `收缩月份 ${pct0(fl.contraction)}（实时 ${isNum(fl.contraction_rt) ? pct0(fl.contraction_rt) : '—'}）`
+          + `${isNum(fl.high_infl) ? `，高通胀月份 ${pct0(fl.high_infl)}` : ''}${isNum(fl.cpi_neg) && fl.cpi_neg > 0 ? `，CPI 同比为负的月份 ${pct0(fl.cpi_neg)}` : ''}。` : '';
+      detail.append(card({ title: '这一时代的宏观体制',
+        sub: `每个月按同一套规则归入一种体制：${re.months} 个月里各体制的占比。事后 = 用全部数据判断；实时 = 只用截至当月的数据（单边、修订后数据）。`,
+        actions: h('a', { href: '#regimes?eras' }, '宏观体制 →') },
+      rgBox,
+      h('div', { class: 'eras-rgmix' }, h('b', {}, '事后：'), mixLine(re.expost)),
+      h('div', { class: 'eras-rgmix' }, h('b', {}, '实时：'), mixLine(re.realtime)),
+      flagText ? h('p', { class: 'eras-note' }, flagText) : null,
+      runs.length ? h('div', { class: 'eras-sub', style: { marginTop: '10px' } }, '事后体制的各段（起止月份）') : null,
+      runs.length ? h('div', { class: 'eras-runs' }, runs) : null));
+    }
 
     // ---- transmission attribution (eras[].attribution)
     const attrCard = attributionCard(e);
@@ -601,7 +648,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
         { key: 'vol_annual', label: '年化波动', fmt: (v, r) => fmtFactor(r.id, v, false) },
         { key: 'ratio', label: '波动相对各时代中位数', fmt: (v) => (isNum(v) ? `${v.toFixed(2)} 倍` : '—'),
           cls: (v) => (isNum(v) && v >= 1.5 ? 'eras-hi' : isNum(v) && v <= 0.6 ? 'eras-lo' : '') },
-      ], facRows),
+      ], facRows, { stack: true }),
       h('p', { class: 'eras-note' }, '劳动收入占比、利润、投资、净值等季度数据被插值成月度，它们的月度波动偏低，只适合跨时代相对比较。')));
 
     // charts after the DOM exists
@@ -611,6 +658,8 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
       horizontal: true, fmt: 'pct', legend: false,
     });
     attrCard.draw();
+    if (re) regimeBars(rgBox, { rows: ['事后', '实时'], mixes: [re.expost || {}, re.realtime || {}], labels: rgLabels, rowH: 34,
+      extra: (i) => (i === 1 ? '只用截至当月的数据（单边、修订后数据）' : '') });
     if (corrAssets.length > 1) {
       const names = corrAssets.map(ui.assetName);
       heat(charts, corrBox, { rows: names, cols: names, values: e.corr.matrix, min: -1, max: 1, height: names.length * 24 + 110,
@@ -631,9 +680,25 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
     : '';
   const groupWrap = h('div', { class: 'eras-toolbar' });
   let tlGroup = 'inflation', tlZ = false;
+  // each era's regime mix (regimes.json; the card is left out without it)
+  const rgCmpBox = ui.chartBox();
+  let rgSide = 'expost';
+  const drawRgCompare = () => {
+    const rows = rgEras.map(x => String(x.name).split('（')[0]);      // "1948–1954（…仅供参考）": the note goes to the tooltip
+    const chart = regimeBars(rgCmpBox, { rows, mixes: rgEras.map(x => x[rgSide] || {}), labels: rgLabels, rowH: 28,
+      extra: (i) => [rows[i] !== rgEras[i].name ? ui.esc(rgEras[i].name) : '', `${rgEras[i].start} 至 ${rgEras[i].end}，${rgEras[i].months} 个月`, rgSide === 'realtime' ? '实时（单边、修订后数据）' : '事后',
+        byId[rgEras[i].id] ? '点击查看这个时代' : ''] });
+    chart.off('click');
+    chart.on('click', (p) => { const id = rgEras[p.dataIndex]?.id; if (byId[id]) select(id, true); });
+  };
+  const rgCompare = card({ title: '各时代的宏观体制构成',
+    sub: '每个时代的月份按同一套规则归入扩张、通胀、物价负增长、衰退、深度衰退、滞胀；第一行早于时代划分，只作参考。切到“实时”看只用截至当月数据的版本（单边、修订后数据）。点击一行查看该时代。',
+    actions: h('div', { style: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+      ui.seg([{ value: 'expost', label: '事后' }, { value: 'realtime', label: '实时' }], rgSide, (v) => { rgSide = v; drawRgCompare(); }),
+      h('a', { href: '#regimes?eras' }, '宏观体制 →')) }, rgCmpBox);
   root.append(
     card({ title: '时代指纹（z 值）', sub: `每格 = 该时代均值相对 1955 年以来均值偏离几个标准差：红 = 偏高，蓝 = 偏低；${today?.states ? '最后一行是今天（最新月份），' : ''}点击一行查看该时代详情。` },
-      fp ? ui.wideChart(fpBox, 620) : ui.notice('eras.json 里没有 fingerprint。', 'info')),
+      fp ? ui.wideChart(fpBox, 620) : ui.notice('时代画像结果里没有时代指纹。', 'info')),
     h('div', { style: { height: '16px' } }),
     card({ title: '各时代的实际年化回报', sub: '扣除通胀后的年化总回报：同一类资产在不同宏观组合下的表现可以相差 20 个百分点以上，空格表示该时期没有完整数据；颜色按 K 线配色（涨色为正）。' }, ui.wideChart(cagrBox, 520)),
     h('div', { style: { height: '16px' } }),
@@ -644,8 +709,9 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
         h('div', {}, h('div', { class: 'eras-metric-title' }, '菲利普斯曲线斜率'), psBox)),
       phillipsNote ? h('p', { class: 'eras-note' }, phillipsNote) : null),
     h('div', { style: { height: '16px' } }),
+    ...(rgEras.length ? [rgCompare, h('div', { style: { height: '16px' } })] : []),
     card({ title: '1955 年以来的关键状态', sub: '月度数据，底纹是时代划分；切到“标准化”可把不同单位的指标放在同一把尺子上（0 = 1955 年以来均值），看每个时代偏离常态的方向。' },
-      tl ? groupWrap : null, tl ? tlBox : ui.notice('eras.json 里没有 timeline。', 'info')));
+      tl ? groupWrap : null, tl ? tlBox : ui.notice('时代画像结果里没有状态时间线。', 'info')));
 
   // ======================================================== the new situation
   const newSec = h('div', { class: 'section-title eras-anchor' }, '新形势：白领工资被压制、资本端火热、收入向资本倾斜');
@@ -695,21 +761,21 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
             { key: 'era', label: '所属时代', fmt: (v) => ui.eraName(v) },
             { key: 'weight', label: '权重', fmt: (v) => ui.fmtPct(v, 2) },
             { key: 'weight', label: '相对平均', fmt: (v) => (isNum(v) && sim.n_months_db ? `${(v * sim.n_months_db).toFixed(0)}×` : '—') },
-          ], top) : ui.notice('没有 top_months。', 'info'))),
+          ], top, { stack: true }) : ui.notice('没有最相似的历史月份。', 'info'))),
       h('div', { style: { height: '16px' } }),
       h('div', { class: 'eras-grid2' },
         card({ title: '历史拼不出来的部分', sub: '加权后仍然存在的差距（标准差）：右 = 今天更高，左 = 今天更低；差距越大越说明今天是“新形势”，情景推演要额外考虑。' }, gapBox),
         card({ title: '差距明细', sub: '“今天”是过去 12 个月均值；“作为观点”的状态参与了匹配，其余只是事后对照。' },
           ui.table([
-            { key: 'name', label: '状态', fmt: (v, r) => v || nameOf(r.state) },
+            { key: 'name', label: '状态', wrap: true, minWidth: 96, fmt: (v, r) => v || nameOf(r.state) },
             { key: 'today', label: '今天', fmt: (v, r) => fmtState(r.unit ?? unitOf(r.state), v) },
             { key: 'matched', label: '历史拼出的', fmt: (v, r) => fmtState(r.unit ?? unitOf(r.state), v) },
-            { key: 'gap_z', label: '差距（标准差）', fmt: (v) => signed(v),
+            { key: 'gap_z', label: h('span', {}, '差距', h('br'), '（标准差）'), fmt: (v) => signed(v),
               cls: (v) => (isNum(v) && Math.abs(v) >= 0.75 ? (v > 0 ? 'eras-hi' : 'eras-lo') : '') },
-            { key: 'in_view', label: '作为观点', fmt: (v) => (v ? ui.chip('是', 'accent') : h('span', { class: 'muted' }, '否')) },
-          ], residual))));
+            { key: 'in_view', label: h('span', {}, '作为', h('br'), '观点'), fmt: (v) => (v ? ui.chip('是', 'accent') : h('span', { class: 'muted' }, '否')) },
+          ], residual, { stack: true }))));
   } else {
-    simWrap.append(ui.notice('eras.json 里没有 today_similarity。', 'info'));
+    simWrap.append(ui.notice('时代画像结果里没有“今天像哪个时代”的匹配。', 'info'));
   }
 
   // ======================================================== notes
@@ -722,6 +788,9 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
   // ======================================================== charts
   drawPicker();
   renderEra(byId[sel]);
+  if (rgEras.length) {
+    try { drawRgCompare(); } catch (err) { console.error(err); rgCmpBox.replaceChildren(ui.notice(`图表渲染失败：${err.message}`, 'error')); }
+  }
 
   // fingerprint, with today's single-month values on the same 1955+ yardstick
   if (fp) {
@@ -883,7 +952,7 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
   const lpDone = api.get('causality').then((c) => {
     lpBox.innerHTML = '';
     const dist = c?.distribution;
-    if (!dist?.responses) { lpBox.append(ui.notice('causality.json 里没有劳动收入占比的局部投影。', 'info')); return; }
+    if (!dist?.responses) { lpBox.append(ui.notice('因果传导结果里没有劳动收入占比的局部投影。', 'info')); return; }
     const periods = dist.periods || [];
     const hq = Math.min(8, dist.horizon_q ?? 8);
     const vars = (dist.variables || []).filter(v => v.id !== 'labor_share');
@@ -891,16 +960,16 @@ export async function render(root, { api, charts, ui, meta, param, alive = () =>
       if (!r || !isNum(r.coef?.[hq])) return '—';
       const u = r.unit === 'pp' ? 'pp' : '%';
       const sig = isNum(r.lo?.[hq]) && isNum(r.hi?.[hq]) && (r.lo[hq] > 0 || r.hi[hq] < 0);
-      return h('span', { class: sig ? '' : 'muted' }, `${signed(r.coef[hq])}${u}`,
-        h('span', { class: 'muted', style: { fontSize: '11px' } }, `（${bound(r.lo?.[hq])} ~ ${bound(r.hi?.[hq])}）`), sig ? ' ★' : '');
+      return h('div', { class: sig ? '' : 'muted' }, h('div', {}, `${signed(r.coef[hq])}${u}`, sig ? ' ★' : ''),
+        h('div', { class: 'muted', style: { fontSize: '11px' } }, `${bound(r.lo?.[hq])} ~ ${bound(r.hi?.[hq])}`));
     };
     lpBox.append(ui.table([
       { key: 'name', label: `${hq} 季后的累计响应`, wrap: true, minWidth: 108 },     // names wrap, not one word per line
       ...periods.map(p => ({ value: (v) => ({ ...dist.responses[p.id]?.[v.id], unit: v.unit }), label: p.name, fmt: (r) => cell(r) })),
-    ], vars), h('p', { class: 'eras-note' }, `冲击 = ${dist.shock || '劳动收入占比下降 1%'}；括号内为 ${Math.round((dist.band ?? 0.9) * 100)}% 区间，★ = 区间不含 0；灰色 = 不显著。`));
+    ], vars, { stack: true }), h('p', { class: 'eras-note' }, `冲击 = ${dist.shock || '劳动收入占比下降 1%'}；数值下方为 ${Math.round((dist.band ?? 0.9) * 100)}% 区间，★ = 区间不含 0；灰色 = 不显著。`));
   }).catch((err) => {
     lpBox.innerHTML = '';
-    lpBox.append(ui.notice(err.status === 404 ? '因果传导结果（causality.json）还没有生成，运行 python -m scenariolab.build 后可见。'
+    lpBox.append(ui.notice(err.status === 404 ? '因果传导结果还没有生成，运行 python -m scenariolab.build 后可见。'
       : `读取因果传导结果失败：${err.message}`, 'info'));
   });
 

@@ -31,6 +31,14 @@ export function get(path, { fresh = false } = {}) {
   return p;
 }
 
+// An optional result file: null (and no request, so no 404 in the console) when /api/meta's `results` says
+// it is missing, otherwise get() with any error turned into null.
+export function optional(name, meta) {
+  const have = meta?.results;
+  if (Array.isArray(have) && !have.includes(name)) return Promise.resolve(null);
+  return get(name).catch(() => null);
+}
+
 export async function post(path, body) {
   const res = await fetch(`/api/${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

@@ -24,8 +24,9 @@ pip install -e ".[llm,dev]"                             # llm 是可选的（情
 ```bash
 python -m scenariolab.build                 # 首次运行先下载公开数据（无需 key），再估计模型、跑检验和情景
 python -m scenariolab.build --skip panel    # 不重建数据面板，用已缓存的面板重建全部结果
-python -m scenariolab.build --only scenarios forecast valuation portfolio llm meta   # 改了内置情景之后
-python -m scenariolab.build --only ablation # 默认不跑的引擎消融（约 6 分钟）
+python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm meta   # 改了内置情景之后
+python -m scenariolab.build --only ablation # 默认不跑的引擎消融（约 5 分钟）
+python -m scenariolab.build --only regime_forecast   # 默认不跑的宏观体制一年期预测检验（约 2 分钟）
 python -m scenariolab.server                # http://127.0.0.1:8765
 ```
 
@@ -36,7 +37,7 @@ python -m scenariolab.server                # http://127.0.0.1:8765
 ## 测试
 
 ```bash
-pytest -q                      # 全部测试，约 1 分钟
+pytest -q                      # 全部测试，约 3 分钟
 ruff check scenariolab tests   # 规则见 pyproject.toml（E9 语法错误 + F pyflakes）
 python -m compileall -q scenariolab
 ```
@@ -47,11 +48,12 @@ python -m compileall -q scenariolab
 
 ## 添加一个内置情景
 
-1. 在 `scenariolab/scenarios/specs/` 下复制一个最接近的 YAML，文件名就是默认 id。字段和边界见 ARCHITECTURE.md 的 “Scenario spec”：视图只能用 `s_` / `f_` / `e_` 变量，目标值会被截断到“该阶段 6 个月均值”的历史 2%–98% 分位，覆盖项（factor_drift、asset_drift、resid_scale、r_star）只用于历史上没有先例的部分，每一项都写 `why`。
+1. 在 `scenariolab/scenarios/specs/` 下复制一个最接近的 YAML，文件名就是默认 id。字段和边界见 ARCHITECTURE.md 的 “Scenario spec”：视图只能用 `s_` / `f_` / `e_` / `rg_`（事后体制标签）变量，目标值会被截断到“该阶段 6 个月均值”的历史 2%–98% 分位，覆盖项（factor_drift、asset_drift、resid_scale、r_star）只用于历史上没有先例的部分，每一项都写 `why`。
 2. `tests/test_scenarios.py` 检查的约定：name、summary、tags、analogs 不为空；narrative 4–8 句（按“。”计）；因果链 5–10 条边；2–4 个阶段、合计 180 个月；不得对资产收益设视图；校验时没有错误、截断和警告；全部内置情景的 prior_prob 合计在 0.95–1.05 之间（加一个情景时相应调低其他情景的先验）。
 3. `calibration`（收入分配计算器）只有内置情景库会换算成视图和漂移；自定义情景和 LLM 规格里的 calibration 块会被忽略并给出警告。
-4. 运行 `pytest tests/test_scenarios.py`，再重建：`python -m scenariolab.build --only scenarios forecast valuation portfolio llm meta`（一年期预测、估值页、组合默认值和 LLM 的示例都依赖情景结果或情景文件）。
-5. narrative 里引用的模拟数字（“模拟的……约……”）来自引擎的运行结果，跑完之后再填写；改了视图就要重新核对。
+4. 运行 `pytest tests/test_scenarios.py`，再重建：`python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm meta`（宏观体制页和情景的体制读数共用引擎的无条件参照，一年期预测、估值页、组合默认值和 LLM 的示例都依赖情景结果或情景文件）。
+5. 阶段可以用 `regime` 字段要求多抽某种宏观体制的历史月份（例如 `regime: {滞胀: 0.7}`）；校验会给出历史支撑不够的警告（W1–W11），内置情景要做到没有这类警告。
+6. narrative 里引用的模拟数字（“模拟的……约……”）来自引擎的运行结果，跑完之后再填写；改了视图就要重新核对。
 
 ## 添加一个数据源
 
@@ -59,6 +61,10 @@ python -m compileall -q scenariolab
 2. 在 `scenariolab/data/panel.py` 的 `build_panel()` 里把它变成面板的列（`s_` 水平、`f_` 月度变化、`r_` / `p_` / `d_` 资产回报、`lvl_` 原始水平），把来源加进 `SOURCES`（名称 → 网址，“方法与数据”页会列出），口径写进 `meta["notes"]`。新的因子或状态 id 加到 `config.FACTORS` / `config.STATES`。
 3. 测试里用假的网络响应，不要真的下载（见 `tests/test_build.py`）。
 4. 遵守数据来源自己的使用条款；需要注册、付费或绕过访问限制的来源不加。
+
+## 宏观体制的判定参数
+
+宏观体制分类器的参数只通过 `config.REGIMES` 修改，不在别处另写阈值；每次修改都要重跑 `python -m scenariolab.build --only scenarios regimes forecast valuation portfolio llm meta`：情景结果里的体制读数（每个情景的 `regimes`、情景库的第 1 年构成）由 scenarios 这一步按现行参数算出，宏观体制页（NBER 验证、样本外参数网格和数据修订研究都在 regimes 这一步里）和它们要用同一套参数；保留了一年期预测检验的，再跑 `--only regime_forecast`。在 PR 里报告 NBER 验证、样本外网格和数据修订研究这三项结果的变化。`high_inflation_pct` 与传导模型的 `factor_model.HIGH_INFLATION` 是两个常数，测试要求两者相等，改一个就要同时检查另一个。
 
 ## 代码风格
 
@@ -81,7 +87,8 @@ python -m compileall -q scenariolab
 - **Setup:** Python 3.10+, `pip install -e ".[llm,dev]"` (the `llm` extra is optional). The web UI is static ES modules with no build step; ECharts 5.5.1 (Apache-2.0) is vendored in `web/vendor/echarts/`.
 - **Build:** `python -m scenariolab.build` downloads the public data on first run and writes `data/results/`; use `--skip panel` or `--only <steps>` to rebuild part of it, and restart the server afterwards. The module and JSON contracts are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 - **Tests:** `pytest -q`, `ruff check scenariolab tests`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
-- **New scenario:** copy a YAML spec in `scenariolab/scenarios/specs/`, keep to the rules `tests/test_scenarios.py` checks, then rebuild `--only scenarios forecast valuation portfolio llm meta`.
+- **New scenario:** copy a YAML spec in `scenariolab/scenarios/specs/`, keep to the rules `tests/test_scenarios.py` checks, then rebuild `--only scenarios regimes forecast valuation portfolio llm meta`.
+- **Regime classifier:** its parameters change only through `config.REGIMES`; every change re-runs `--only scenarios regimes forecast valuation portfolio llm meta` (the scenario step labels the scenario paths with the live parameters; the regimes step holds the NBER validation, the out-of-sample grid and the revision study), plus `--only regime_forecast` when that file is kept, and reports the three studies.
 - **New data source:** a cached downloader in `scenariolab/data/sources.py` (through `_download()`; optional sources fail soft), panel columns and a `SOURCES` entry in `scenariolab/data/panel.py`, mocked network in tests. Open, key-free sources only.
 - **Style:** follow the surrounding code; English code and comments, Simplified Chinese UI text; all JSON through `scenariolab.jsonio`.
 - **No data in git:** `data/` and `.env` are git-ignored and must never be committed.

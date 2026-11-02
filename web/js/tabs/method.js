@@ -1,12 +1,19 @@
 // Static methodology page: how the engine works, what it assumes, where data comes from.
-// valuation.json (optional) adds the valuation-state settings to the assumptions.
-const CMA_METHOD = { valuation_adjusted: '估值调整（valuation_adjusted）', historical: '历史漂移（historical）' };
+// valuation.json (optional) adds the valuation-state settings to the assumptions; regimes.json
+// (optional) fills the macro-regime step's thresholds, label names and episode counts.
+const CMA_METHOD = { valuation_adjusted: '估值调整', historical: '历史漂移' };
+// The regime thresholds and labels as in config.REGIMES, used only when regimes.json is missing.
+const REGIME_DEFAULTS = {
+  params: { ip_swing_pct: 3, u_rise_pp: 0.5, severe_ip_decline_pct: 15, high_inflation_pct: 4, cpi_neg_pct: 0 },
+  labels: [{ id: 'expansion', name: '扩张' }, { id: 'inflation', name: '通胀' }, { id: 'deflation', name: '物价负增长', term: '通缩' },
+    { id: 'recession', name: '衰退' }, { id: 'depression', name: '深度衰退', term: '萧条' }, { id: 'stagflation', name: '滞胀' }],
+};
 
 export async function render(root, { api, ui, meta, alive = () => root.isConnected }) {
   const { h, card } = ui;
   const cma = meta?.cma || {};
   const pct = (x) => (x === undefined || x === null ? '—' : `${(x * 100).toFixed(2)}%`);
-  const val = api ? await api.get('valuation').catch(() => null) : null;
+  const [val, rg] = api ? await Promise.all([api.optional('valuation', meta), api.optional('regimes', meta)]) : [null, null];
   if (!alive()) return;
 
   root.append(h('p', { class: 'lead' },
@@ -35,6 +42,7 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
     ['10. 估值是状态，不是因子', '市盈率（CAPE）和 P/D 的月度变化几乎就是当月的股价变化，放进因子模型等于用股价解释股价，所以只作对照；实际利率、利润增长、利润减资本开支这些外生候选在走步检验里也没有稳定提升样本外 R²，因子模型保持不变。估值改作“状态”：每条模拟路径都记录 P/D（κ=0，只记录、不改变回报），每个情景详情里都能看到它隐含的 15 年后估值。把 P/D 按 −κ·(ln P/D − ln 公允 P/D) 拉回公允值的设定在回测里比现行引擎差，所以拉力关闭，长期估值假设只通过第 7 步的常数调整进入。',
       h('a', { href: '#valuation' }, '证据见“估值与盈利” →')],
   ];
+  steps.push(regimeStep(h, rg));
   root.append(h('div', { class: 'grid cols-2 text' }, steps.map(([t, d, more]) => card({ title: t }, h('p', { style: { margin: 0 } }, d),
     more ? h('p', { style: { margin: '8px 0 0' } }, more) : null))));
 
@@ -75,7 +83,37 @@ export async function render(root, { api, ui, meta, alive = () => root.isConnect
       h('li', {}, '战争、地缘政治、AGI 在模型里都是外生冲击；超出历史支持的部分（如 AGI 生产率）通过有上限的覆盖参数注入，并在界面上标出。'),
       h('li', {}, '情景概率是透明的启发式：主观先验 × 与当前状态的相似度，不是统计意义上的预测概率。'),
       h('li', {}, '一年期的资产回报本来就很难预测：滚动检验显示“今天像哪段历史”只能轻微调整预测，方向判断不比“总是猜涨”更好；模型的价值在于区间是否可靠、跨资产排序和情景一致性。'),
+      h('li', {}, regimeLimit(rg)),
       h('li', {}, '所有结果都是假设性的模拟，不构成投资建议。'))));
+}
+
+// Step 11: the macro regimes. Thresholds and names come from regimes.json definitions (REGIME_DEFAULTS
+// without it); every number in the text is a parameter, never typed here.
+function regimeStep(h, rg) {
+  const def = rg?.definitions || {};
+  const p = { ...REGIME_DEFAULTS.params, ...(def.params || {}) };
+  const labels = Array.isArray(def.labels) && def.labels.length ? def.labels : REGIME_DEFAULTS.labels;
+  const n = (x) => String(Number(Number(x).toFixed(2)));
+  const names = labels.map(l => l.name).join('、');
+  const termed = labels.filter(l => l.term);
+  const terms = termed.map(l => `“${l.term}”对应${l.name}`).join('，');
+  const text = `每个月按工业产出的方向（下跌 ${n(p.ip_swing_pct)}% 且失业率上升 ${n(p.u_rise_pp)} 个百分点 = 收缩）、`
+    + `收缩深度（工业产出累计跌 ${n(p.severe_ip_decline_pct)}%）和 CPI 同比（${n(p.high_inflation_pct)}%、${n(p.cpi_neg_pct)}）`
+    + `归入${names}之一；历史月份和模拟路径用同一套规则。情景阶段可以用 regime 字段多抽某种体制的历史月份。`
+    + '体制不进入传导模型和一年期预测：两者都做过样本外检验，没有通过。注意：判定通胀用的是当月 CPI 同比，传导模型的通胀状态用的是上月。'
+    + (terms ? `美国战后数据里没有真正的${termed.map(l => l.term).join('和')}，所以${terms}，都是较温和的近似。` : '');
+  return ['11. 宏观体制', text, h('a', { href: '#regimes' }, '宏观体制 →')];
+}
+
+// The limitation line: the regime history is thin. Episode counts since 1973 from regimes.json counts.
+function regimeLimit(rg) {
+  const lab = rg?.counts?.['1973']?.expost?.labels || {};
+  const names = Object.fromEntries((rg?.definitions?.labels || REGIME_DEFAULTS.labels).map(l => [l.id, l.name]));
+  const ids = ['recession', 'depression', 'deflation'];
+  const runs = ids.map(id => lab[id]?.runs).filter(x => typeof x === 'number');
+  const lo = runs.length ? Math.min(...runs) : null, hi = runs.length ? Math.max(...runs) : null;
+  return '宏观体制按今天的修订版数据计算，实时版只保证单边、按发布滞后'
+    + (runs.length === ids.length ? `；${ids.map(id => names[id] || id).join('、')}在 1973 年以来只有 ${lo === hi ? lo : `${lo}–${hi}`} 段历史。` : '。');
 }
 
 // The valuation-state settings from valuation.json (dt / dd pairs): the engine records P/D on every path

@@ -17,6 +17,7 @@ const TABS = [
   { group: '历史与因果' },
   { id: 'overview', name: '总览' },
   { id: 'eras', name: '历史时代画像' },
+  { id: 'regimes', name: '宏观体制' },
   { id: 'causality', name: '因果传导' },
   { group: '验证' },
   { id: 'forecast', name: '一年期预测' },
@@ -121,6 +122,7 @@ async function boot() {
   } catch (err) {
     document.getElementById('data-date').textContent = '尚未构建';
   }
+  ui.watchTables(view);                // tables wider than their card wrap, then stack (ui.fitTable)
   window.addEventListener('hashchange', () => show(location.hash.slice(1)));
   show(location.hash.slice(1) || 'overview');
 }

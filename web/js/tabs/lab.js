@@ -8,6 +8,7 @@
 import {
   renderScenarioDetail, disposeCharts, ensureStyle, ensureDetailStyle, phaseCard, validationCard,
   errorText, isNum, table, fmtVar, varCell, pct, fill, GLOSSARY, viewSpecText, overrideItems,
+  REGIME_LABELS, regimeRequest, regimeMix,
 } from './_scenario_detail.js';
 
 const DEFAULT_HORIZON = 180;    // the engine always simulates 15 years (config.HORIZON_MONTHS, meta.horizon_months)
@@ -167,7 +168,7 @@ export async function render(root, ctx) {
     h('div', { class: 'lab-flow' },
       step('', '① 你的叙事', '一段中文：发生了什么、持续多久、怎么传导'), arrow(),
       step('llm', '② LLM 翻译', '只输出情景规格：结构冲击、分阶段视图、有上限的覆盖项、因果链'), arrow(),
-      step('', '③ 规格校验（validate_spec）','不认识的变量被忽略，数值截断到历史 2%–98% 区间，阶段补齐到 180 个月'), arrow(),
+      step('', '③ 规格校验', '不认识的变量被忽略，数值截断到历史 2%–98% 区间，阶段补齐到 180 个月'), arrow(),
       step('engine', '④ 引擎', '熵池给 1973 年以来的真实月份重新赋权，按 6 个月区块抽样，经今天的传导模型生成资产回报'), arrow(),
       step('engine', '⑤ 结果', 'K 线、扇形图、年化收益、相关性：每个数字都来自真实历史月份')),
     h('p', { class: 'lab-foot' }, 'LLM 写出的数字只是对历史月份平均值的要求（视图），不是价格或收益率；每一处被截断、忽略或收缩的地方都会列在校验报告里。')));
@@ -214,7 +215,13 @@ export async function render(root, ctx) {
   h('details', { class: 'scenarios-more' }, h('summary', {}, '规格怎么写（字段速查）'),
     h('ul', { class: 'lab-cheat' },
       h('li', {}, h('code', {}, 'phases[].months'), `：各阶段月数，合计 ${HORIZON}（引擎固定模拟 15 年）；最多 8 个阶段，每阶段最多 12 个视图`),
-      h('li', {}, h('code', {}, 'views[].var'), '：只能用 s_（状态水平，如 s_cpi_yoy）、f_（月度变化，如 f_oil）、e_（结构冲击，如 e_oil_supply）变量，见下方变量参考'),
+      h('li', {}, h('code', {}, 'views[].var'), '：只能用 ', h('code', {}, 's_'), '（状态水平，如 ', h('code', {}, 's_cpi_yoy'), '）、', h('code', {}, 'f_'),
+        '（月度变化，如 ', h('code', {}, 'f_oil'), '）、', h('code', {}, 'e_'), '（结构冲击，如 ', h('code', {}, 'e_oil_supply'), '）变量，见下方变量参考；',
+        h('code', {}, 'rg_'), '（宏观体制的事后标签，如 ', h('code', {}, 'rg_stagflation'), '，值是抽中月份里这种体制的占比 0–1）也可以，但更常用下面的 ', h('code', {}, 'regime')),
+      h('li', {}, h('code', {}, 'phases[].regime'), '：要求这个阶段多抽某种宏观体制的历史月份，',
+        h('code', {}, '{"滞胀": 0.7}'), ' 或 ', h('code', {}, '[{"id": "stagflation", "share": 0.7, "why": "…"}]'),
+        `；可用${REGIME_LABELS.map(l => l.name).join('、')}（体制之间互斥，占比之和不超过 1）和收缩、高通胀两个标志；`
+        + '历史支撑不够、和同阶段的其他视图冲突或收缩太长时，校验报告会给出警告；实时标签（', h('code', {}, 'rg_rt_'), ' 开头）不能作为视图'),
       h('li', {}, '目标键（每个视图选一个）：', h('code', {}, 'mean'), ' 阶段平均（变量本身的单位，f_ 为月度）、', h('code', {}, 'mean_annual'),
         ' f_ 的年化平均（= 月度 × 12）、', h('code', {}, 'shift_sd'), ' 比历史均值偏移几个标准差（−3~3）、', h('code', {}, 'min'), ' / ', h('code', {}, 'max'),
         ' 平均值的下限 / 上限；可另加 ', h('code', {}, 'vol_mult'), ' 波动倍数（0.3~3）'),
@@ -472,6 +479,9 @@ export async function render(root, ctx) {
         table([
           { key: 'k', label: '阶段', left: true, fmt: (k, r) => `${k + 1}. ${r.ph.name || ''}` },
           { value: (r) => r.ph.months, label: '月数' },
+          // the regime request of a phase that sets `regime` (DESIGN §5.3), as chips; the column only when one does
+          ...(rows.some(r => regimeRequest(r.ph.regime)) ? [{ value: (r) => r, label: '体制', left: true, wrap: true, cls: 'scenarios-wrap',
+            fmt: (r) => { const q = regimeRequest(r.ph.regime); return q ? regimeMix(q, REGIME_LABELS, { min: 0 }) : '—'; } }] : []),
           { value: (r) => r, label: '视图（对抽到的历史月份平均值的要求）', left: true, wrap: true, cls: 'scenarios-wrap', fmt: (r) => views(r.ph) },
           { value: (r) => r, label: '覆盖项', left: true, wrap: true, cls: 'scenarios-wrap', fmt: (r) => overrides(r.ph) },
         ], rows, { stack: true }),
@@ -608,7 +618,7 @@ export async function render(root, ctx) {
         h('b', {}, `今天有 ${outside.length} 个状态超出 1973 年以来单月的 2%–98% 区间（新形势）：`),
         h('ul', { class: 'lab-new', style: { margin: '6px 0 4px', paddingLeft: '18px' } }, outside.map(v =>
           h('li', {}, `${v.name}：今天 ${fmtVar(v.var, v.today)}，历史区间 ${fmtVar(v.var, v.p2)} ~ ${fmtVar(v.var, v.p98)}`))),
-        '视图只能在历史上挑选月份，表达不了这些没有先例的水平；要刻画它们（例如白领工资被压制、利润占比创新高），请用有上限的 factor_drift 覆盖项，或接受被截断。'), 'info'));
+        '视图只能在历史上挑选月份，表达不了这些没有先例的水平；要刻画它们（例如白领工资被压制、利润占比创新高），请用有上限的 ', h('code', {}, 'factor_drift'), ' 覆盖项，或接受被截断。'), 'info'));
       newSituation.style.marginTop = '10px';
     }
     let kind = 'all', q = '';
@@ -659,12 +669,12 @@ export async function render(root, ctx) {
         search, h('span', { class: 'muted', style: { fontSize: '12px' } }, `${vars.length} 个变量`)),
       tableBox,
       driftRows.length ? h('div', { style: { marginTop: '14px' } },
-        h('div', { class: 'scenarios-sub' }, '覆盖项的上限：factor_drift（每年，±）'),
+        h('div', { class: 'scenarios-sub' }, '覆盖项的上限：', h('code', {}, 'factor_drift'), '（每年，±）'),
         h('div', { style: { maxWidth: '640px' } }, table([
           { key: 'f', label: '因子', fmt: (f) => (f === 'cpi' ? 'CPI 总体（cpi）' : `${ui.factorName(f)}（${f}）`) },
           { key: 'b', label: '上限（每年 ±）', fmt: (b, r) => boundText(r.f, b) },
         ], driftRows)),
-        h('p', { class: 'lab-note' }, `asset_drift：每年 ±${pct(ad.bound ?? 0.08, 0)} 的额外价格漂移，只能用于 ${(ad.assets || []).map(a => ui.assetName(a)).join('、') || '股票、REITs 和黄金'}。`)) : null,
+        h('p', { class: 'lab-note' }, h('code', {}, 'asset_drift'), `：每年 ±${pct(ad.bound ?? 0.08, 0)} 的额外价格漂移，只能用于 ${(ad.assets || []).map(a => ui.assetName(a)).join('、') || '股票、REITs 和黄金'}。`)) : null,
       lt.prompt?.system ? h('details', { class: 'scenarios-more' },
         h('summary', {}, `LLM 看到的系统提示词（${(lt.prompt.chars || lt.prompt.system.length).toLocaleString('zh-CN')} 字，示例：${(lt.prompt.examples || []).join('、') || '—'}）`),
         h('pre', { class: 'code lab-wrap' }, lt.prompt.system)) : null);

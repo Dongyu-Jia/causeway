@@ -470,9 +470,21 @@ def _pct(x: float | None, d: int = 1) -> str:
     return "—" if x is None else f"{x:+.{d}%}"
 
 
+def gain_note(rel: float | None, t: float | None) -> str:
+    """The forecast module's claim rule on a seed-averaged relative CRPS change `rel` (negative = better) whose
+    paired t of the per-origin differences is `t` (negative = better): "（t = -2.4）" when the gain passes
+    (beyond CLAIM_SKILL with |t| of at least CLAIM_T), else with 「在随机误差之内」."""
+    if rel is None:
+        return ""
+    if F._verdict(-rel, None if t is None else -t) > 0:
+        return f"（t = {t:.1f}）"
+    return f"（t = {t:.1f}，在随机误差之内）" if t is not None else "（在随机误差之内）"
+
+
 def report_text(fams: list[dict], baseline: dict, oracle: dict, n: int, seeds: int, split: str) -> tuple[str, str]:
     """(summary text, verdict text), generated from the numbers. CRPS changes are relative to the current
-    forecast, seed-averaged; negative = better."""
+    forecast, seed-averaged; negative = better. A test-half gain is stated with its seed-averaged t and, unless
+    it passes the forecast module's claim rule (gain_note), as within the noise."""
     passing = [f for f in fams if f["passes"]]
     if passing:
         v = "采用：" + "、".join(f"{f['name']}" for f in passing) + "通过了全部采用条件。"
@@ -487,7 +499,8 @@ def report_text(fams: list[dict], baseline: dict, oracle: dict, n: int, seeds: i
     frag = lead.get("fragility_seed23") or {}
     frag_txt = ""
     if rt["test"]["mean"] < 0:
-        frag_txt = (f"检验期 CRPS 降得最多的是「{lead['name']}」：相对现行预测检验期 {_pct(rt['test']['mean'], 2)}、"
+        frag_txt = (f"检验期 CRPS 降得最多的是「{lead['name']}」：相对现行预测检验期 {_pct(rt['test']['mean'], 2)}"
+                    f"{gain_note(rt['test']['mean'], (lead.get('t') or {}).get('test'))}、"
                     f"验证期 {_pct(rt['val']['mean'], 2)}（负 = 更好）")
         best_o, rest = frag.get("best_origins") or [], frag.get("test_without_best_rel")
         if best_o and rest is not None:
@@ -600,11 +613,14 @@ def run(ctx: EngineContext, seed_bases=SEED_BASES, n_paths: int = N_PATHS, origi
                 f"90% 区间覆盖率下降不超过 {MAX_COVERAGE_DROP:g}。用事后体制标签的前视对照不参与")
     text, vtext = report_text(fams, baseline, oracle, len(dates), len(seed_bases), F.SPLIT)
     return {
-        "version": 1, "question": "知道今天的实时宏观体制，能不能让一年期预测在样本外更准？", "text": text,
+        # data_end and the baseline's share and origins say which forecast this test belongs to: the regimes tab
+        # compares them with regimes.json and forecast.json and warns when they differ (an opt-in step goes stale)
+        "version": 1, "data_end": f"{panel.index.max():%Y-%m}",
+        "question": "知道今天的实时宏观体制，能不能让一年期预测在样本外更准？", "text": text,
         "settings": {"n_paths": n_paths, "seed_bases": list(seed_bases), "origins": [f"{t:%Y-%m}" for t in dates],
                      "split": F.SPLIT, "share_grid": list(SHARES), "share_labels": [F.share_label(s) for s in SHARES],
                      "lambdas": list(LAMBDAS), "guard": {"min_ens": MIN_ENS, "min_episodes": MIN_EPISODES},
-                     "common_random_numbers": True},
+                     "common_random_numbers": True, "claim": {"min_skill": F.CLAIM_SKILL, "min_t": F.CLAIM_T}},
         "baseline": baseline, "families": fams, "oracle": oracle, "guard_tests": gt,
         "by_label_seed23": by_label_main, "labels_at_origins": labels,
         "verdict": {"adopted": [f["id"] for f in fams if f["passes"]], "rule": rule_txt, "text": vtext},

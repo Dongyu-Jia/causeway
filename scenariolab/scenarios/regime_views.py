@@ -28,6 +28,7 @@ Does not import runner (runner imports this module; the reference run is passed 
 """
 from __future__ import annotations
 
+import json
 import math
 import weakref
 from fractions import Fraction
@@ -293,6 +294,27 @@ def support_rows(db) -> dict[str, dict]:
 
 # ----------------------------------------------------------------------------- database checks (W8-W11)
 
+# Pools of the database checks, per month database (weakly) and per (months, views): translator.preview and
+# runner.run_spec check the same clean spec, and a phase whose views conflict with its regime needs a pool per
+# pair and per left-out view (a second or more each), so the second check reuses the first one's pools.
+_POOLS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_POOLS_MAX = 64
+
+
+def _check_pool(db, views: list[dict], months: int):
+    """pool_phase of `views` over a `months`-month phase of `db` at full confidence (cached)."""
+    store = _POOLS.get(db)
+    if store is None:
+        store = _POOLS[db] = {}
+    key = (int(months), json.dumps(views, sort_keys=True, ensure_ascii=False, default=str))
+    hit = store.get(key)
+    if hit is None:
+        while len(store) >= _POOLS_MAX:
+            del store[next(iter(store))]
+        hit = store[key] = pool_phase(db.frame, views, db.prior(), months, BLOCK, 1.0, rare=db.rare)
+    return hit
+
+
 def _target(v: dict) -> tuple[float, float] | None:
     """(monthly target, display unit) of a mean-type view, None for other kinds."""
     if _num(v.get("mean")) is not None:
@@ -328,10 +350,9 @@ def regime_checks(db, phase: dict, k: int, pool=None, clipped=()) -> list[str]:
     if not rviews or not others:
         return out
     months = int(phase["months"])
-    prior = db.prior()
 
     def pool_of(vs):
-        return pool_phase(F, vs, prior, months, BLOCK, 1.0, rare=db.rare)
+        return _check_pool(db, vs, months)
 
     base = pool_of(rviews)
     full = pool if pool is not None else pool_of(views)

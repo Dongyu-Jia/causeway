@@ -4,7 +4,7 @@
     python -m scenariolab.build --refresh       # re-download all data first
     python -m scenariolab.build --only scenarios meta
     python -m scenariolab.build --paths 1000    # more simulated paths per scenario
-    python -m scenariolab.build --only ablation # the engine ablation study (~6 min, not run by default)
+    python -m scenariolab.build --only ablation # the engine ablation study (~5 min, not run by default)
     python -m scenariolab.build --only regime_forecast   # regimes in the one-year forecast (~2 min, opt-in)
     python -m scenariolab.build --all           # every step, the opt-in ones included
 
