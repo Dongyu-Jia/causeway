@@ -960,8 +960,14 @@ def _ticker_paths(t: str, core, layer_params: dict, vol_source: str, fixed_vol, 
     p = dict(layer_params)
     if price is not None and t in ESTIMATED:
         p["price"] = price
-    out = run_layer(core, [t], params={t: p}, vol_source=vol_source, anchor=anchor, alpha_mode=alpha_mode,
-                    fixed_vol=fixed_vol)
+    try:
+        out = run_layer(core, [t], params={t: p}, vol_source=vol_source, anchor=anchor, alpha_mode=alpha_mode,
+                        fixed_vol=fixed_vol)
+    except OSError as err:                         # "drawn" reads the realized-variance table from data/raw
+        if vol_source != "drawn":
+            raise
+        raise ValueError(f"vol_source 为 drawn 时需要本地的纳斯达克日线（已实现波动表），没有读到：{err}；"
+                         "请先运行 python -m scenariolab.build，或改用 model / fixed") from err
     ip = out.paths[t]
     level = ip.level
     if price is not None and t not in ESTIMATED and level[0, 0] > 0:
