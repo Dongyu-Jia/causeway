@@ -44,6 +44,9 @@ PUBLISHER_FILES = [
     ("worldbank/pinksheet_monthly_*/CMO-Historical-Data-Monthly.xlsx", "worldbank/"),
     ("freddiemac/fmhpi_master_*/fmhpi_master_file.csv", "freddiemac/"),
     ("shiller/fig3-1_*/Fig3-1.xls", "shiller/Fig3-1.xls"),
+    # Shiller's 2026 workbook (E and D to 2026-06): s_cape is his CAPE column (SIM_DESIGN §6.5, P0.3). It replaces
+    # the 2023 copy a first build downloaded, which takes --force once.
+    ("shiller/ie_data_*/ie_data.xls", "shiller/ie_data.xls"),
     ("iacoviello/gpr_*/data_gpr_export.xls", "iacoviello/"),
     ("policyuncertainty/us_epu_*/*.xlsx", "policyuncertainty/"),
     ("policyuncertainty/historical_epu_*/*.xlsx", "policyuncertainty/"),

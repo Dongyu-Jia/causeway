@@ -6,6 +6,9 @@ the engine: it rejects unknown variables, bounds every number to what history
 can support, pads or trims phases to the horizon, and reports every change so
 the UI can show exactly what was adjusted. A phase's `regime` key (macro
 regimes, regime_views.py) becomes plain views on the ex-post rg_ columns.
+A phase's overrides may also set `term_premium` (the 10-year's reversion target
+over r* + inflation, SIM_DESIGN P0.6) next to `r_star`; the LLM's output schema
+(SPEC_JSON_SCHEMA) does not offer it, YAML and edited specs may.
 
 Views take the s_ / f_ / e_ / rg_ column families; the audit-only x_ columns and
 the audit-only f_ columns (those of audit-role factors, config.FACTORS "role":
@@ -49,12 +52,15 @@ MAX_VIEWS_PER_PHASE = 12
 ASSET_DRIFT_BOUND = 0.08          # +-8%/yr of extra price drift
 RESID_SCALE_BOUNDS = (0.5, 2.0)
 R_STAR_BOUNDS = (-3.0, 3.0)
+# a phase's term premium (pp): the 10-year's reversion target over r* + inflation (simulate overrides, P0.6), so a
+# phase that states its policy path through r_star can keep the 10-year target; the reversion's own bounds
+TERM_PREMIUM_BOUNDS = (-1.0, 3.0)
 CONFIDENCE_BOUNDS = (0.3, 1.0)
 SHIFT_SD_BOUNDS = (-3.0, 3.0)
 VOL_MULT_BOUNDS = (0.3, 3.0)
 REVERSION_BOUNDS = {
     "kappa_ff": (0.0, 0.1), "kappa_y10": (0.0, 0.1), "kappa_spread": (0.0, 0.1),
-    "kappa_unrate": (0.0, 0.1), "kappa_oil": (0.0, 0.1), "r_star": R_STAR_BOUNDS, "term_premium": (-1.0, 3.0),
+    "kappa_unrate": (0.0, 0.1), "kappa_oil": (0.0, 0.1), "r_star": R_STAR_BOUNDS, "term_premium": TERM_PREMIUM_BOUNDS,
     "spread_level": (0.5, 6.0), "unrate_level": (3.0, 10.0),
     # log shift of the real-oil target (1973+ median, about $68 in 2026 dollars): -0.7 ~ $34, its 5th
     # percentile since 1973; +0.4 ~ $101, its 77th
@@ -413,7 +419,8 @@ def validate_spec(spec: dict, frame: pd.DataFrame, horizon: int = config.HORIZON
             ad[aid] = used
         if ad:
             clean_ov["asset_drift"] = ad
-        for key, bounds in (("resid_scale", RESID_SCALE_BOUNDS), ("r_star", R_STAR_BOUNDS)):
+        for key, bounds in (("resid_scale", RESID_SCALE_BOUNDS), ("r_star", R_STAR_BOUNDS),
+                            ("term_premium", TERM_PREMIUM_BOUNDS)):
             val = _num(ov.get(key))
             if val is not None:
                 used = _clip(val, *bounds)

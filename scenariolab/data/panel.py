@@ -214,40 +214,37 @@ def house_price_index(fmhpi: pd.Series | None, shiller_home: pd.Series | None) -
     return out[~out.index.duplicated(keep="last")]
 
 
-def spliced_cape(shiller: pd.DataFrame | None, price_index: pd.Series, profits_rt: pd.Series,
-                 cpi: pd.Series) -> pd.Series:
-    """Shiller's CAPE (S&P composite price / 10-year average real earnings), extended past his last month.
+def shiller_cape(shiller: pd.DataFrame | None, index: pd.DatetimeIndex) -> pd.Series:
+    """Shiller's own CAPE (S&P composite price / 10-year average real earnings) on the monthly `index`.
 
-    After Shiller's last earnings month, earnings grow with NIPA after-tax profits as published
-    (`profits_rt`) and the price with the CRSP market price index; the extension is chained to
-    his last CAPE value. None (no cached file) gives an all-NaN series.
+    The CAPE column of his workbook as it is (data/raw/shiller/ie_data.xls; `python -m
+    scenariolab.data.import_raw` brings in the 2026 workbook of the research round, E and D to 2026-06), so
+    s_cape equals his CAPE wherever both exist. Months after his last CAPE stay empty: the NIPA-profit
+    extension this replaced read 1.04-1.13 times his values once his newer file came out (SIM_DESIGN §6.5).
+    None (no cached file) gives an all-NaN series.
     """
-    idx = price_index.index
-    if shiller is None or shiller["cape"].dropna().empty:
-        return pd.Series(np.nan, index=idx)
-    sh = shiller.reindex(pd.date_range(min(shiller.index.min(), idx.min()), idx.max(), freq="MS"))
-    cape_end = sh["cape"].last_valid_index()
-    e_end = sh["earnings"].last_valid_index()
-    cpi_end = sh["cpi"].last_valid_index()
-    out = sh["cape"].copy()
-    if cape_end >= idx.max():
-        return out.reindex(idx)
-    # earnings and CPI past Shiller's last prints, chained to them
-    prof = profits_rt.reindex(sh.index)
-    earn = sh["earnings"].copy()
-    later = earn.index > e_end
-    earn[later] = earn[e_end] * prof[later] / prof[e_end]
-    c = sh["cpi"].copy()
-    later_c = c.index > cpi_end
-    c[later_c] = c[cpi_end] * cpi.reindex(sh.index)[later_c] / cpi.get(cpi_end, np.nan)
-    real_e10 = (earn / c).rolling(120, min_periods=120).mean()
-    pidx = price_index.reindex(sh.index)
-    price = sh["price"].copy()
-    later_p = price.index > cape_end
-    price[later_p] = price[cape_end] * pidx[later_p] / pidx[cape_end]
-    own = (price / c) / real_e10
-    out[later_p] = sh["cape"][cape_end] * own[later_p] / own[cape_end]
-    return out.reindex(idx)
+    if shiller is None or "cape" not in shiller or shiller["cape"].dropna().empty:
+        return pd.Series(np.nan, index=index)
+    return shiller["cape"].reindex(index).astype(float)
+
+
+def shiller_notes(shiller: pd.DataFrame | None) -> list[str]:
+    """The panel notes on Shiller's workbook: what s_cape is, and the caveat on his latest earnings (SIM_DESIGN
+    §6.5: the file does not say whether the last two quarters of E are reported or estimated)."""
+    if shiller is None or "cape" not in shiller or shiller["cape"].dropna().empty:
+        return ["席勒 CAPE 取自 Shiller 的 ie_data.xls（缓存）；缺少该文件时 CAPE 为空。"]
+    cape_end = shiller["cape"].last_valid_index()
+    out = [f"席勒 CAPE 直接取自 Shiller 的 ie_data.xls（缓存，CAPE 到 {cape_end:%Y-%m}）；他的最后一个 CAPE 月份之后为空，"
+           "不再用 NIPA 利润外推。"]
+    e = shiller["earnings"].dropna() if "earnings" in shiller else pd.Series(dtype=float)
+    if len(e) > 6:
+        e_end = e.index[-1]
+        before = e.loc[:e_end - pd.DateOffset(months=6)]
+        if len(before):
+            out.append(f"Shiller 的盈利 E 到 {e_end:%Y-%m}：最近两个季度从 {before.iloc[-1]:.1f}（{before.index[-1]:%Y-%m}）"
+                       f"变为 {e.iloc[-1]:.1f}，文件里分不清是已公布值还是估计值：E 的最近两个季度可能是估计值，"
+                       "今天的市盈率和 10 年平均盈利都依赖它。")
+    return out
 
 
 class _ColumnBag:
@@ -295,7 +292,7 @@ COLUMN_INFO = {
     "s_div_yield": (FRENCH, EOM, True), "s_infl_expect": (["CPIAUCSL"], REF, True),
     "s_real_y10": (["DGS10", "GS10", "CPIAUCSL"], MIX, True), "s_profit_share_rt": (["CP", "GDP"], RD, True, "CP"),
     "s_profit_growth_yoy": (["CP"], RD, True, "CP"), "s_fcf_share": (["CP", "PNFI", "GDP"], RD, True, "CP"),
-    "s_cape": (["shiller_ie_data", "CP", *FRENCH, "CPIAUCSL"], MIX, True),
+    "s_cape": (["shiller_ie_data"], AVG, True),
     "f_oil": (["DCOILWTICO", "WTISPLC"], MIX, False), "f_ip": (["INDPRO"], REF, True), "f_cpi": (["CPIAUCSL"], REF, True),
     "f_cpi_goods": (["CUSR0000SAC"], REF, True), "f_cpi_services": (["CUSR0000SAS"], REF, True),
     "f_ff": (["FEDFUNDS"], AVG, False), "f_y10": (["DGS10", "GS10"], EOM, False), "f_spread": (SPREAD_SOURCES, MIX, False),
@@ -305,7 +302,7 @@ COLUMN_INFO = {
     "f_white_collar": (["USPBS", "USINFO", "USFIRE", "PAYEMS"], REF, True), "f_wage": (["AHETPI"], REF, True),
     "f_sentiment": (["UMCSENT"], REF, False), "f_valuation": (FRENCH, EOM, True),
     "f_real_y10": (["DGS10", "GS10", "CPIAUCSL"], MIX, True), "f_profit_growth": (["CP"], RD, True, "CP"),
-    "f_fcf_share": (["CP", "PNFI", "GDP"], RD, True, "CP"), "f_cape": (["shiller_ie_data", "CP", *FRENCH, "CPIAUCSL"], MIX, True),
+    "f_fcf_share": (["CP", "PNFI", "GDP"], RD, True, "CP"), "f_cape": (["shiller_ie_data"], AVG, True),
     # missing-factor round: model inputs, their levels and the audit comparisons
     "s_gz": (["federalreserve_ebp"], REF, True), "f_gz": (["federalreserve_ebp"], REF, True),
     "s_ebp": (["federalreserve_ebp"], REF, True), "f_ebp": (["federalreserve_ebp"], REF, True),
@@ -380,8 +377,9 @@ def column_info(P: pd.DataFrame) -> dict:
     return out
 
 
-def _notes(meta_extra: list[str]) -> list[str]:
+def _notes(meta_extra: list[str], cape_lines: list[str] | None = None) -> list[str]:
     lags = config.RELEASE_LAGS
+    cape_lines = shiller_notes(None) if cape_lines is None else cape_lines
     return [
         f"季度序列（劳动收入占比、生产率、单位劳动成本：发布滞后 {lags['PRS85006173']} 个月；"
         f"利润、GDP、投资、可支配收入、关税、赤字、债务：{lags['CP']} 个月或 {lags['B235RC1Q027SBEA']} 个月；"
@@ -394,8 +392,7 @@ def _notes(meta_extra: list[str]) -> list[str]:
         "消费者信心 1978 年以前是季度调查，两次调查之间沿用上一次调查的值，不插值。",
         f"通胀预期代理 = 过去月度 CPI 通胀（年化）的指数加权均值，半衰期 {config.VALUATION['infl_half_life_months']} 个月；"
         "10 年期实际收益率代理 = 10 年期收益率 − 通胀预期代理。",
-        "席勒 CAPE 取自 Shiller 的 ie_data.xls（缓存）；他的最后一个月之后，盈利按 NIPA 税后利润（按发布月）增长、"
-        "价格按 CRSP 全市场价格指数外推，并与他的最后一个 CAPE 值衔接。缺少该文件时 CAPE 为空。",
+        *cape_lines,
         "GZ 信用利差与超额债券溢价为美联储当前版本，整段历史每月都可能修订。",
         "期限溢价为纽约联储 ACM 模型的当前估计（全样本估计的参数）。",
         "房价同比 1973–74 年用 Shiller 的月度房价指数（按 1953–74 年的月份均值季节调整）衔接 Freddie Mac 房价指数。",
@@ -622,7 +619,7 @@ def build_panel(refresh: bool = False) -> tuple[pd.DataFrame, dict]:
     P["s_profit_share_rt"] = P["s_profit_share"]          # the same release-dated ratio (the valuation module reads _rt)
     P["s_profit_growth_yoy"] = 100.0 * (rd(cp_q / cp_q.shift(4), lags["CP"]) - 1.0)
     P["s_fcf_share"] = 100.0 * rd((cp_q - pnfi_q.reindex(cp_q.index)) / gdp_q.reindex(cp_q.index), lags["CP"])
-    P["s_cape"] = spliced_cape(shiller, price_idx, cp_rt, L("cpi"))
+    P["s_cape"] = shiller_cape(shiller, idx)
     P["f_real_y10"] = P["s_real_y10"].diff()
     P["f_profit_growth"] = np.log(cp_rt).diff()          # non-zero only in release months
     P["f_fcf_share"] = P["s_fcf_share"].diff()
@@ -749,8 +746,8 @@ def build_panel(refresh: bool = False) -> tuple[pd.DataFrame, dict]:
         "factor_start": {fid: (str(P[f"f_{fid}"].first_valid_index().date())
                                if P[f"f_{fid}"].notna().any() else None) for fid in config.FACTOR_IDS},
         "sources": dict(SOURCES),
-        "notes": _notes(extra),
-        "cape_source": ("shiller+nipa_extension" if shiller is not None and P["s_cape"].notna().any() else None),
+        "notes": _notes(extra, shiller_notes(shiller)),
+        "cape_source": ("shiller" if P["s_cape"].notna().any() else None),
         "release_lags": dict(config.RELEASE_LAGS),
         "column_info": column_info(P),
     }

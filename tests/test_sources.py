@@ -631,3 +631,24 @@ def install_synthetic_sources(monkeypatch, net, fmhpi: bool = False):
     monkeypatch.setattr(src, "epu_news", lambda refresh=False: _synthetic("epu", months("1900-01-01"), 100.0, 0.1))
     monkeypatch.setattr(src, "nyfed_hlw", lambda refresh=False: _synthetic(
         "hlw", pd.date_range("1961-01-01", "2026-04-01", freq="QS"), 3.0, 0.02))
+
+
+def test_import_brings_in_the_shiller_workbook_and_replaces_an_older_copy_only_with_force(tmp_path, monkeypatch):
+    """P0.3: the research round's Shiller 2026 workbook goes to the path sources.shiller reads."""
+    monkeypatch.setattr(import_raw, "load_dotenv", lambda *a, **k: None)
+    research = make_research(tmp_path / "factors")
+    book = research / "raw" / "shiller" / "ie_data_shillerdata_20261101" / "ie_data.xls"
+    book.parent.mkdir(parents=True)
+    book.write_bytes(src.XLS_MAGIC + b"2026 workbook")
+    dest = tmp_path / "data_raw"
+    (dest / "shiller").mkdir(parents=True)
+    (dest / "shiller" / "ie_data.xls").write_bytes(src.XLS_MAGIC + b"2023 copy")
+    log = import_raw.run(research / "raw", dest_root=dest)
+    row = next(r for r in log["files"] if r.get("dest") == "shiller/ie_data.xls")
+    assert row["action"] == "conflict" and (dest / "shiller" / "ie_data.xls").read_bytes().endswith(b"2023 copy")
+    forced = import_raw.run(research / "raw", dest_root=dest, force=True)
+    row = next(r for r in forced["files"] if r.get("dest") == "shiller/ie_data.xls")
+    assert row["action"] == "copied" and row["replaced"] is True
+    assert (dest / "shiller" / "ie_data.xls").read_bytes() == book.read_bytes()
+    rec = jsonio.load(dest / "SOURCES.json")["files"]["shiller/ie_data.xls"]
+    assert rec["research_path"] == "shiller/ie_data_shillerdata_20261101/ie_data.xls" and rec["kind"] == "publisher"

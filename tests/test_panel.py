@@ -316,3 +316,62 @@ def test_the_monthdb_keeps_every_month_from_1973_02():
         assert db.dates.equals(months)
     if P.index.max() == pd.Timestamp("2026-09-01"):
         assert len(months) == 644
+
+
+# ---------------------------------------------------------------- P0.3: s_cape is Shiller's own CAPE
+
+def _shiller_frame(cape_end: str = "2026-10-01", e_end: str = "2026-06-01") -> pd.DataFrame:
+    idx = pd.date_range("1871-01-01", cape_end, freq="MS")
+    rng = np.random.default_rng(3)
+    out = pd.DataFrame({"price": np.exp(np.cumsum(rng.normal(0.003, 0.04, len(idx)))),
+                        "earnings": np.exp(np.cumsum(rng.normal(0.002, 0.01, len(idx)))),
+                        "cpi": np.exp(np.cumsum(rng.normal(0.002, 0.003, len(idx)))),
+                        "cape": 15.0 + np.cumsum(rng.normal(0.0, 0.3, len(idx)))}, index=idx)
+    out.loc[out.index > pd.Timestamp(e_end), ["earnings"]] = np.nan
+    return out
+
+
+def test_s_cape_is_shillers_column_with_no_extension():
+    sh = _shiller_frame(cape_end="2020-06-01", e_end="2020-03-01")
+    idx = pd.date_range("1947-01-01", "2020-12-01", freq="MS")
+    cape = panel.shiller_cape(sh, idx)
+    assert cape.index.equals(idx)
+    assert np.array_equal(cape.loc[:"2020-06"].to_numpy(), sh["cape"].loc["1947-01":"2020-06"].to_numpy())
+    assert cape.loc["2020-07":].isna().all()                               # after his last CAPE: empty, not extended
+    assert panel.shiller_cape(None, idx).isna().all() and len(panel.shiller_cape(None, idx)) == len(idx)
+    assert not hasattr(panel, "spliced_cape")                              # the NIPA splice is retired
+
+
+def test_the_shiller_notes_name_his_last_cape_and_the_earnings_caveat():
+    sh = _shiller_frame()
+    sh.loc["2025-12-01", "earnings"], sh.loc["2026-06-01", "earnings"] = 240.6, 295.4
+    lines = panel.shiller_notes(sh)
+    assert lines[0].startswith("席勒 CAPE 直接取自 Shiller 的 ie_data.xls（缓存，CAPE 到 2026-10）") and "不再用 NIPA 利润外推" in lines[0]
+    assert "盈利 E 到 2026-06：最近两个季度从 240.6（2025-12）变为 295.4" in lines[1]
+    assert "E 的最近两个季度可能是估计值" in lines[1]
+    assert panel.shiller_notes(None) == ["席勒 CAPE 取自 Shiller 的 ie_data.xls（缓存）；缺少该文件时 CAPE 为空。"]
+    assert set(panel.shiller_notes(None)) <= set(panel._notes([]))
+
+
+def test_the_offline_build_without_shiller_has_no_cape(synthetic):
+    P, meta = synthetic
+    assert P["s_cape"].isna().all() and P["f_cape"].isna().all() and meta["cape_source"] is None
+    assert meta["column_info"]["s_cape"]["sources"] == ["shiller_ie_data"]
+
+
+@needs_panel
+@needs_raw
+def test_s_cape_equals_shillers_cape_where_both_exist():
+    """P0.3 exit test: to 1e-6 on every month of the panel where the cached workbook has a CAPE."""
+    sh = src.shiller(download=False)
+    if sh is None:
+        pytest.skip("Shiller workbook not cached")
+    P = panel.load_panel()
+    both = pd.concat([P["s_cape"], sh["cape"].rename("shiller")], axis=1, join="inner").dropna()
+    assert len(both) > 900 and float((both["s_cape"] - both["shiller"]).abs().max()) <= 1e-6
+    later = P.loc[P.index > sh["cape"].last_valid_index(), "s_cape"]
+    assert later.isna().all()                                               # no extension past his last CAPE
+    meta = panel.load_meta()
+    assert meta["cape_source"] == "shiller" and meta["column_info"]["s_cape"]["sources"] == ["shiller_ie_data"]
+    if sh["earnings"].last_valid_index() >= pd.Timestamp("2026-06-01"):     # the 2026 workbook (import_raw)
+        assert both.index.max() == P.index.max() and float(P["s_cape"].loc["2026-09-01"]) == pytest.approx(40.58, abs=0.01)

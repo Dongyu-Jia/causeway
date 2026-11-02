@@ -311,3 +311,80 @@ def test_custom_window_sees_no_month_after_train_end_but_the_oracle_views():
         assert moved["assets"][a]["fan_uncond"] == base["assets"][a]["fan_uncond"]
     assert moved["assets"]["us_equity"]["fan_cond"] != base["assets"]["us_equity"]["fan_cond"]      # the oracle views
     assert not np.allclose(moved["assets"]["us_equity"]["actual"], base["assets"]["us_equity"]["actual"])
+
+
+# ---------------------------------------------------------------- P0.1 train-end anchors, P0.2 the macro-only arm
+
+def test_the_two_conditional_arms_are_the_design_lists():
+    """SIM_DESIGN §10.5: 宏观 + 金融条件 = the current VIEW_VARS; 只有宏观 = the five macro variables."""
+    assert bt.VIEW_VARS == ("s_cpi_yoy", "s_ip_yoy", "f_ff", "f_y10", "f_spread", "f_oil", "f_unrate", "f_usd")
+    assert bt.MACRO_VIEW_VARS == ("s_cpi_yoy", "s_ip_yoy", "f_ff", "f_oil", "f_unrate")
+    assert set(bt.MACRO_VIEW_VARS) < set(bt.VIEW_VARS)
+    assert bt.ARM_NAMES == {"cond": "宏观 + 金融条件（含市场价格）", "cond_macro": "只有宏观"}
+    assert bt.VARIANTS["cond_macro"] == ("cond_macro", "historical")
+
+
+SHORT = {"id": "x", "name": "x", "train_end": "2019-12", "test": ("2020-01", "2021-12")}
+
+
+@needs_panel
+def test_windows_simulate_with_the_anchors_knowable_at_the_train_end(monkeypatch):
+    from scenariolab.context import load_panel_with_shocks
+    from scenariolab.engine import anchors
+    from scenariolab.engine.simulate import DEFAULT_REVERSION
+    panel, spec = load_panel_with_shocks(), ModelSpec()
+    s = bt.window_setup(panel, spec, SHORT)
+    assert s["reversion"] == anchors.window_reversion(panel, "2019-12") != {k: DEFAULT_REVERSION[k] for k in s["reversion"]}
+    seen = []
+    real = bt.simulate
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("reversion"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(bt, "simulate", spy)
+    win = bt.run_window(panel, spec, SHORT, n_paths=100, seed=5, setup=s)
+    assert len(seen) == len(bt.VARIANTS) and all(r == s["reversion"] for r in seen)       # every fan, both CMAs
+    a = win["anchors"]
+    assert a["rule"] == "train_end" and a["end"] == "2019-12"
+    assert a["reversion"] == s["reversion"] and a["default"] == {k: DEFAULT_REVERSION[k] for k in bt.ANCHOR_KEYS}
+    assert "长期锚按训练期末可知的规则" in win["summary"]["interpretation"]
+    seen.clear()
+    old = bt.run_window(panel, spec, SHORT, n_paths=100, seed=5, setup=s, reversion={})   # the fixed anchors of before
+    assert seen == [{}] * len(bt.VARIANTS) and old["anchors"]["rule"] == "given"
+    assert old["anchors"]["reversion"] == old["anchors"]["default"]
+    assert old["assets"]["us_equity"]["fan_cond"] != win["assets"]["us_equity"]["fan_cond"]
+    assert np.array_equal(old["assets"]["us_equity"]["actual"], win["assets"]["us_equity"]["actual"])
+    # the anchors read no month after the train end
+    other = _perturbed_after(panel, "2019-12")
+    assert bt.window_setup(other, spec, SHORT)["anchors"] == s["anchors"]
+
+
+@needs_panel
+def test_the_macro_arm_reproduces_fan_cond_when_its_views_are_the_same():
+    """P0.2 exit test: the new arm is the old fan_cond's machinery; with VIEW_VARS as its views it is fan_cond."""
+    from scenariolab import jsonio
+    from scenariolab.context import load_panel_with_shocks
+    panel, spec = load_panel_with_shocks(), ModelSpec()
+    same = jsonio.clean(bt.run_window(panel, spec, SHORT, n_paths=100, seed=5,
+                                      setup=bt.window_setup(panel, spec, SHORT, macro_vars=bt.VIEW_VARS)))
+    for a in bt.ASSETS:
+        e = same["assets"][a]
+        assert e["fan_cond_macro"] == e["fan_cond"], a
+        assert (e["coverage_cond_macro"], e["pit_terminal_cond_macro"], e["cagr_pred_cond_macro_p50"]) == (
+            e["coverage_cond"], e["pit_terminal_cond"], e["cagr_pred_cond_p50"])
+        assert e["decomposition_macro"] == e["decomposition"]
+    s = same["summary"]
+    assert s["cagr_mae_cond_macro_risk"] == s["cagr_mae_cond_risk"] and s["coverage_cond_macro_risk"] == s["coverage_cond_risk"]
+    assert same["ep_macro"] == same["ep"] and same["arms"]["cond_macro"]["view_vars"] == list(bt.VIEW_VARS)
+    # by default the arm has the five macro views only, and its fan differs
+    win = jsonio.clean(bt.run_window(panel, spec, SHORT, n_paths=100, seed=5))
+    assert [v["var"] for v in win["ep_macro"][0]["views"]] == list(bt.MACRO_VIEW_VARS)
+    assert [v["var"] for v in win["ep"][0]["views"]] == list(bt.VIEW_VARS)
+    assert win["assets"]["us_equity"]["fan_cond_macro"] != win["assets"]["us_equity"]["fan_cond"]
+    assert win["assets"]["us_equity"]["fan_cond"] == same["assets"]["us_equity"]["fan_cond"]      # fan_cond unchanged
+    assert win["arms"]["cond"]["name"] == "宏观 + 金融条件（含市场价格）" and win["arms"]["cond_macro"]["name"] == "只有宏观"
+    text = win["summary"]["interpretation"]
+    assert "只知道宏观" in text and "金融条件" in text
+    for key in ("cagr_mae_cond_macro_risk", "coverage_cond_macro_risk", "pit_cond_macro_mad", "ens_min_macro"):
+        assert np.isfinite(win["summary"][key]), key

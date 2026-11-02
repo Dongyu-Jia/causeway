@@ -638,3 +638,54 @@ def test_translation_under_the_final_model_warns_w12_and_w13(f_ctx):
     text = "\n".join(out["validation"]["warnings"])
     assert "阶段 3：s_tips10 从 " in text and "阶段 2：劳动收入占比不在今天的传导模型里" in text
     assert out["spec"]["phases"][1]["overrides"]["factor_drift"] == {"labor_share": -0.01, "gz": 0.2}
+
+
+# ---------------------------------------------------------------- P0.4: endogenous views, test mode
+
+def test_repair_warns_on_partly_endogenous_views_and_keeps_them():
+    """SIM_DESIGN §7.3 (layers, critic c20): spread, GZ, EBP, sentiment, claims and EPU are partly priced by the
+    same quarter's asset returns; the translator keeps such a view and says so. Macro views get no such note."""
+    views = [{"var": v, "mean": 1.0, "why": "叙事"} for v in tr.ENDOGENOUS_VIEWS] + [
+        {"var": "f_oil", "mean_annual": 0.3, "why": "油价"}, {"var": "s_cpi_yoy", "mean": 4.0, "why": "通胀"}]
+    spec, notes = tr.repair({"id": "x", "phases": [{"name": "一", "months": 12, "views": views}]})
+    assert [v["var"] for v in spec["phases"][0]["views"]] == [v["var"] for v in views]
+    for var in ("f_spread", "s_spread", "f_gz", "s_gz", "s_ebp", "f_sentiment", "s_sentiment", "s_claims", "s_epu"):
+        note = next(n for n in notes if n.startswith(f"阶段 1：{var}（"))
+        assert "部分内生" in note and "只有叙事明确写了它才该设定" in note, var
+    assert "阶段 1：f_gz（GZ 信用利差变动）是市场价格，同季资产回报能解释它约 40% 的季度变化" in "\n".join(notes)
+    assert not any(n.startswith(("阶段 1：f_oil", "阶段 1：s_cpi_yoy")) for n in notes)
+    assert set(tr.ENDOGENOUS_VIEWS) == {"f_spread", "s_spread", "f_gz", "s_gz", "s_ebp", "f_sentiment", "s_sentiment",
+                                        "s_claims", "s_epu"}
+
+
+def test_test_mode_refuses_valuation_views(ctx):
+    raw = copy.deepcopy(tr.INLINE_EXAMPLE)
+    raw["phases"][1]["views"].append(tr._view("s_div_yield", "估值从高位回落", mean=2.0))
+    raw["phases"][2]["views"].append(tr._view("f_cape", "估值修复", mean_annual=0.05))
+    prod = tr.translate(NARRATIVE, ctx, client=FakeClient(message(spec_json(raw))))
+    assert prod["mode"] == "production" and prod["validation"]["refused"] == []
+    assert "s_div_yield" in {v["var"] for v in prod["spec"]["phases"][1]["views"]}
+    assert "阶段 2：s_div_yield 几乎直接决定股市估值和股价，请确认叙事确实是估值重估" in prod["validation"]["warnings"]
+    test = tr.translate(NARRATIVE, ctx, client=FakeClient(message(spec_json(raw))), mode="test")
+    assert test["mode"] == "test" and test["validation"]["mode"] == "test"
+    assert [(r["phase"], r["var"]) for r in test["validation"]["refused"]] == [(2, "s_div_yield"), (3, "f_cape")]
+    kept = {v["var"] for p in test["spec"]["phases"] for v in p["views"]}
+    assert not kept & set(tr.VALUATION_VARS) and {"f_spread", "f_oil", "s_cpi_yoy"} <= kept
+    warnings = test["validation"]["warnings"]
+    assert tr.valuation_refusal_text(2, "s_div_yield") in warnings and sum("检验模式下不接受" in w for w in warnings) == 2
+    assert any(w.startswith("阶段 2：f_spread（") and "部分内生" in w for w in warnings)      # both modes warn on it
+    assert test["validation"]["ok"] and test["raw"] == raw                                    # raw kept for the diff
+
+
+def test_test_mode_prompt_states_the_refusal(ctx):
+    prod, test = tr.build_system_prompt(ctx), tr.build_system_prompt(ctx, mode="test")
+    assert prod != test and prod == tr.build_system_prompt(ctx, mode="production")
+    assert tr.valuation_view_rule("test") in test and tr.valuation_view_rule("test") not in prod
+    assert "除非叙事本身就是估值重估" in prod and "除非叙事本身就是估值重估" not in test
+    for prompt in (prod, test):
+        assert tr.endogenous_rule() in prompt and "s_claims" in prompt
+    assert tr.system_prompt(ctx, backend="api", mode="test") == test
+    with pytest.raises(tr.TranslatorError, match="mode 只能是 production 或 test"):
+        tr.translate(NARRATIVE, ctx, client=FakeClient(message(spec_json())), mode="blind")
+    with pytest.raises(tr.TranslatorError, match="mode 只能是"):
+        tr.repair({"id": "x"}, mode="Test")

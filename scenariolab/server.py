@@ -24,6 +24,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, jsonio
 from .env import load_dotenv
+from .qmodel import api as qmodel_api
 
 load_dotenv()
 
@@ -419,6 +420,10 @@ def custom_delete(sid: str):
         raise HTTPException(404, f"没有找到自定义情景「{sid}」（可能已被删除）")
     return _json({"deleted": sid})
 
+
+# 季度模型（试运行）: /api/q/card, /api/q/run, /api/q/run/{id} (SIM_DESIGN §3.9; scenariolab/qmodel/api.py).
+# Included before the static mount, which would otherwise answer every path.
+app.include_router(qmodel_api.router)
 
 app.mount("/", StaticFiles(directory=config.WEB_DIR, html=True), name="web")
 
