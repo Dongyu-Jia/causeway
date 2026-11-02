@@ -237,11 +237,33 @@ def raw_path(rel: str) -> Path:
     return config.RAW_DIR / rel
 
 
+# every raw file a build reads, while a recorder is active (panel.load_inputs): the quarterly panel's inputs digest is
+# the sha256 of these files' bytes, so it does not depend on how a pandas version parses them
+_RECORD: set | None = None
+
+
+def start_recording() -> None:
+    global _RECORD
+    _RECORD = set()
+
+
+def stop_recording() -> list[Path]:
+    global _RECORD
+    out, _RECORD = sorted(_RECORD or ()), None
+    return out
+
+
+def _note(path: Path) -> Path:
+    if _RECORD is not None:
+        _RECORD.add(Path(path).resolve())
+    return path
+
+
 def _need(path: Path) -> Path:
     if not path.exists() or path.stat().st_size == 0:
         raise FileNotFoundError(f"缺少原始文件 {path.relative_to(config.ROOT) if path.is_relative_to(config.ROOT) else path}"
                                 f"（季度面板不下载数据；先运行 {IMPORT_HINT}）")
-    return path
+    return _note(path)
 
 
 def fred(series_id: str, agg: str | None = None) -> pd.Series:
@@ -252,7 +274,7 @@ def fred(series_id: str, agg: str | None = None) -> pd.Series:
     for path, reader in ((fdir / f"{stem}.json", src.read_fred_json),
                          (fdir / f"{series_id}{src.CSV_SUFFIX[agg]}.csv", src.read_fred_csv)):
         if path.exists() and path.stat().st_size > 0:
-            s = reader(path, series_id).dropna()
+            s = reader(_note(path), series_id).dropna()
             if len(s) and (s.index.day == 1).all():
                 s.index = s.index.to_period("M").to_timestamp()
             return s.sort_index()

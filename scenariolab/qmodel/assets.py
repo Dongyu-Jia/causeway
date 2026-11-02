@@ -69,7 +69,7 @@ I = {a: i for i, a in enumerate(ASSETS)}
 FIELD_OF = {fid: f for f, fid in cq.L0_FACTOR.items()}           # F factor id -> quarterly field
 SCALE = {**{f: s for f, (_, s) in cq.L0_FIELDS.items()}, **{f: v[1] for f, v in cq.SCOPED_L0_FIELDS.items()}}
 SELECTION_PATH = config.RESULTS_DIR / "model_selection.json"
-VERSION = "1"
+VERSION = "2"                   # 2: the fix round (start state from published data, §3.2)
 
 
 # ---------------------------------------------------------------- F (the factor round's selected model)
@@ -681,21 +681,34 @@ class AssetLayer:
         return out.reindex(qs)
 
     # ------------------------------------------------------------ the start of a window
-    def start_state(self, Q: pd.DataFrame, q0) -> dict:
-        """The states the layer reads at the start of quarter q0, from data known then: s_vol, the us_equity return
-        of q0-1, s_cape, every dividend payer's log P/D, y_dg of q0-1, and the y_fund lags (that of q0-2 is known;
-        that of q0-1 is not yet published, Shiller E lag 3, and is imputed from its equation)."""
+    def start_state(self, Q: pd.DataFrame, q0, information: str = "auto", prev: dict | None = None) -> dict:
+        """The states the layer reads at the start of quarter q0, from data known then (§3.2): s_vol, the us_equity
+        return of q0-1, s_cape, every dividend payer's log P/D, y_dg of q0-1, and the y_fund lags. y_fund of q0-2 is
+        published at q0; that of q0-1 is not (Shiller E, lag 3) and is predicted from its equation on q0-1's d_cpi,
+        d_ip, d_unrate and d_rgdp -- which are not published at q0 either (lag 1): information 'published' (the
+        backtest default, factors.initial_state's rule) reads only published values, `prev` supplies the factor
+        layer's imputed ones (the rollout passes them), and without either y_fund(q0-1) = y_fund(q0-2).
+        'available' (the forward root, 'auto' at the panel's today row) reads every value the panel holds."""
+        from . import factors as F
         q0 = pd.Period(str(q0), "Q")
+        info = F._information(Q, q0, information)
         row = Q.loc[q0]
         st = {"s_vol": float(row["s_vol"]), "y_eq_l1": float(row["m1_us_equity"]), "s_cape": float(row["s_cape"]),
-              "y_dg_l1": float(Q.at[q0 - 1, "y_dg"])}
+              "y_dg_l1": F._pub(Q, "y_dg", q0, 1, info)}
         for a in DIVIDEND_ASSETS:
             st[f"s_pd_{a}"] = float(row["s_pd"] if a == "us_equity" else row[f"s_pd_{a}"])
-        f2 = float(Q.at[q0 - 2, "y_fund"])
-        f3 = float(Q.at[q0 - 3, "y_fund"]) if (q0 - 3) in Q.index else f2
-        prev = Q.loc[[q0 - 1]]
-        f1 = float(self.valuation.fund.predict(val.fund_regressors(prev), f3)[0])
-        if not math.isfinite(f1):                       # a macro input of q0-1 not yet in the panel
+        f2 = F._pub(Q, "y_fund", q0, 2, info)
+        f3 = F._pub(Q, "y_fund", q0, 3, info) if (q0 - 3) in Q.index else f2
+        if not math.isfinite(f3):
+            f3 = f2
+        reg = {}
+        for c in ("d_cpi", "d_ip", "d_unrate", "d_rgdp"):
+            v = F._pub(Q, c, q0, 1, info)
+            if not math.isfinite(v) and prev is not None and c in prev and math.isfinite(float(prev[c])):
+                v = float(prev[c])
+            reg[c] = np.array([v])
+        f1 = float(self.valuation.fund.predict(val.fund_regressors(reg), f3)[0])
+        if not math.isfinite(f1):                       # a macro input of q0-1 not published (and not imputed)
             f1 = f2
         st["y_fund_lags"] = [f2, f1]                    # values of q0-2 and q0-1
         return st

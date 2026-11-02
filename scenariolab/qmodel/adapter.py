@@ -16,14 +16,17 @@ tree's scenariolab/agents/model_adapter.py:
                   and asset-layer refit, balanced); REQUIRED_STATE and every "<x>_l1", "<asset>_l1"
     complete(state, given, rng, *, structural=None) -> Draws
     update_state(state, draws) -> state         the state roll Φ (rollout.Stepper.roll)
-    rarity(state, given) -> (N,) m2             the §3.5 statistic (chi-square with df = the number of pins)
+    rarity(state, given) -> (N,) m2             the §3.5 statistic; rarity_detail adds df and its percentile among
+                                                the simulator's own pool draws (calibrated: about 1% of the model's
+                                                own draws warn; the chi-square reading warned on 13%)
     impute(state, rng) -> state                 the root's unpublished fields redrawn from the joint distribution
 
 Pins (Given). Values are in card units; x_oil_cause is 0 (demand), 0.5 (mixed) or 1 (supply). Every pin comes back
 unchanged in Draws.x, with two bounded exceptions the field_info documents: a policy rate pinned below the floor is
 delivered at 0.1 (d_ff then reports the delivered change), and unemployment or a spread pinned below the model's
 bounds (u >= 2.05, spreads >= 0.11) is delivered at the bound. Completion conditions on the pinned values after the
-factor layer's ±4 sd saturation (d_oil and d_y10 pass through). How a pin is read (config_q.STEP_GIVEN_MODES,
+factor layer's saturation, ±4 training sd from the conditional mean (§3.5; d_oil and d_y10 pass through). How a pin
+is read (config_q.STEP_GIVEN_MODES,
 field_info()[f]["given_mode"]):
 
     reduced   an observation: the rest of the quarter is drawn from the model's conditional distribution
@@ -56,15 +59,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
+import pandas as pd
 
 from . import card as qcard
 from . import config_q as cq
 from . import rollout as R
 
-ADAPTER_VERSION = "1"
-REQUIRED_STATE = ("s_ff", "s_unrate", "s_core_yoy", "s_spread", "s_term", "s_infexp1", "s_rstar", "s_sahm", "s_cape",
-                  "d_ff_l1", "d_unrate_l1", "d_unrate_l2", "d_spread_l1", "d_itinv_l1", "d_gz_l1", "us_equity_l1",
-                  "nasdaq_4q", "real_oil_d1", "real_oil_d2")          # the agent tree's REQUIRED_STATE
+ADAPTER_VERSION = "2"                                   # 2: the fix round (content-derived stack versions, month labels)
+REQUIRED_STATE = cq.AGENT_REQUIRED_STATE                # the agent tree's REQUIRED_STATE
 CAPABILITIES = frozenset({"structural", "rarity", "impute"})
 HIST_KEYS = ("p01", "p05", "p10", "p25", "p50", "p75", "p90", "p95", "p99")
 
@@ -258,10 +260,14 @@ class QAdapter:
             if f == "d_ff":
                 info["level_floor"] = cq.FF_FLOOR
                 info["note"] = "政策利率不低于 0.1%：钉在下限以下的值按下限交付（d_ff 返回交付值）"
-            if f == "d_unrate":
-                info["level_floor"] = cq.PIN_U_MIN
-            if f in ("d_spread", "d_gz"):
-                info["level_floor"] = cq.PIN_SPREAD_MIN
+            if f in ("d_unrate", "d_spread", "d_gz"):          # P4b: bounded scales (factors.Bounded, logit)
+                lo, hi = R._Fields.pin_bounds(f)
+                info["level_floor"], info["level_ceiling"] = lo, hi
+                info["note"] = (f"有界尺度：水平保持在 ({lo:g}, {hi:g}) 内；钉在界外的变化按界交付"
+                                f"（模型的界 {cq.FACTOR_BOUNDS[{'d_unrate': 'lu', 'd_spread': 'sp', 'd_gz': 'gz'}[f]]}）")
+            if f == "d_y10":                                    # P4b: the observed 10-year's effective lower bound
+                info["level_floor"] = cq.Y10_FLOOR
+                info["note"] = "10 年期收益率不低于 0：低于下限时按下限交付（d_y10 返回交付值；影子利率在状态里）"
             if f == "x_oil_cause":
                 info["model_value"] = dict(cq.OIL_CAUSE)
                 info["note"] = "Given 用浮点数：0 = demand（需求）、0.5 = mixed、1 = supply（供给）"
@@ -334,8 +340,9 @@ class QAdapter:
         return self.stepper.roll(state, draws)
 
     def rarity(self, state: dict, given, *, structural: dict | None = None) -> np.ndarray:
-        """m2 per particle: the squared Mahalanobis size of the structural adjustment the pins need (chi-square with
-        df = the number of pins under the model; rarity_detail has df, the percentile and sd per constraint)."""
+        """m2 per particle: the squared Mahalanobis size of the structural adjustment the pins need; rarity_detail has
+        df, the percentile among the simulator's own pool draws (the warning above the 99th), the chi-square
+        percentile for reference and sd per constraint."""
         return self.rarity_detail(state, given, structural=structural)["m2"]
 
     def rarity_detail(self, state: dict, given, *, structural: dict | None = None) -> dict:
@@ -348,12 +355,21 @@ _ADAPTER: QAdapter | None = None
 _ADAPTER_LOCK = threading.Lock()
 
 
+BUILD_HINT = ("季度模型的数据还没有构建：先运行 python -m scenariolab.build --only quarterly（季度面板），"
+              "再运行 python -m scenariolab.build --only qmodel（因子层检验）")
+
+
 def make_adapter() -> QAdapter:
-    """The factory MSL_AGENT_MODEL names: the adapter on the cached forward stack (fitted once per process)."""
+    """The factory MSL_AGENT_MODEL names: the adapter on the cached forward stack (fitted once per process). A
+    missing panel, model card or model F raises FileNotFoundError with a Chinese message naming the build step."""
     global _ADAPTER
     with _ADAPTER_LOCK:
-        if _ADAPTER is None or _ADAPTER.stack is not R.get_stack():
-            _ADAPTER = QAdapter(R.get_stack())
+        try:
+            stack = R.get_stack()
+        except FileNotFoundError as err:
+            raise FileNotFoundError(f"{BUILD_HINT}（缺少：{err}）") from err
+        if _ADAPTER is None or _ADAPTER.stack is not stack:
+            _ADAPTER = QAdapter(stack)
         return _ADAPTER
 
 
@@ -429,7 +445,25 @@ def core_view(roll: R.Rollout, *, scenario_id: str = "", set_id: str = "quarterl
             from err
     cv = R.core_view_draws(roll)
     core = CoreView.from_quarterly(cv, labels=cv["labels"], scenario_id=scenario_id, set_id=set_id)
-    return dataclasses.replace(core, resid_drawn=np.asarray(cv["drawn"]).astype(str))
+    return dataclasses.replace(core, resid_drawn=month_labels(cv["drawn"]))
+
+
+def month_labels(drawn) -> np.ndarray:
+    """Residual-quarter labels ('YYYYQn') as the instruments' 'YYYY-MM' months (CoreView.resid_drawn: the quarter's
+    last month, which estimated.qend maps back to the quarter's end); anything else is kept as given."""
+    a = np.asarray(drawn).astype(str)
+    out = np.empty(a.shape, dtype=object)
+    memo: dict = {}
+    for i, lab in np.ndenumerate(a):
+        m = memo.get(lab)
+        if m is None:
+            try:
+                m = pd.Period(lab, "Q").asfreq("M", "end").strftime("%Y-%m") if "Q" in lab else lab
+            except ValueError:
+                m = lab
+            memo[lab] = m
+        out[i] = m
+    return out.astype(str)
 
 
 def correlations(y_us: np.ndarray, d_gz: np.ndarray, d_spread: np.ndarray) -> dict:

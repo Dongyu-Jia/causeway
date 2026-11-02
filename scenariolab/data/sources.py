@@ -421,16 +421,47 @@ def shiller(refresh: bool = False, download: bool = True) -> pd.DataFrame | None
     optional source: any failure (no network, a body that is not an .xls workbook, a changed
     layout) returns None and the panel is built without CAPE instead of failing; nothing is
     cached then, so the next build tries again.
+
+    A refresh never replaces the cached workbook with one whose earnings end earlier: P0.3
+    imported the 2026 workbook (E to 2026-06) while SHILLER_URL's copy had E only to 2023-06,
+    and with the NIPA splice retired an older workbook would end CAPE (and the quarterly
+    stack's s_cape) in 2023. The download goes to a side file; a cached workbook that parses
+    is replaced only by one whose last earnings month is not earlier (an unreadable download
+    never replaces it).
     """
     dest = RAW_DIR / "shiller" / "ie_data.xls"
     if download:
-        try:
-            _download(SHILLER_URL, dest, refresh, attempts=SHILLER_ATTEMPTS, timeout=SHILLER_TIMEOUT,
-                      check=lambda body: body[:8] == XLS_MAGIC)
-        except RuntimeError:
-            pass
+        if refresh and _cached(dest):
+            side = dest.with_name("ie_data.download.xls")
+            try:
+                _download(SHILLER_URL, side, True, attempts=SHILLER_ATTEMPTS, timeout=SHILLER_TIMEOUT,
+                          check=lambda body: body[:8] == XLS_MAGIC)
+                old, new = _shiller_parse(dest), _shiller_parse(side)
+                old_e = None if old is None else old["earnings"].last_valid_index()
+                new_e = None if new is None else new["earnings"].last_valid_index()
+                if old_e is not None and (new_e is None or new_e < old_e):
+                    log.warning("shiller: the downloaded workbook's earnings end %s, before the cached one's %s; "
+                                "the cached workbook is kept", new_e, old_e)
+                else:
+                    side.replace(dest)
+            except RuntimeError:
+                pass
+            finally:
+                if side.exists():
+                    side.unlink()
+        else:
+            try:
+                _download(SHILLER_URL, dest, refresh, attempts=SHILLER_ATTEMPTS, timeout=SHILLER_TIMEOUT,
+                          check=lambda body: body[:8] == XLS_MAGIC)
+            except RuntimeError:
+                pass
     if not dest.exists() or dest.stat().st_size == 0:
         return None
+    return _shiller_parse(dest)
+
+
+def _shiller_parse(dest: Path) -> pd.DataFrame | None:
+    """The workbook's Data sheet as a monthly frame, or None (a layout change must not break the panel)."""
     try:
         raw = pd.read_excel(dest, sheet_name="Data", header=None, engine="xlrd")
         head = next(i for i in range(min(len(raw), 40)) if str(raw.iat[i, 0]).strip() == "Date")

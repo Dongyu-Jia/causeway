@@ -118,6 +118,10 @@ def parse_request(body: dict) -> dict:
         raise HTTPException(400, f"QTable 有错误：{err}") from err
     H = read["H"]
     cont = _int(body, "continuation", 0, 0, cq.ROLLOUT_MAX_QUARTERS - H) if mode == "path" else 0
+    pq = n_paths * ((H + cont) if mode == "path" else 1)
+    if pq > cq.API_MAX_PATH_QUARTERS:                 # memory and time grow with paths x quarters
+        raise HTTPException(400, f"路径数 × 季度数 = {n_paths} × {H + cont} = {pq}，超过上限 "
+                                 f"{cq.API_MAX_PATH_QUARTERS}：请减少路径数或续推季度数")
     key = hashlib.sha256(json.dumps({"qtable": qt, "n_paths": n_paths, "seed": seed, "mode": mode, "cma": cma,
                                      "continuation": cont, "validation_mode": vmode}, sort_keys=True,
                                     ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
@@ -150,11 +154,14 @@ def execute(req: dict) -> dict:
 
 
 def _run_job(jid: str, req: dict) -> None:
-    with _GUARD:
-        _JOBS[jid]["status"] = "running"
-        _JOBS[jid]["started"] = time.time()
     try:
-        with _SLOTS:
+        with _SLOTS:                                  # queued until a slot is free; "running" only once it has one
+            with _GUARD:
+                job = _JOBS.get(jid)
+                if job is None:                       # evicted while queued (API_MAX_JOBS): nobody can read it
+                    return
+                job["status"] = "running"
+                job["started"] = time.time()
             res = execute(req)
         payload, err = jsonio.dumps(res), None
     except Exception as exc:  # noqa: BLE001 - reported in the job, in Chinese

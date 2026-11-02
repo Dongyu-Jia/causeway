@@ -439,3 +439,18 @@ def test_saved_panel_equals_a_fresh_build():
     assert np.isnan(diff) or diff <= 1e-12, stale
     assert (saved.isna() == Q.isna()).all().all(), stale
     assert qpanel.load_meta()["info"]["inputs_digest"] == meta["info"]["inputs_digest"], stale
+
+
+def test_the_inputs_digest_is_the_raw_files_not_the_parsed_floats():
+    """pandas 2.x and 3.x parse some input files one ulp apart: the digest (the freshness test and the stack version
+    read it) hashes the raw files' bytes, so parsed values a few ulp off leave it unchanged; a truncation changes it."""
+    if not (cq.PANEL_Q_PATH.exists() and config.PANEL_PATH.exists()):
+        pytest.skip("panels not built")
+    inp = qpanel.load_inputs()
+    assert len(inp.files["raw"]) > 40 and all(len(v) == 64 for v in inp.files["raw"].values())
+    d0 = qpanel.inputs_digest(inp)
+    k = next(iter(inp.series))
+    inp.series[k] = inp.series[k] * (1 + 4e-16)
+    assert qpanel.inputs_digest(inp) == d0 and qpanel.values_digest(inp) != qpanel.values_digest(qpanel.load_inputs())
+    assert qpanel.inputs_digest(qpanel.truncate_inputs(qpanel.load_inputs(), "2014-12")) != d0
+    assert qpanel.load_meta()["info"]["inputs_digest"] == d0

@@ -12,17 +12,20 @@ do-operator [E0] pc ps ip lu -> [E0p] rff -> [E1c] ro -> [E1] ry10 sp gz usd:
     pc   headline CPI inflation (annualized)            = d_cpi
     ps   services CPI inflation                         = d_cpi_serv
     ip   IP growth (annualized)                         = 4 d_ip
-    lu   log(u - 2): unemployment kept above 2          u = 2 + exp(lu)
+    lu   unemployment on a logit scale                  u = 2 + 28 / (1 + e^-lu): 2 < u < 30
     rff  the shadow real policy rate ff - pi_trend      observed ff = max(rff + pi_trend, 0.1)
     ro   100 log real oil                               d_oil = Δro + pc / 4
-    ry10 real 10-year y10 - pi_trend                    d_y10 = Δ(ry10 + pi_trend)
-    sp   log(Baa - 10y - 0.1) (timing fixed)           spread = 0.1 + exp(sp)
-    gz   log(GZ spread - 0.1)                           gz = 0.1 + exp(gz)
+    ry10 real 10-year y10 - pi_trend (a shadow)        observed y10 = max(ry10 + pi_trend, 0); d_y10 = Δ observed
+    sp   Baa - 10y (timing fixed), logit scale          spread = 0.1 + 14.9 / (1 + e^-sp): 0.1 < spread < 15
+    gz   the GZ spread, logit scale                     gz = 0.1 + 19.9 / (1 + e^-gz): 0.1 < GZ < 20
     usd  100 log broad dollar
 pi_trend is the EWMA of headline CPI inflation with a 36-month half-life (quarterly: pi_q = pi_{q-1} +
 a (pc_q - pi_{q-1}), a = 1 - 0.5^(3/36)); goods inflation comes from the identity pc = w_g d_cpi_goods + w_s ps with
-training weights (cpi_weights). The spreads' log(spread - 0.1) form is §5.4's floor transform, due because T-F found
-the linear model's spreads below 0.2 in more than 0.5% of draws (config_q.FACTOR_SPREAD_LOG).
+training weights (cpi_weights). The bounded scales (Bounded, config_q.FACTOR_BOUNDS; P4b) keep §5.4's floors (u > 2,
+spreads > 0.1: T-F found the linear model's spreads below 0.2 in more than 0.5% of draws) and add ceilings well above
+history; P3's log(level - lo) form (transform='log') made the levels lognormal and exploded at long horizons (§15 Q5's
+alternative, decided in T-F F6). The observed 10-year has an effective lower bound (config_q.Y10_FLOOR) like the
+policy rate's, with ry10 the shadow below it.
 
 Estimation (§5.2): Minnesota + sum-of-coefficients dummy priors (Banbura, Giannone and Reichlin 2010) with lambda by
 marginal likelihood on the training window; Student-t likelihood weights w_t = (nu + K)/(nu + m_t^2) by EM, nu in
@@ -31,7 +34,10 @@ get small weights by a rule, not by a calendar; the zero-bound quarters' shadow 
 (§5.4); a steady-state prior on the unconditional means (Villani 2009) centred on the anchors (§5.5: the train-end
 rule of engine/anchors.py in backtests, the §3.8 defaults forward), sd 1.0 pp in backtests and 0.5 pp forward,
 applied to every posterior draw as the conditional posterior of the means given its dynamics; FACTOR_DRAWS posterior
-draws with explosive draws redrawn (the rejection rate is recorded).
+draws with explosive draws redrawn (the rejection rate is recorded). The draw rule (stable, P4b) tests the system that
+is simulated: the VAR and the VAR under the cycle module, which makes IP exogenous in statement-free quarters (35% of
+the draws P3 accepted were explosive there); every root must lie below config_q.FACTOR_MAX_ROOT, so each mode at least
+halves within the longest simulated horizon (40 years).
 
 Satellites (§5.1): every other x field w, w_q = d + rho w_{q-1} + Gamma0 k_q + Gamma1 k_{q-1} + e_q (ridge, blocked
 5-fold CV, the core's t-weights), where the same-quarter core terms are restricted by the recursive order (E0 fields
@@ -44,13 +50,14 @@ series are masked before they start, never invented). The joint innovation of [c
 Simulation
 ----------
 Every path draws whitened training residual vectors with equal probability (history's own frequency, U-12), recoloured
-with its posterior draw. Statements (Statement) become restrictions on the stacked path and are imposed by projecting
+with its posterior draw (config_q.FACTOR_POOL_WINSOR_SD, off by default, would winsorize the whitened coordinates). Statements (Statement) become restrictions on the stacked path and are imposed by projecting
 the stacked innovations (Waggoner and Zha 1999):  e* = e + V G' (G V G')^-1 (r - R mu - G e),  G = R M, V = I (x) Sigma.
 Hard statements hold exactly on every path; soft ones (value + sd) are met within their sd (Andersson, Palmqvist and
 Waggoner 2010: each path's target is drawn from N(value, sd^2) and imposed exactly); ranges by accept/reject while at
-least 10% of paths pass, otherwise a Gibbs draw of the restricted coordinates. Statements on the log-shifted
+least 10% of paths pass, otherwise a Gibbs draw of the restricted coordinates. Statements on the bounded
 variables (unemployment, the spreads) are linear when the previous level is pinned (the start, or a chain of stated
-changes from it) and otherwise solved per path by Newton steps in the space the linear rows leave free; a stated
+changes from it) and otherwise solved per path by Newton steps in the space the linear rows leave free; a
+stated level outside the bounds is delivered just inside them; a stated
 policy-rate change is met on the observed rate, with the floor handled by an active set (level and kink forms) per
 path. The do-operator: a stated u_* is a
 structural shock of its policy equation under the recursive order, so same-quarter E0 macro is not moved by it, E1 /
@@ -58,11 +65,14 @@ E2 respond on impact and E0 with the lags; a stated raw policy field is a reduce
 (§5.6, C') draws IP growth from 2-quarter blocks of training IP growth in quarters that state nothing about growth
 (soft, sd = 0.5 x the quarterly IP sd; the other variables co-move through the innovation covariance; applied
 quarter by quarter, one-sided, so a statement-free quarter never reshapes the past). Saturation (§3.5): a stated
-value's gap to its conditional mean saturates at +-4 sd (d_oil and d_y10 pass through). Completion shrinkage and the
+value's gap to its conditional mean saturates at +-4 training sd (d_oil and d_y10 pass through). Completion shrinkage
+and the
 regime covariance (§5.7) are T-C candidates (config_q.COMPLETION_W, REGIME_COV).
 
 Path mode conditions on every statement at once (two-sided); step mode is H = 1. The rarity statistic is the
-Mahalanobis size of the innovation adjustment the statements need, as a chi-square percentile (§3.5).
+Mahalanobis size of the innovation adjustment the statements need, as a percentile among the simulator's own
+bootstrap draws (§3.5; the chi-square against the t-weighted Sigma over-warned 13-fold). The bootstrap pool is centred,
+so the bootstrap's mean path is the model's.
 
 Nothing here downloads or calls an LLM; every fit uses quarters <= its train end only.
 """
@@ -73,14 +83,14 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from scipy.special import gammaln, multigammaln, ndtr, ndtri
+from scipy.special import expit, gammaln, multigammaln, ndtr, ndtri
 from scipy.stats import chi2, invwishart
 
 from ..engine import anchors as eng_anchors
 from . import card as qcard
 from . import config_q as cq
 
-VERSION = "1"
+VERSION = "2"                   # 2: the fix round (centred pool, published initial state, §3.5 saturation and rarity)
 CORE = list(cq.FACTOR_CORE)
 NC = len(CORE)
 IDX = {v: i for i, v in enumerate(CORE)}
@@ -90,24 +100,147 @@ CORE_CLASS = {"pc": "E0", "ps": "E0", "ip": "E0", "lu": "E0", "rff": "E0p", "ro"
 DELTA = {"pc": 0.5, "ps": 1.0, "ip": 0.0, "lu": 1.0, "rff": 1.0, "ro": 1.0, "ry10": 1.0, "sp": 1.0, "gz": 1.0,
          "usd": 1.0}                         # Minnesota prior mean of the own first lag (jq.DELTA)
 RATE_VARS = ("pc", "ps", "ip")               # flows: the satellites' same-quarter block takes them as rates
-# core variables modelled as log(level - shift): unemployment always (§5.4), the two spreads once the floor binds
-EXP_SHIFT = {"lu": cq.FACTOR_U_SHIFT, **({"sp": cq.SPREAD_SHIFT, "gz": cq.SPREAD_SHIFT} if cq.FACTOR_SPREAD_LOG
-                                         else {})}
-# observables on a transformed variable: (core variable, "change" or "level")
-EXP_OBS = {"d_unrate": ("lu", "change"), "unrate": ("lu", "level")}
-if "sp" in EXP_SHIFT:
-    EXP_OBS.update({"d_spread": ("sp", "change"), "spread": ("sp", "level"), "d_gz": ("gz", "change"),
-                    "gz": ("gz", "level")})
 ALPHA = 1.0 - 0.5 ** (3.0 / cq.EWMA_HALF_LIFE_MONTHS)
+_LEVEL_EPS = 1e-4                            # a level target is kept this far inside its bounds
+X_NEWTON_MAX = 40.0                          # Newton iterates on bounded scales stay within |x| <= this (logistic flat)
+
+
+@dataclass(frozen=True)
+class Bounded:
+    """A core variable modelled on a bounded scale (§5.4, §15 Q5). kind 'logit' (the default since P4b): x = log((y -
+    lo) / (hi - y)), y = lo + (hi - lo) / (1 + e^-x), so lo < y < hi; kind 'log' (P3's form, hi = inf): x = log(y - lo),
+    y = lo + e^x. `value` maps a level to x (data outside (lo, hi): NaN; clip=True keeps a target _LEVEL_EPS inside)."""
+    lo: float
+    hi: float = math.inf
+    kind: str = "logit"
+
+    def level(self, x):
+        x = np.asarray(x, float)
+        if self.kind == "log":
+            return self.lo + np.exp(x)
+        return self.lo + (self.hi - self.lo) * expit(x)
+
+    def dlevel(self, x):
+        """dy / dx at x."""
+        x = np.asarray(x, float)
+        if self.kind == "log":
+            return np.exp(x)
+        s = expit(x)
+        return (self.hi - self.lo) * s * (1.0 - s)
+
+    def value(self, y, clip: bool = False):
+        y = np.asarray(y, float)
+        top = self.hi if self.kind == "logit" else math.inf
+        if clip:
+            y = np.clip(y, self.lo + _LEVEL_EPS, top - _LEVEL_EPS)
+        ok = (y > self.lo) & (y < top)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            x = np.log(y - self.lo) if self.kind == "log" else np.log(y - self.lo) - np.log(top - y)
+        return np.where(ok, x, np.nan)
+
+    def moments(self, m, s):
+        """Mean and sd of level(X), X ~ N(m, s^2): closed form for 'log', Gauss-Hermite quadrature for 'logit'."""
+        m = np.asarray(m, float)
+        s = float(max(s, 0.0))
+        if self.kind == "log":
+            e = np.exp(m + 0.5 * s * s)
+            return self.lo + e, e * math.sqrt(math.expm1(s * s))
+        z, w = _GH
+        lv = self.level(m[..., None] + s * z)
+        mu = lv @ w
+        return mu, np.sqrt(np.maximum((lv - mu[..., None]) ** 2 @ w, 0.0))
+
+
+_z, _w = np.polynomial.hermite_e.hermegauss(40)
+_GH = (_z, _w / _w.sum())
+
+
+@dataclass(frozen=True)
+class Transforms:
+    """The core variables on a bounded scale and the observables measured on them."""
+    vars: dict                              # core variable -> Bounded
+
+    @property
+    def obs(self) -> dict:
+        """{observable: (core variable, "change" or "level")} for the transformed variables."""
+        out = {}
+        for v, (chg, lev) in (("lu", ("d_unrate", "unrate")), ("sp", ("d_spread", "spread")), ("gz", ("d_gz", "gz"))):
+            if v in self.vars:
+                out.update({chg: (v, "change"), lev: (v, "level")})
+        return out
+
+    def level(self, v: str, x):
+        b = self.vars.get(v)
+        return np.asarray(x, float) if b is None else b.level(x)
+
+    def value(self, v: str, y, clip: bool = False):
+        b = self.vars.get(v)
+        return np.asarray(y, float) if b is None else b.value(y, clip=clip)
+
+    def dlevel(self, v: str, x):
+        b = self.vars.get(v)
+        return np.ones_like(np.asarray(x, float)) if b is None else b.dlevel(x)
+
+    def summary(self) -> dict:
+        return {v: {"kind": b.kind, "lo": b.lo, "hi": None if not math.isfinite(b.hi) else b.hi}
+                for v, b in self.vars.items()}
+
+
+def transforms(kind: str | None = None, ceilings: dict | None = None) -> Transforms:
+    """The core's bounded variables (config_q.FACTOR_BOUNDS): unemployment always (§5.4), the two spreads with
+    FACTOR_SPREAD_LOG; kind 'logit' (config_q.FACTOR_TRANSFORM, the default) or 'log' (P3's log(level - lo));
+    ceilings overrides the upper bounds (bound_ceilings)."""
+    kind = cq.FACTOR_TRANSFORM if kind is None else kind
+    if kind not in ("logit", "log"):
+        raise ValueError(f"transform={kind!r}: 'logit' (default) or 'log'")
+    use = ["lu"] + (["sp", "gz"] if cq.FACTOR_SPREAD_LOG else [])
+    hi = {v: (ceilings or {}).get(v, cq.FACTOR_BOUNDS[v][1]) for v in use}
+    return Transforms({v: Bounded(cq.FACTOR_BOUNDS[v][0], hi[v] if kind == "logit" else math.inf, kind) for v in use})
+
+
+BOUND_LEVELS = {"lu": "lvl_unrate", "sp": "lvl_spread", "gz": "lvl_gz"}
+
+
+def bound_ceilings(Q: pd.DataFrame, train_end, rule: str | None = None) -> dict | None:
+    """The bounded scales' ceilings at a train end. rule 'fixed' (config_q.FACTOR_BOUNDS, the default: judgment values,
+    see config_q) -> None; 'train_end' (the option the statistics review asked for): FACTOR_BOUND_MULT x each level's
+    maximum over the quarters up to the train end, so a backtest's ceilings use no later data."""
+    rule = cq.FACTOR_BOUNDS_RULE if rule is None else rule
+    if rule == "fixed":
+        return None
+    if rule != "train_end":
+        raise ValueError(f"bounds={rule!r}: 'fixed' (default) or 'train_end'")
+    te = pd.Period(train_end, "Q")
+    return {v: float(cq.FACTOR_BOUND_MULT * Q[col].loc[:te].max()) for v, col in BOUND_LEVELS.items()}
+
+
+TRANSFORMS = transforms()                    # the default (config_q); a fitted model carries its own (FactorModel.tf)
 # the x fields the core carries (the rest are satellites)
 CORE_FIELDS = ("d_cpi_goods", "d_cpi_serv", "d_ip", "d_unrate", "d_ff", "d_oil", "d_y10", "d_spread", "d_gz", "d_usd")
-LEVEL_OBS = ("ff", "ff_shadow", "y10", "unrate", "spread", "gz", "usd", "real_oil", "rff", "ry10", "pc", "cpi_yoy",
-             "core_yoy")
+LEVEL_OBS = ("ff", "ff_shadow", "y10", "y10_shadow", "unrate", "spread", "gz", "usd", "real_oil", "rff", "ry10", "pc",
+             "cpi_yoy", "core_yoy")
 SHOCKS = list(cq.POLICY_DO)
 E1_CLASSES = ("E1c", "E1", "E2")
 MACRO_CLASSES = ("E0", "E0p", "last")            # "last": d_bs, an E0p field ordered after everything
 RANK = {"E0": 0, "E0p": 1, "E1c": 2, "E1": 2, "E2": 2, "last": 3}
 CLIP_TEXT = "超出历史范围，按 ±4 个标准差截断"
+# the panel columns the core variables and the start levels are built from (core_frame, initial_state) and the raw
+# inputs that set their release lags (config_q.SERIES_LAG): a quarter-end value of quarter q - k is published by the
+# start of q when its lag is at most 3 (k - 1) months, the rule of the panel's <x>_l<k>__known columns (§3.2)
+CORE_COLUMN_SOURCES = {"d_cpi": ("panel:f_cpi",), "d_cpi_serv": ("panel:f_cpi_services",), "d_ip": ("panel:f_ip",),
+                       "d_oil": ("panel:f_oil",), "d_core": ("panel:lvl_core",), "lvl_unrate": ("panel:lvl_unrate",),
+                       "lvl_ff": ("panel:lvl_ff",), "lvl_infl_trend": ("panel:s_infl_expect",),
+                       "lvl_oil_real": ("panel:lvl_oil", "panel:lvl_cpi"), "lvl_y10": ("panel:lvl_y10",),
+                       "lvl_spread": ("panel:s_spread",), "lvl_gz": ("panel:s_gz",), "lvl_usd": ("panel:lvl_usd",),
+                       "lvl_cpi": ("panel:lvl_cpi",)}
+INFORMATION = ("auto", "published", "available")
+# saturation (§3.5): the panel series of each level observable; a stated level h quarters ahead is measured against
+# the training sd of the level's h-quarter change
+LEVEL_SERIES = {"ff": "lvl_ff", "ff_shadow": "lvl_ff", "y10": "lvl_y10", "y10_shadow": "lvl_y10",
+                "unrate": "lvl_unrate", "spread": "lvl_spread", "gz": "lvl_gz", "usd": "lvl_usd",
+                "real_oil": "lvl_oil_real"}
+RARITY_DRAWS = 2000                          # path-mode rarity: the reference distribution's draws (fixed seed)
+RARITY_SEED = 31
 
 
 class FactorError(ValueError):
@@ -144,23 +277,21 @@ def zlb_mask(Q: pd.DataFrame) -> pd.Series:
     return Q["lvl_ff"] < cq.ZLB_FF
 
 
-def core_frame(Q: pd.DataFrame) -> pd.DataFrame:
+def core_frame(Q: pd.DataFrame, tf: Transforms | None = None) -> pd.DataFrame:
     """The core variables per quarter from the quarterly panel (levels at quarter ends, flows over the quarter);
-    rff is NaN in zero-bound quarters (the shadow rate is imputed by the EM)."""
+    unemployment and the spreads on their bounded scale (tf, default TRANSFORMS); rff is NaN in zero-bound quarters
+    (the shadow rate is imputed by the EM)."""
+    tf = TRANSFORMS if tf is None else tf
     c = pd.DataFrame(index=Q.index)
     c["pc"] = Q["d_cpi"]
     c["ps"] = Q["d_cpi_serv"]
     c["ip"] = 4.0 * Q["d_ip"]
-    u = Q["lvl_unrate"]
-    c["lu"] = np.log((u - cq.FACTOR_U_SHIFT).where(u > cq.FACTOR_U_SHIFT))
+    c["lu"] = tf.value("lu", Q["lvl_unrate"].to_numpy(float))
     c["rff"] = (Q["lvl_ff"] - Q["lvl_infl_trend"]).where(~zlb_mask(Q))
     c["ro"] = Q["lvl_oil_real"]
     c["ry10"] = Q["lvl_y10"] - Q["lvl_infl_trend"]
-    c["sp"] = Q["lvl_spread"]
-    c["gz"] = Q["lvl_gz"]
-    for v in ("sp", "gz"):
-        if v in EXP_SHIFT:
-            c[v] = np.log((c[v] - EXP_SHIFT[v]).where(c[v] > EXP_SHIFT[v]))
+    c["sp"] = tf.value("sp", Q["lvl_spread"].to_numpy(float))
+    c["gz"] = tf.value("gz", Q["lvl_gz"].to_numpy(float))
     c["usd"] = Q["lvl_usd"]
     return c[CORE]
 
@@ -543,6 +674,74 @@ def _cond_gauss(mu: np.ndarray, S: np.ndarray, obs: np.ndarray, val: np.ndarray)
     return m, 0.5 * (C + C.T)
 
 
+def _cond_linear(mu: np.ndarray, S: np.ndarray, obs: np.ndarray, val: np.ndarray, cons=()) -> np.ndarray:
+    """The mean of x ~ N(mu, S) given x[obs] = val[obs] and the linear constraints c . x = h (all exact); the
+    observed entries are kept as given."""
+    n = len(mu)
+    rows = [np.eye(n)[i] for i in np.flatnonzero(obs)] + [np.asarray(c, float) for c, _ in cons]
+    if not rows:
+        return mu.copy()
+    Hm = np.vstack(rows)
+    h = np.concatenate([np.asarray(val, float)[obs], np.array([float(b) for _, b in cons])])
+    HS = Hm @ S
+    A = HS @ Hm.T
+    try:
+        sol = np.linalg.solve(A + 1e-12 * np.eye(len(A)), h - Hm @ mu)
+    except np.linalg.LinAlgError:
+        sol = np.linalg.lstsq(A, h - Hm @ mu, rcond=None)[0]
+    out = mu + HS.T @ sol
+    out[obs] = np.asarray(val, float)[obs]
+    return out
+
+
+_COL_LAGS: dict | None = None
+
+
+def _lag_of(col: str) -> int | None:
+    """Release lag (months after the quarter's end) of a panel column: the core's inputs from config_q.SERIES_LAG,
+    every other column from the panel meta's lag_months (None if unknown)."""
+    global _COL_LAGS
+    src = CORE_COLUMN_SOURCES.get(col)
+    if src is not None:
+        return max(int(cq.SERIES_LAG[s]) for s in src)
+    if _COL_LAGS is None:
+        try:
+            from . import panel as qpanel
+            _COL_LAGS = {c: int(m["lag_months"]) for c, m in qpanel.load_meta()["columns"].items()}
+        except (OSError, KeyError, ValueError):
+            _COL_LAGS = {}
+    return _COL_LAGS.get(col)
+
+
+def _information(Q: pd.DataFrame, q0, information: str) -> str:
+    """'auto' -> 'available' at the panel's today row (start-of-quarter states only), else 'published'."""
+    if information not in INFORMATION:
+        raise ValueError(f"information={information!r}: one of {INFORMATION}")
+    if information != "auto":
+        return information
+    today = q0 == Q.index[-1] and all(pd.isna(Q.at[q0, c]) for c in ("d_oil", "d_gz", "d_cpi") if c in Q.columns)
+    return "available" if today else "published"
+
+
+def _pub(Q: pd.DataFrame, col: str, q0, k: int, info: str) -> float:
+    """The value of `col` in quarter q0 - k as known at the start of quarter q0 (NaN if not published then, or
+    missing). 'published': the panel's <col>_l<k>__known column where it exists, else the column's release lag
+    (published iff lag <= 3 (k - 1) months); 'available': the panel's value."""
+    q = q0 - k
+    if col not in Q.columns or q not in Q.index:
+        return float("nan")
+    if info == "published":
+        kc = f"{col}_l{k}__known"
+        if kc in Q.columns and q0 in Q.index:
+            x = Q.at[q0, kc]
+            return float(x) if pd.notna(x) else float("nan")
+        lag = _lag_of(col)
+        if lag is None or lag > 3 * (k - 1):
+            return float("nan")
+    x = Q.at[q, col]
+    return float(x) if pd.notna(x) else float("nan")
+
+
 def em_cov(E: np.ndarray, w: np.ndarray, kind: str = "fa", k: int = 5, alpha: float = 0.3,
            iters: int = cq.SAT_COV_ITERS, seed: int = 0) -> np.ndarray:
     """Covariance of zero-mean rows E (n, p), NaN = missing, rows weighted by w. kind 'fa': Lambda Lambda' + Psi
@@ -793,6 +992,7 @@ class InitState:
     pc_hist: np.ndarray                   # headline CPI rates of the last 3 quarters (oldest first)
     core_hist: np.ndarray                 # core CPI rates (d_core) of the last 3 quarters
     imputed: list = field(default_factory=list)
+    information: str = "available"        # "published" (release lags at the origin's start) or "available"
 
 
 # ================================================================ the model
@@ -821,6 +1021,32 @@ class FactorModel:
     regime_sigma: dict = field(default_factory=dict)
     info: dict = field(default_factory=dict)
     seed: int = 0
+    tf: Transforms = field(default_factory=lambda: TRANSFORMS)   # the bounded scales of lu, sp, gz
+    draw_mu_ip: np.ndarray = field(default_factory=lambda: np.zeros(0))   # steady-state IP growth of each draw
+    pool_C: np.ndarray = field(default_factory=lambda: np.zeros((0, 0)))  # covariance of the (centred) pool rows
+    train_frame: pd.DataFrame | None = None   # training-quarter series of every statement observable (saturation)
+    shock_sd: dict = field(default_factory=dict)  # training sd of each policy shock (policy.shock_sd)
+    _sd_cache: dict = field(default_factory=dict, repr=False)
+
+    # ---------------------------------------------------------------- the simulator's own innovation covariance
+    def pool_sigma(self, draw: int | None = None) -> np.ndarray:
+        """Covariance of the reduced-form innovations the bootstrap draws: L C_pool L' (L the draw's Cholesky factor
+        of its t-weighted Sigma, C_pool the covariance of the whitened pool rows, about 1.2-3.9 on the core
+        diagonal: the pool is the equal-weight residuals, Sigma the t-weighted fit)."""
+        L = self.system(draw)["L"]
+        C = self.pool_C if self.pool_C.size else np.eye(self.n)
+        S = L @ C @ L.T
+        return 0.5 * (S + S.T)
+
+    # ---------------------------------------------------------------- the cycle module's level (P4b)
+    def cycle_shift(self, draw: int | None = None) -> float:
+        """What the cycle module adds to the training IP blocks: 0 for config_q.CYCLE_CENTER 'training_mean' (P3's
+        form, the default); for the option 'steady_state' the posterior draw's (or the posterior mean's) steady-state
+        IP growth minus the training mean, so the blocks supply the cycle's shape and the anchors its level."""
+        if cq.CYCLE_CENTER != "steady_state" or not len(self.ip_hist):
+            return 0.0
+        mu = self.mu[IDX["ip"]] if (draw is None or draw < 0 or not len(self.draw_mu_ip)) else self.draw_mu_ip[draw]
+        return float(mu - np.mean(self.ip_hist))
 
     # ---------------------------------------------------------------- dimensions and names
     @property
@@ -884,59 +1110,145 @@ class FactorModel:
         return {"C": C, "Phi": [P1, P2], "Sigma": Su, "L": Lu, "P": P, "order": order}
 
     # ---------------------------------------------------------------- initial state at an origin
-    def initial_state(self, Q: pd.DataFrame, origin) -> InitState:
-        """The state at the start of quarter `origin` (the first simulated quarter) from the panel's realized values of
-        the two quarters before it. A zero-bound quarter's shadow rate comes from the EM (in the training sample) or
-        is filtered with the fitted parameters from the data up to the origin; a satellite value not published yet
-        (NaN) is imputed from the joint distribution given the published ones (the "impute" capability)."""
+    def initial_state(self, Q: pd.DataFrame, origin, information: str = "auto") -> InitState:
+        """The state at the start of quarter `origin` (the first simulated quarter): the stacked core + satellites of
+        the two quarters before it and the levels the observables are measured from.
+
+        information (§3.2: every value is known at that time, after publication lags):
+          'published'  only what was published by the start of the origin quarter: the satellites' <x>_l1__known /
+                       _l2__known columns, the core's inputs by their own release lags (CORE_COLUMN_SOURCES). At a
+                       backtest origin the previous quarter's CPI, IP and unemployment (and with them pi_trend, the
+                       real rates and real oil) and the NIPA / Z.1 / profit satellites are not published yet;
+          'available'  every value the panel holds (the forward root: the last data quarter is today's vintage);
+          'auto'       'available' when the origin is the panel's "today" row (start-of-quarter states only, the
+                       realized fields NaN), else 'published'.
+        An unpublished entry is imputed from the joint distribution given everything published (the "impute"
+        capability): the conditional mean of the quarter's innovation given the published entries and the identities
+        that tie a known nominal value to the unknown inflation (ff = rff + pi_trend, y10 = ry10 + pi_trend, the
+        nominal oil change = Δro + pc / 4, pi_trend's EWMA). A zero-bound quarter's shadow rate comes from the EM in
+        the training sample, else from the filter on published core data, else it is imputed."""
         q0 = pd.Period(origin, "Q")
-        prev = [q0 - 2, q0 - 1]
-        K = core_frame(Q)
-        imputed = []
-        shadow = pd.Series(self.core.Y[:, IDX["rff"]], index=self.core.dates)
-        rows = []
-        for q in prev:
-            v = K.loc[q].to_numpy(float).copy() if q in K.index else np.full(NC, np.nan)
-            if not np.isfinite(v[IDX["rff"]]):
-                if q in shadow.index:
-                    v[IDX["rff"]] = shadow.loc[q]
+        info = _information(Q, q0, information)
+        sysm = self.system()
+        n = self.n
+        base = np.concatenate([self.mu, self.sats.mean])
+        if q0 - 3 in Q.index:
+            zm3 = self._row_at(Q, q0 - 3)
+            zm4 = self._row_at(Q, q0 - 4) if q0 - 4 in Q.index else zm3
+        else:
+            zm3 = zm4 = None
+        imputed: list = []
+        z = np.empty((2, n))
+        pis: dict = {}
+        for k, (r, q) in ((2, (0, q0 - 2)), (1, (1, q0 - 1))):
+            v, cons, pi_q, shadow_from = self._published_row(Q, q0, k, info, pis.get(k + 1), z, r)
+            if shadow_from:
+                imputed.append(f"rff@{q}")                # the shadow rate (EM / filter): never observed
+            obs = np.isfinite(v)
+            if obs.all() and not cons:
+                z[r] = v
+            else:
+                if r == 0:
+                    lag1, lag2 = (zm3, zm4) if zm3 is not None else (None, None)
                 else:
-                    v[IDX["rff"]] = self._filter_shadow(Q, q)
-                imputed.append(f"rff@{q}")
-            rows.append(v)
-        Kc = np.vstack(rows)
-        Wq = []
-        for q in prev:
-            Wq.append(np.array([Q[f].get(q, np.nan) if q in Q.index else np.nan for f in self.sats.fields], float))
-        Wq = np.vstack(Wq)
-        z = np.hstack([Kc, Wq])
-        # imputation of missing entries: the older row from training means, the newer by conditioning
-        if not np.isfinite(z[0]).all():
-            bad = ~np.isfinite(z[0])
-            base = np.concatenate([self.mu, self.sats.mean])
-            z[0, bad] = base[bad]
-            imputed += [f"{self.names[i]}@{prev[0]}" for i in np.flatnonzero(bad)]
-        if not np.isfinite(z[1]).all():
-            zz = np.vstack([z[0], z[0]]) if q0 - 3 not in K.index else None
-            if zz is None:
-                z2 = self._row_at(Q, q0 - 3)
-                zz = np.vstack([z2, z[0]])
-            sysm = self.system()
-            m = sysm["C"] + sysm["Phi"][0] @ zz[1] + sysm["Phi"][1] @ zz[0]
-            obs = np.isfinite(z[1])
-            mm, _ = _cond_gauss(m, sysm["Sigma"], obs, np.where(obs, z[1], 0.0))
-            imputed += [f"{self.names[i]}@{prev[1]}" for i in np.flatnonzero(~obs)]
-            z[1] = mm
-        last = q0 - 1
-        pc_hist = Q["d_cpi"].reindex(pd.period_range(q0 - 3, q0 - 1, freq="Q")).to_numpy(float)
-        core_hist = Q["d_core"].reindex(pd.period_range(q0 - 3, q0 - 1, freq="Q")).to_numpy(float)
-        return InitState(origin=str(q0), z=z, pi0=float(Q.loc[last, "lvl_infl_trend"]),
-                         ff0=float(Q.loc[last, "lvl_ff"]), u0=float(Q.loc[last, "lvl_unrate"]),
-                         lvl_cpi0=float(Q.loc[last, "lvl_cpi"]), pc_hist=pc_hist, core_hist=core_hist,
-                         imputed=imputed)
+                    lag1, lag2 = z[0], (zm3 if zm3 is not None else z[0])
+                if lag1 is None:
+                    m = base.copy()
+                else:
+                    m = sysm["C"] + sysm["Phi"][0] @ lag1 + sysm["Phi"][1] @ lag2
+                z[r] = _cond_linear(m, sysm["Sigma"], obs, np.where(obs, v, 0.0), cons)
+                imputed += [f"{self.names[i]}@{q}" for i in np.flatnonzero(~obs)]
+            if not np.isfinite(pi_q):                     # pi_trend from its EWMA on the (imputed) headline rate
+                prev = pis.get(k + 1, _pub(Q, "lvl_infl_trend", q0, k + 1, info))
+                pi_q = prev + ALPHA * (z[r, IDX["pc"]] - prev)
+            pis[k] = pi_q
+        last_ff = _pub(Q, "lvl_ff", q0, 1, info)
+        if not np.isfinite(last_ff):
+            last_ff = max(float(z[1, IDX["rff"]] + pis[1]), cq.FF_FLOOR)
+        u0 = _pub(Q, "lvl_unrate", q0, 1, info)
+        if not np.isfinite(u0):
+            u0 = float(self.tf.level("lu", z[1, IDX["lu"]]))
+        lc = _pub(Q, "lvl_cpi", q0, 1, info)
+        if not np.isfinite(lc):
+            lc2 = _pub(Q, "lvl_cpi", q0, 2, info)
+            lc = lc2 + z[1, IDX["pc"]] / 4.0
+        pc_hist = np.array([_pub(Q, "d_cpi", q0, 3, info), _pub(Q, "d_cpi", q0, 2, info),
+                            _pub(Q, "d_cpi", q0, 1, info)])
+        pc_hist = np.where(np.isfinite(pc_hist), pc_hist, [np.nan, z[0, IDX["pc"]], z[1, IDX["pc"]]])
+        core_hist = np.array([_pub(Q, "d_core", q0, 3, info), _pub(Q, "d_core", q0, 2, info),
+                              _pub(Q, "d_core", q0, 1, info)])
+        if "d_core" in self.sats.fields:
+            j = NC + self.sats.fields.index("d_core")
+            core_hist = np.where(np.isfinite(core_hist), core_hist, [np.nan, z[0, j], z[1, j]])
+        return InitState(origin=str(q0), z=z, pi0=float(pis[1]), ff0=float(last_ff), u0=float(u0),
+                         lvl_cpi0=float(lc), pc_hist=pc_hist, core_hist=core_hist, imputed=imputed,
+                         information=info)
+
+    def _published_row(self, Q: pd.DataFrame, q0, k: int, info: str, pi_prev, z: np.ndarray, r: int):
+        """(values (n,) with NaN where not published, linear constraints, pi_trend if published, whether the shadow
+        rate came from the EM or the filter) of quarter q0 - k as known at the start of q0; constraints:
+        [(coef (n,), rhs)] from a known nominal value whose real counterpart needs the unknown inflation (the EWMA
+        pi = pi_prev + ALPHA (pc - pi_prev))."""
+        q = q0 - k
+        shadow_from = False
+        tf = self.tf
+        g = lambda c: _pub(Q, c, q0, k, info)                                   # noqa: E731
+        v = np.full(self.n, np.nan)
+        cons: list = []
+        pc, ps, ip = g("d_cpi"), g("d_cpi_serv"), g("d_ip")
+        v[IDX["pc"]], v[IDX["ps"]], v[IDX["ip"]] = pc, ps, 4.0 * ip
+        u = g("lvl_unrate")
+        v[IDX["lu"]] = float(tf.value("lu", u)) if np.isfinite(u) else np.nan
+        for name, col in (("sp", "lvl_spread"), ("gz", "lvl_gz")):
+            x = g(col)
+            v[IDX[name]] = float(tf.value(name, x)) if np.isfinite(x) else np.nan
+        v[IDX["usd"]] = g("lvl_usd")
+        pi = g("lvl_infl_trend")
+        if pi_prev is None:
+            pi_prev = _pub(Q, "lvl_infl_trend", q0, k + 1, info)
+        ff, y10 = g("lvl_ff"), g("lvl_y10")
+        e_pc = np.zeros(self.n)
+        e_pc[IDX["pc"]] = 1.0
+        zlb = np.isfinite(ff) and ff < cq.ZLB_FF
+        if zlb:                                            # the shadow rate: EM, filter on published data, or impute
+            core_known = np.isfinite(v[[IDX["pc"], IDX["ps"], IDX["ip"], IDX["lu"]]]).all() and np.isfinite(pi)
+            shadow = pd.Series(self.core.Y[:, IDX["rff"]], index=self.core.dates)
+            if q in shadow.index:
+                v[IDX["rff"]] = float(shadow.loc[q])
+                shadow_from = True
+            elif core_known:
+                v[IDX["rff"]] = self._filter_shadow(Q, q)
+                shadow_from = True
+        elif np.isfinite(ff) and np.isfinite(pi):
+            v[IDX["rff"]] = ff - pi
+        elif np.isfinite(ff) and np.isfinite(pi_prev):     # rff + ALPHA pc = ff - (1 - ALPHA) pi_prev
+            c = e_pc * ALPHA
+            c[IDX["rff"]] = 1.0
+            cons.append((c, ff - (1.0 - ALPHA) * pi_prev))
+        if np.isfinite(y10) and np.isfinite(pi):
+            v[IDX["ry10"]] = y10 - pi
+        elif np.isfinite(y10) and np.isfinite(pi_prev):
+            c = e_pc * ALPHA
+            c[IDX["ry10"]] = 1.0
+            cons.append((c, y10 - (1.0 - ALPHA) * pi_prev))
+        ro = g("lvl_oil_real")
+        if np.isfinite(ro):
+            v[IDX["ro"]] = ro
+        else:
+            doil = g("d_oil")
+            ro_prev = z[r - 1, IDX["ro"]] if r == 1 else _pub(Q, "lvl_oil_real", q0, k + 1, info)
+            if np.isfinite(doil) and np.isfinite(ro_prev):  # ro + pc / 4 = ro_prev + d_oil (nominal oil known)
+                c = e_pc * 0.25
+                c[IDX["ro"]] = 1.0
+                cons.append((c, ro_prev + doil))
+        for j, f in enumerate(self.sats.fields):
+            v[NC + j] = g(f)
+        # a constraint whose unknowns are all observed already is redundant (it holds in the data)
+        cons = [(c, h) for c, h in cons if not np.isfinite(v[np.flatnonzero(c)]).all()]
+        return v, cons, pi, shadow_from
 
     def _row_at(self, Q: pd.DataFrame, q) -> np.ndarray:
-        K = core_frame(Q)
+        K = core_frame(Q, self.tf)
         v = K.loc[q].to_numpy(float).copy() if q in K.index else np.full(NC, np.nan)
         if not np.isfinite(v[IDX["rff"]]):
             sh = pd.Series(self.core.Y[:, IDX["rff"]], index=self.core.dates)
@@ -949,7 +1261,7 @@ class FactorModel:
     def _filter_shadow(self, Q: pd.DataFrame, q) -> float:
         """The shadow rate of a zero-bound quarter after the train end, imputed at the fitted parameters from the
         core data up to quarter q only (one-sided)."""
-        D = core_frame(Q).loc[self.core.dates[0]:q]
+        D = core_frame(Q, self.tf).loc[self.core.dates[0]:q]
         Y = D.to_numpy(float)
         T = len(Y)
         wf = np.full(T - P_LAGS, np.nan)
@@ -1032,10 +1344,12 @@ def _michigan_lr():
     return _MICH[0]
 
 
-def resolve_anchors(Q: pd.DataFrame, P: pd.DataFrame | None, train_end: str, mode: str) -> tuple[dict, np.ndarray,
-                                                                                                   np.ndarray]:
+def resolve_anchors(Q: pd.DataFrame, P: pd.DataFrame | None, train_end: str, mode: str,
+                    tf: Transforms | None = None) -> tuple[dict, np.ndarray, np.ndarray]:
     """(anchors, mu_star, mu_sd) for the steady-state prior. mode 'forward': the §3.8 defaults (判断值); 'train_end':
-    the §5.5 rule from data up to the train end (engine/anchors.py; the Michigan 5-10-year median from 1990Q2)."""
+    the §5.5 rule from data up to the train end (engine/anchors.py; the Michigan 5-10-year median from 1990Q2). The
+    unemployment and spread anchors are set on their bounded scale (tf), the sd by the delta method."""
+    tf = TRANSFORMS if tf is None else tf
     te = pd.Period(train_end, "Q")
     sd = cq.STEADY_STATE_SD["forward" if mode == "forward" else "train_end"]
     H = Q.loc[:te]
@@ -1062,27 +1376,53 @@ def resolve_anchors(Q: pd.DataFrame, P: pd.DataFrame | None, train_end: str, mod
     u_star = out["unrate"]
     mu_star[IDX["pc"]], mu_sd[IDX["pc"]] = out["pc"], sd
     mu_star[IDX["ps"]], mu_sd[IDX["ps"]] = out["ps"], sd
-    mu_star[IDX["lu"]], mu_sd[IDX["lu"]] = math.log(u_star - cq.FACTOR_U_SHIFT), sd / (u_star - cq.FACTOR_U_SHIFT)
+    for v, level in (("lu", u_star), ("sp", out["spread"])):
+        x = float(tf.value(v, level))
+        mu_star[IDX[v]], mu_sd[IDX[v]] = x, sd / float(tf.dlevel(v, x))
     mu_star[IDX["rff"]], mu_sd[IDX["rff"]] = out["r_star"], sd
     mu_star[IDX["ro"]], mu_sd[IDX["ro"]] = ro_med, sd
     mu_star[IDX["ry10"]], mu_sd[IDX["ry10"]] = out["r_star"] + out["term"], sd
-    if "sp" in EXP_SHIFT:
-        gap = out["spread"] - EXP_SHIFT["sp"]
-        mu_star[IDX["sp"]], mu_sd[IDX["sp"]] = math.log(gap), sd / gap
-    else:
-        mu_star[IDX["sp"]], mu_sd[IDX["sp"]] = out["spread"], sd
     mu_star[IDX["usd"]], mu_sd[IDX["usd"]] = usd_med, sd
     return out, mu_star, mu_sd
 
 
+def cycle_A(A: list[np.ndarray], Sig: np.ndarray) -> list[np.ndarray]:
+    """The core dynamics the cycle module simulates: IP growth set to its target each quarter and the other variables
+    moved along their innovation regression on IP (kgain), i.e. y_t = M (C + A1 y_{t-1} + A2 y_{t-2} + e_t) + k target_t
+    with M = I - k e_ip' (P4b). The IP row of M A is zero: IP is exogenous, so the error correction that runs through
+    IP's own equation (higher unemployment -> an IP rebound) is gone, and the kgain move feeds it back with the
+    opposite sign."""
+    ip = IDX["ip"]
+    k = Sig[:, ip] / Sig[ip, ip]
+    M = np.eye(len(Sig)) - np.outer(k, np.eye(len(Sig))[ip])
+    return [M @ a for a in A]
+
+
+def roots(A: list[np.ndarray], Sig: np.ndarray) -> tuple[float, float]:
+    """(max companion root of the VAR, of the system the cycle module simulates)."""
+    return max_root(A), max_root(cycle_A(A, Sig))
+
+
+def stable(A: list[np.ndarray], Sig: np.ndarray, limit: float = cq.FACTOR_MAX_ROOT) -> bool:
+    """The draw rule (§5.2 'explosive draws are redrawn', P4b): both the VAR and the system the cycle module simulates
+    in statement-free quarters have every root below `limit` (config_q.FACTOR_MAX_ROOT: every mode at least halves
+    within the longest simulated horizon, FACTOR_HALF_LIFE_MAX_Q)."""
+    r_var, r_cyc = roots(A, Sig)
+    return bool(r_var < limit and r_cyc < limit)
+
+
 def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataFrame | None = None, seed: int = 0,
         n_draws: int = cq.FACTOR_DRAWS, nu_grid=cq.FACTOR_NU_GRID, lam_grid=cq.FACTOR_LAMBDA_GRID, soc: bool = True,
-        satellites: bool = True, steady: bool = True, shadow: str = cq.FACTOR_SHADOW) -> FactorModel:
+        satellites: bool = True, steady: bool = True, shadow: str = cq.FACTOR_SHADOW,
+        transform: str | None = None, bounds: str | None = None) -> FactorModel:
     """Fit the factor layer on quarters FIRST_QUARTER .. train_end only. anchors 'train_end' (backtests, §5.5) or
     'forward' (scenarios, §3.8). shadow 'missing' (§5.4 default: zero-bound quarters' shadow rate is missing data in
-    the EM) or 'censored' (the pre-registered alternative: imputed at or below the bound)."""
+    the EM) or 'censored' (the pre-registered alternative: imputed at or below the bound). transform 'logit' (default,
+    config_q.FACTOR_TRANSFORM: unemployment and the spreads on bounded scales) or 'log' (P3's log(level - lo), the
+    pre-registered alternative of §15 Q5)."""
     te = pd.Period(train_end, "Q")
-    D = core_frame(Q).loc[:te]
+    tf = transforms(transform, bound_ceilings(Q, te, bounds))
+    D = core_frame(Q, tf).loc[:te]
     D = D.loc[D.drop(columns="rff").notna().all(axis=1).idxmax():]          # first complete quarter
     upper = None
     if shadow == "censored":                     # the pre-registered alternative: shadow ff <= ZLB_FF at the bound
@@ -1091,7 +1431,7 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
     elif shadow != "missing":
         raise ValueError(f"shadow={shadow!r}: 'missing' (default) or 'censored'")
     core = fit_core(D, nu_grid=nu_grid, lam_grid=lam_grid, soc=soc, upper=upper)
-    anc, mu_star, mu_sd = resolve_anchors(Q, P, str(te), anchors)
+    anc, mu_star, mu_sd = resolve_anchors(Q, P, str(te), anchors, tf)
     if not steady:
         mu_sd = np.full(NC, 1e12)
     A, _ = split_B(core.B, NC, P_LAGS)
@@ -1100,21 +1440,23 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
     rng = np.random.default_rng(np.random.SeedSequence([seed, 7]))
     k = NC * P_LAGS + 1
     Lx = np.linalg.cholesky(np.linalg.inv(core.X1X1))
-    draws, rej = [], 0
+    draws, rej, fallback, mu_ip = [], 0, 0, []
     while len(draws) < n_draws:
         ok = False
-        for _ in range(50):
+        for _ in range(cq.FACTOR_DRAW_TRIES):
             Sd = invwishart.rvs(df=core.T1 - k, scale=core.S1, random_state=rng)
             Bd = core.B + Lx @ rng.standard_normal((k, NC)) @ np.linalg.cholesky(Sd).T
             Ad, _ = split_B(Bd, NC, P_LAGS)
-            if max_root(Ad) < cq.FACTOR_MAX_ROOT:
+            if stable(Ad, Sd):
                 ok = True
                 break
             rej += 1
         if not ok:
             Ad, Sd = A, core.Sigma
-        _, cd = steady_state(Ad, Sd, core.Y, w, mu_star, mu_sd, rng)
+            fallback += 1
+        mud, cd = steady_state(Ad, Sd, core.Y, w, mu_star, mu_sd, rng)
         draws.append((Ad, cd, Sd))
+        mu_ip.append(float(mud[IDX["ip"]]))
     sats = fit_satellites(Q, core, str(te), seed=seed) if satellites else _no_satellites()
     wg, ws = cpi_weights(Q, te)
     if P is None:
@@ -1125,18 +1467,92 @@ def fit(Q: pd.DataFrame, train_end: str, anchors: str = "train_end", P: pd.DataF
     model = FactorModel(train_end=str(te), anchors_mode=anchors, anchors=anc, core=core, sats=sats, mu=mu, c=c, A=A,
                         Sigma=core.Sigma, draws=draws, rejected=rej, wg=wg, ws=ws, mu_star=mu_star, mu_sd=mu_sd,
                         pool=np.zeros((0, 0)), pool_labels=np.array([]), ip_hist=ipq.to_numpy(float),
-                        ip_contraction=contr.reindex(ipq.index).fillna(0.0).to_numpy(float), seed=seed)
-    _build_pool(model, seed)
+                        ip_contraction=contr.reindex(ipq.index).fillna(0.0).to_numpy(float), seed=seed, tf=tf,
+                        draw_mu_ip=np.array(mu_ip))
+    pool_info = _build_pool(model, seed)
     _regime_sigmas(model, Q)
+    model.train_frame = train_frame(Q, te)
+    model.shock_sd = _shock_sd(Q, str(te))
     model.info = {"version": VERSION, "train_end": str(te), "sample": [str(D.index[0]), str(te)],
                   "T": int(len(D)), "lambda": core.lam, "nu": core.nu, "logml": core.logml,
                   "rejected_draws": rej, "rejection_rate": rej / (rej + n_draws), "n_draws": n_draws,
-                  "max_root_mean": max_root(A), "steady_state": dict(zip(CORE, np.round(mu, 4).tolist())),
+                  "draw_fallbacks": fallback, "max_root_mean": max_root(A),
+                  "cycle_root_mean": max_root(cycle_A(A, core.Sigma)), "root_limit": cq.FACTOR_MAX_ROOT,
+                  "root_rule": "VAR 与周期模块下的系统：每个根 < 上限（每个模态在最长模拟期内至少衰减一半）",
+                  "transform": tf.summary(), "cycle_center": cq.CYCLE_CENTER,
+                  "cycle_shift_mean": model.cycle_shift(None),
+                  "pool_winsor_sd": cq.FACTOR_POOL_WINSOR_SD, "pool_winsorized": pool_info,
+                  "steady_state": dict(zip(CORE, np.round(mu, 4).tolist())),
                   "zlb_quarters": [str(q) for q, m in zip(D.index, core.missing[:, IDX["rff"]]) if m],
                   "cpi_weights": {"goods": wg, "services": ws}, "satellites": len(sats.fields),
                   "satellites_excluded": sats.excluded, "sat_cov": sats.info.get("cov_choice"),
                   "smallest_weights": _smallest_weights(core), "anchors": anc, "shadow": shadow}
     return model
+
+
+def train_frame(Q: pd.DataFrame, train_end) -> pd.DataFrame:
+    """The training quarters (FIRST_QUARTER .. train end) of every statement observable: the x fields and d_cpi, the
+    level observables (LEVEL_SERIES), the real rates, CPI and core CPI y/y (the saturation's training sds, §3.5)."""
+    T = Q.loc[:pd.Period(train_end, "Q")]
+    cols = {c: T[c] for c in list(qcard.x_fields(_card())) + ["d_cpi"] if c in T.columns}
+    for obs, col in LEVEL_SERIES.items():
+        if col in T.columns:
+            cols[obs] = T[col]
+    if {"lvl_ff", "lvl_y10", "lvl_infl_trend"} <= set(T.columns):
+        cols["rff"] = T["lvl_ff"] - T["lvl_infl_trend"]
+        cols["ry10"] = T["lvl_y10"] - T["lvl_infl_trend"]
+    if "lvl_cpi" in T.columns:
+        cols["cpi_yoy"] = 100.0 * (np.exp((T["lvl_cpi"] - T["lvl_cpi"].shift(4)) / 100.0) - 1.0)
+    if "d_core" in T.columns:
+        cols["core_yoy"] = 100.0 * (np.exp(T["d_core"].rolling(4).sum() / 400.0) - 1.0)
+    return pd.DataFrame(cols).astype(float)
+
+
+def _shock_sd(Q: pd.DataFrame, train_end: str) -> dict:
+    """Training sd of each policy shock (the residual sd of its reaction function, policy.shock_sd)."""
+    try:
+        from . import policy
+        return {k: float(v) for k, v in policy.shock_sd(policy.fit(Q, train_end)).items() if np.isfinite(v)}
+    except Exception:  # noqa: BLE001 - a shock without a fitted equation falls back to its model sd
+        return {}
+
+
+def statement_sd(model: "FactorModel", st: "Statement") -> float:
+    """The training sd a stated value's gap to its conditional mean is measured in (§3.5: ±4 training sd): the field's
+    sd over the training quarters (field_stats at the train end); a sum or mean over k quarters, the sd of its k-quarter
+    sums or means; a level h quarters ahead (ff, unrate, y10, the spreads, CPI y/y, ...), the sd of the level's
+    h-quarter change; a policy shock, its reaction function's residual sd. NaN if the training data have none."""
+    var = "d_cpi" if st.var == "pc" else st.var
+    qs = sorted(int(q) for q in st.quarters)
+    key = (var, st.agg, tuple(qs))
+    hit = model._sd_cache.get(key)
+    if hit is not None:
+        return hit
+    k = len(qs)
+    if var in SHOCKS:
+        s = model.shock_sd.get(var, float("nan"))
+        if not np.isfinite(s) and cq.POLICY_DO[var] in model.names:
+            pos = model.names.index(cq.POLICY_DO[var])
+            s = float(model.system()["P"][pos, pos])
+        out = s * (math.sqrt(k) if st.agg == "sum" else 1.0 / math.sqrt(k) if st.agg == "mean" else 1.0)
+    elif model.train_frame is None or var not in model.train_frame.columns:
+        out = float("nan")
+    else:
+        x = model.train_frame[var]
+        level = var in LEVEL_SERIES or var in ("rff", "ry10", "cpi_yoy", "core_yoy")
+        if level:
+            ch = [x.shift(-h) - x for h in qs]           # the level's change h quarters after a quarter's end
+            s = sum(ch) / (k if st.agg != "sum" else 1.0) if st.agg in ("sum", "mean") else ch[-1]
+        elif st.agg == "sum":
+            s = x.rolling(k).sum()
+        elif st.agg == "mean":
+            s = x.rolling(k).mean()
+        else:
+            s = x
+        s = s.dropna()
+        out = float(s.std()) if len(s) > 2 else float("nan")
+    model._sd_cache[key] = out
+    return out
 
 
 def _no_satellites() -> Satellites:
@@ -1151,10 +1567,16 @@ def _smallest_weights(core: CoreFit, k: int = 6) -> list:
     return [[str(dates[i]), round(float(core.w[i]), 4), round(float(core.m2[i]), 1)] for i in order]
 
 
-def _build_pool(model: FactorModel, seed: int) -> None:
+def _build_pool(model: FactorModel, seed: int) -> dict:
     """Whitened joint residual vectors of the training quarters (the bootstrap pool): the core's residuals at the
     posterior-mean model whitened by its Sigma; the satellites' (missing entries drawn from their conditional
-    Gaussian once, by seed) whitened by theirs."""
+    Gaussian once, by seed) whitened by theirs. The pool is centred (each coordinate's mean removed): the residuals at
+    the posterior-mean model (the steady-state prior's intercept, shrinkage and t-weights) are not mean-zero, and
+    (I - A1 - A2)^-1 turns a small mean into a long-run drift away from the anchors (forward fit: CPI +1.0, services
+    CPI +1.2, real oil +11 log% before centring), so E[u] = 0 under every posterior draw and the bootstrap's mean path
+    is the model's. With config_q.FACTOR_POOL_WINSOR_SD (an option, off by default) each coordinate is then winsorized
+    at that multiple of its own sd in the pool: every quarter keeps its frequency (U-12) but not its size (2020Q2's
+    unemployment coordinate is 11 of its sd). Returns what was cut and the mean removed."""
     core = model.core
     Y = core.Y
     A, c = model.A, model.c
@@ -1181,8 +1603,25 @@ def _build_pool(model: FactorModel, seed: int) -> None:
         U = np.hstack([Uk, Uw])
     else:
         U = Uk
+    labels = np.array([str(q) for q in core.dates[P_LAGS:]])
+    mean = U.mean(axis=0)
+    se = U.std(axis=0, ddof=1) / math.sqrt(max(len(U), 1))
+    U = U - mean[None, :]                            # E[u] = 0: no drift from the bootstrap (centred before winsor)
+    out = {"entries": 0, "core_entries": 0, "rows": [], "centred": True,
+           "mean_removed_core": dict(zip(CORE, np.round(mean[:NC], 4).tolist())),
+           "mean_removed_max_abs_t": float(np.max(np.abs(mean / np.where(se > 0, se, 1.0)))) if len(U) else 0.0}
+    c = cq.FACTOR_POOL_WINSOR_SD
+    if c:
+        lim = c * U.std(axis=0)[None, :]
+        cut = np.abs(U) > lim
+        out.update({"entries": int(cut.sum()), "core_entries": int(cut[:, :NC].sum()),
+                    "rows": sorted({str(labels[i]) for i in np.flatnonzero(cut[:, :NC].any(axis=1))})})
+        U = np.clip(U, -lim, lim)                    # (the option clips a centred pool; a skewed tail's cut moves
+        out["mean_after_winsor_max_abs"] = float(np.max(np.abs(U.mean(axis=0))))   # its mean a little: reported)
     model.pool = U
-    model.pool_labels = np.array([str(q) for q in core.dates[P_LAGS:]])
+    model.pool_labels = labels
+    model.pool_C = (U.T @ U) / max(len(U), 1)
+    return out
 
 
 def _regime_sigmas(model: FactorModel, Q: pd.DataFrame) -> None:
@@ -1294,16 +1733,16 @@ class _Compiler:
             return self.core("ro", h).add(self.core("ro", h - 1), -1.0).add(self.core("pc", h), 0.25)
         if f == "d_y10":
             return self.y10(h).add(self.y10(h - 1), -1.0)
-        if f in ("d_spread", "d_gz", "d_usd") and f not in EXP_OBS:
+        if f in ("d_spread", "d_gz", "d_usd") and f not in self.m.tf.obs:
             v = {"d_spread": "sp", "d_gz": "gz", "d_usd": "usd"}[f]
             return self.core(v, h).add(self.core(v, h - 1), -1.0)
         if f == "d_ff":
             return self.shadow(h).add(self.shadow(h - 1), -1.0)
         if f == "ff_shadow":
             return self.shadow(h)
-        if f == "y10":
+        if f in ("y10", "y10_shadow"):           # statements on the 10-year are imposed on its shadow (P4b floor)
             return self.y10(h)
-        if f in ("spread", "gz", "usd", "real_oil", "rff", "ry10") and f not in EXP_OBS:
+        if f in ("spread", "gz", "usd", "real_oil", "rff", "ry10") and f not in self.m.tf.obs:
             return self.core({"spread": "sp", "real_oil": "ro"}.get(f, f), h)
         if f == "cpi_yoy":
             e = _Expr(self.H, self.n)
@@ -1348,9 +1787,10 @@ def compile_statements(model: FactorModel, init: InitState, H: int, stmts: list[
     statement, already saturated and noise-drawn; None for ranges)."""
     cmp_ = _Compiler(model, init, H)
     classes = field_classes()
+    tobs = model.tf.obs
     rows: list[_Row] = []
     order = sorted(range(len(stmts)), key=lambda i: (min(stmts[i].quarters), i))
-    pinned: dict[str, dict] = {}                  # per log-shifted variable: {quarter: level known on every path}
+    pinned: dict[str, dict] = {}                  # per bounded variable: {quarter: level known on every path}
     pinned_ff: dict[int, np.ndarray | float] = {-1: init.ff0}
     for i in order:
         st = stmts[i]
@@ -1360,7 +1800,8 @@ def compile_statements(model: FactorModel, init: InitState, H: int, stmts: list[
         if not _known(model, st.var):
             raise FactorError(f"字段不存在或这个训练期没有估计：{st.var}")
         t = targets[i]
-        e1 = classes.get(st.var, "E0") in E1_CLASSES or st.var in ("y10", "spread", "gz", "usd", "real_oil", "ry10")
+        e1 = classes.get(st.var, "E0") in E1_CLASSES or st.var in ("y10", "y10_shadow", "spread", "gz", "usd",
+                                                                   "real_oil", "ry10")
         # ---------------------------------------------------------- interventions: structural shocks
         if st.var in SHOCKS:
             pos = model.names.index(cq.POLICY_DO[st.var]) if cq.POLICY_DO[st.var] in model.names else None
@@ -1378,31 +1819,29 @@ def compile_statements(model: FactorModel, init: InitState, H: int, stmts: list[
                         coef[hh] = s / (len(qs) if st.agg == "mean" else 1.0)
                 rows.append(_Row(kind="e", stmt=i, coef=coef, target=t, lo=st.lo, hi=st.hi, shock=True, quarter=h))
             continue
-        # ---------------------------------------------------------- log-shifted variables (unemployment, spreads)
-        if st.var in EXP_OBS:
-            v, kind = EXP_OBS[st.var]
-            pin = pinned.setdefault(v, {-1: _level0(init, v)})
-            sh = EXP_SHIFT[v]
+        # ---------------------------------------------------------- bounded variables (unemployment, spreads)
+        if st.var in tobs:
+            v, kind = tobs[st.var]
+            pin = pinned.setdefault(v, {-1: _level0(model, init, v)})
             if st.agg == "each":
                 for h in qs:
                     if kind == "level":
                         rows.append(_exp_level_row(cmp_, v, i, h, t, st, e1=e1))
                         if t is not None:
-                            pin[h] = t
+                            pin[h] = _clip_level(model, v, t)
                         continue
                     prev = pin.get(h - 1)
                     if prev is not None and (t is not None or np.ndim(prev) == 0):
                         tt = None if t is None else prev + t
                         rows.append(_exp_level_row(cmp_, v, i, h, tt, st, base=prev, e1=e1))
                         if tt is not None:
-                            pin[h] = tt
+                            pin[h] = _clip_level(model, v, tt)
                     else:
-                        rows.append(_urow(init, i, ((h, v, 1.0), (h - 1, v, -1.0)), 0.0, t, st, h, e1=e1))
+                        rows.append(_urow(model, init, i, ((h, v, 1.0), (h - 1, v, -1.0)), 0.0, t, st, h, e1=e1))
                 continue
             if kind == "level":                          # mean / sum of levels
                 m_ = len(qs) if st.agg == "mean" else 1.0
-                rows.append(_urow(init, i, tuple((h, v, 1.0 / m_) for h in qs), sh * len(qs) / m_, t, st, qs[-1],
-                                  e1=e1))
+                rows.append(_urow(model, init, i, tuple((h, v, 1.0 / m_) for h in qs), 0.0, t, st, qs[-1], e1=e1))
                 continue
             a, b = min(qs), max(qs)                      # sum (or mean) of changes over a..b = (x_b - x_{a-1}) [/m]
             m_ = (b - a + 1) if st.agg == "mean" else 1.0
@@ -1411,7 +1850,8 @@ def compile_statements(model: FactorModel, init: InitState, H: int, stmts: list[
                 tt = None if t is None else prev + t
                 rows.append(_exp_level_row(cmp_, v, i, b, tt, st, base=prev, e1=e1))
             else:
-                rows.append(_urow(init, i, ((b, v, 1.0 / m_), (a - 1, v, -1.0 / m_)), 0.0, t, st, b, e1=e1))
+                rows.append(_urow(model, init, i, ((b, v, 1.0 / m_), (a - 1, v, -1.0 / m_)), 0.0, t, st, b,
+                                  e1=e1))
             continue
         # ---------------------------------------------------------- the observed policy rate (floor at FF_FLOOR)
         if st.var in ("d_ff", "ff") and st.agg == "each":
@@ -1455,21 +1895,28 @@ def compile_statements(model: FactorModel, init: InitState, H: int, stmts: list[
     return rows
 
 
-def _level0(init: InitState, v: str) -> float:
-    """The level of a log-shifted core variable at the end of the quarter before the path."""
-    return EXP_SHIFT[v] + float(np.exp(init.z[1][IDX[v]]))
+def _clip_level(model: FactorModel, v: str, x):
+    """A stated level kept _LEVEL_EPS inside the variable's bounds (the level its row delivers)."""
+    b = model.tf.vars[v]
+    top = b.hi if b.kind == "logit" else math.inf
+    return np.clip(np.asarray(x, float), b.lo + _LEVEL_EPS, top - _LEVEL_EPS)
+
+
+def _level0(model: FactorModel, init: InitState, v: str) -> float:
+    """The level of a bounded core variable at the end of the quarter before the path."""
+    return float(model.tf.level(v, init.z[1][IDX[v]]))
 
 
 def _exp_level_row(cmp_: _Compiler, v: str, i: int, h: int, level, st: Statement, base=None, e1: bool = False) -> _Row:
-    """A row on the transformed core variable v at quarter h for a stated level (target log(level - shift)); ranges
-    transform the same way (relative to `base` for a stated change)."""
+    """A row on the bounded core variable v at quarter h for a stated level (target: the level on v's scale, kept just
+    inside the bounds); ranges transform the same way (relative to `base` for a stated change)."""
     ex = cmp_.core(v, h)
-    sh = EXP_SHIFT[v]
+    tf = cmp_.m.tf
 
     def tr(x):
         if x is None:
             return None
-        return np.log(np.maximum(np.asarray(x, float) - sh, 1e-4))
+        return tf.value(v, x, clip=True)
 
     lo = None if st.lo is None else (st.lo if base is None else base + st.lo)
     hi = None if st.hi is None else (st.hi if base is None else base + st.hi)
@@ -1477,16 +1924,16 @@ def _exp_level_row(cmp_: _Compiler, v: str, i: int, h: int, level, st: Statement
                 e1=e1)
 
 
-def _urow(init: InitState, i: int, terms: tuple, const: float, target, st: Statement, quarter: int,
-          e1: bool = False) -> _Row:
-    """A row sum_j c_j exp(x_{h_j}) + const on log-shifted core variables (terms (h, variable, c)); terms before the
-    path (h < 0) are known and folded into the constant."""
+def _urow(model: FactorModel, init: InitState, i: int, terms: tuple, const: float, target, st: Statement,
+          quarter: int, e1: bool = False) -> _Row:
+    """A row sum_j c_j level_v(x_{h_j}) + const on bounded core variables (terms (h, variable, c); level_v the
+    variable's level, model.tf); terms before the path (h < 0) are known and folded into the constant."""
     keep = []
     for h, v, c in terms:
         if h >= 0:
             keep.append((h, IDX[v], c))
         else:
-            const += c * float(np.exp(init.z[h + 2][IDX[v]]))
+            const += c * float(model.tf.level(v, init.z[h + 2][IDX[v]]))
     return _Row(kind="u", stmt=i, exp_terms=tuple(keep), const=const, target=target, lo=st.lo, hi=st.hi,
                 quarter=quarter, e1=e1)
 
@@ -1540,8 +1987,8 @@ def _quarter_flags(stmts: list[Statement], H: int) -> dict:
                 growth[h] = True
             if st.var in SHOCKS:
                 shock[h] = True
-            elif classes.get(st.var, "E0") in E1_CLASSES or st.var in ("y10", "spread", "gz", "usd", "real_oil",
-                                                                          "ry10"):
+            elif classes.get(st.var, "E0") in E1_CLASSES or st.var in ("y10", "y10_shadow", "spread", "gz", "usd",
+                                                                          "real_oil", "ry10"):
                 e1[h] = True
         if st.var in ("d_usd", "usd"):
             usd = True
@@ -1606,7 +2053,8 @@ def _tilt(share: np.ndarray, target: float) -> np.ndarray:
 
 def cycle_targets(model: FactorModel, rng_blocks: np.random.Generator, rng_noise: np.random.Generator, m: int,
                   H: int, odds: dict | None = None) -> np.ndarray:
-    """(m, H) IP growth targets of the cycle module C' (§5.6): 2-quarter blocks of the training quarters' IP growth
+    """(m, H) IP growth targets of the cycle module C' (§5.6) before its level shift (FactorModel.cycle_shift, added
+    per posterior draw by the caller): 2-quarter blocks of the training quarters' IP growth
     (equal weights, or exponentially tilted to stated contraction odds in the stated quarters) plus N(0, sd^2) with
     sd = CYCLE_SD_FACTOR x the training quarterly IP sd (the soft statement's sd)."""
     ip = model.ip_hist
@@ -1653,7 +2101,8 @@ def _run_paths(model: FactorModel, init: InitState, sysm: dict, U: np.ndarray, H
     return Y, E
 
 
-def _row_values(rows: list[_Row], Y: np.ndarray, E: np.ndarray) -> np.ndarray:
+def _row_values(rows: list[_Row], Y: np.ndarray, E: np.ndarray, tf: Transforms | None = None) -> np.ndarray:
+    tf = TRANSFORMS if tf is None else tf
     out = np.empty((Y.shape[0], len(rows)))
     for j, r in enumerate(rows):
         if r.kind == "y":
@@ -1663,7 +2112,7 @@ def _row_values(rows: list[_Row], Y: np.ndarray, E: np.ndarray) -> np.ndarray:
         else:
             v = np.full(Y.shape[0], r.const)
             for h, k, c in r.exp_terms:
-                v = v + c * np.exp(Y[:, h, k])
+                v = v + c * tf.level(CORE[k], Y[:, h, k])
             out[:, j] = v
     return out
 
@@ -1704,7 +2153,7 @@ def project(model: FactorModel, sysm: dict, V: np.ndarray, H: int, eq: list[_Row
         S = np.einsum("qhn,hnp->qp", G, VG)
         S = 0.5 * (S + S.T)
         Wl = FactorModel.responses(sysm, VG)
-        d = T_eq[:, lin] - _row_values(rl, Y, E)
+        d = T_eq[:, lin] - _row_values(rl, Y, E, model.tf)
         alpha, sing = _solve_psd(S, d.T)
         info["singular"] = sing
         Y1 = Y + np.einsum("hnq,qm->mhn", Wl, alpha)
@@ -1736,23 +2185,46 @@ def project(model: FactorModel, sysm: dict, V: np.ndarray, H: int, eq: list[_Row
             for h, kk, c in r.exp_terms:
                 Cm[k, pos[(h, kk)]] += c
         tgt = T_eq[:, non]
+        bnd = [model.tf.vars[CORE[k]] for _, k in ents]
+
+        def lev(x):                                                    # entries' levels and dlevel / dx
+            Lx, Dx = np.empty_like(x), np.empty_like(x)
+            for e, b in enumerate(bnd):
+                Lx[:, e], Dx[:, e] = b.level(x[:, e]), b.dlevel(x[:, e])
+            return Lx, Dx
         ell = ell1.copy()
         coefE = np.zeros_like(ell1)                                    # ell - ell1 = ECE coefE
-        err = np.inf
-        it = 0
+        Lv, Dv = lev(ell)
+        res = tgt - (Lv @ Cm.T + const)
+        e_path = np.max(np.abs(res), axis=1)
+        err, it, damped = float(e_path.max()), 0, 0
         for it in range(300):
-            ex = np.exp(ell)
-            g = ex @ Cm.T + const
-            err = float(np.max(np.abs(g - tgt)))
+            err = float(e_path.max())
             if err < 1e-12:
                 break
-            A = Cm[None, :, :] * ex[:, None, :]                        # (m, nN, nE) Jacobian at the iterate
-            rhs = tgt - g + np.einsum("mke,me->mk", A, ell - ell1)
+            A = Cm[None, :, :] * Dv[:, None, :]                        # (m, nN, nE) Jacobian at the iterate
+            rhs = res + np.einsum("mke,me->mk", A, ell - ell1)
             M = np.einsum("mke,ef,mlf->mkl", A, ECE, A)
             beta = np.linalg.solve(M + 1e-14 * np.eye(len(ru))[None], rhs[..., None])[..., 0]
-            coefE = np.einsum("mke,mk->me", A, beta)
-            ell = ell1 + coefE @ ECE
-        info.update(newton_iters=it + 1, newton_err=err)
+            c_new = np.einsum("mke,mk->me", A, beta)
+            # P3's undamped iteration (it converges, linearly where the adjustment is large); a step is halved only
+            # where it would leave the region in which a logistic level still moves (|x| > X_NEWTON_MAX) or turn
+            # non-finite, so the 'log' arm is P3's iteration exactly
+            t = np.ones(len(ell))
+            for _ in range(60):
+                c_try = coefE + t[:, None] * (c_new - coefE)
+                x_try = ell1 + c_try @ ECE
+                L_try, D_try = lev(x_try)
+                r_try = tgt - (L_try @ Cm.T + const)
+                e_try = np.max(np.abs(r_try), axis=1)
+                wild = (~np.isfinite(e_try) | (np.max(np.abs(x_try), axis=1) > X_NEWTON_MAX)) & (t > 1e-12)
+                if not wild.any():
+                    break
+                damped += int(wild.sum())
+                t = np.where(wild, 0.5 * t, t)
+            coefE, ell, Lv, Dv, res, e_path = c_try, x_try, L_try, D_try, r_try, e_try
+        err = float(e_path.max())
+        info.update(newton_iters=it + 1, newton_err=err, newton_damped=damped)
         Y1 = Y1 + np.einsum("hne,me->mhn", W1, coefE)
         E1 = E1 + np.einsum("hne,me->mhn", VG1, coefE)
     return Y1, E1, info
@@ -1786,7 +2258,8 @@ def _gibbs_tmvn(mean: np.ndarray, cov: np.ndarray, lo: np.ndarray, hi: np.ndarra
 def outputs(model: FactorModel, init: InitState, Y: np.ndarray, E: np.ndarray, draw_index: np.ndarray, H: int,
             usd_hold: bool) -> tuple[dict, dict, dict]:
     """x fields (card units), levels and structural policy shocks of simulated core + satellite paths (the exact
-    mapping of §5.1: d_ff = Δ observed ff, d_y10 = Δ(ry10 + pi_trend), d_ip = ip / 4, d_oil = Δro + pc / 4, ...)."""
+    mapping of §5.1: d_ff = Δ observed ff, d_y10 = Δ observed y10 (= Δ(ry10 + pi_trend) above Y10_FLOOR), d_ip = ip / 4,
+    d_oil = Δro + pc / 4, ...)."""
     m = Y.shape[0]
     g = {v: Y[:, :, IDX[v]] for v in CORE}
     pi = np.empty((m, H))
@@ -1796,11 +2269,13 @@ def outputs(model: FactorModel, init: InitState, Y: np.ndarray, E: np.ndarray, d
         pi[:, h] = prev
     shadow = g["rff"] + pi
     ff = np.maximum(shadow, cq.FF_FLOOR)
-    y10 = g["ry10"] + pi
-    u = cq.FACTOR_U_SHIFT + np.exp(g["lu"])
+    y10_sh = g["ry10"] + pi                          # the shadow 10-year; observed y10 = max(shadow, Y10_FLOOR) (P4b)
+    y10 = np.maximum(y10_sh, cq.Y10_FLOOR)
+    tf = model.tf
+    u = tf.level("lu", g["lu"])
     z1 = init.z[1]
-    lvl = {v: (EXP_SHIFT[v] + np.exp(g[v]) if v in EXP_SHIFT else g[v]) for v in ("sp", "gz")}
-    lvl0 = {v: (_level0(init, v) if v in EXP_SHIFT else float(z1[IDX[v]])) for v in ("sp", "gz")}
+    lvl = {v: tf.level(v, g[v]) for v in ("sp", "gz")}
+    lvl0 = {v: float(tf.level(v, z1[IDX[v]])) for v in ("sp", "gz")}
     usd = g["usd"] - (g["usd"].mean(axis=0, keepdims=True) - z1[IDX["usd"]]) if usd_hold else g["usd"]
 
     def lagged(a, first):
@@ -1808,7 +2283,7 @@ def outputs(model: FactorModel, init: InitState, Y: np.ndarray, E: np.ndarray, d
 
     x = {"d_cpi": g["pc"], "d_cpi_serv": g["ps"], "d_cpi_goods": (g["pc"] - model.ws * g["ps"]) / model.wg,
          "d_ip": g["ip"] / 4.0, "d_unrate": u - lagged(u, init.u0), "d_ff": ff - lagged(ff, init.ff0),
-         "d_y10": y10 - lagged(y10, z1[IDX["ry10"]] + init.pi0),
+         "d_y10": y10 - lagged(y10, max(float(z1[IDX["ry10"]] + init.pi0), cq.Y10_FLOOR)),
          "d_spread": lvl["sp"] - lagged(lvl["sp"], lvl0["sp"]), "d_gz": lvl["gz"] - lagged(lvl["gz"], lvl0["gz"]),
          "d_usd": usd - lagged(usd, z1[IDX["usd"]]),
          "d_oil": g["ro"] - lagged(g["ro"], z1[IDX["ro"]]) + g["pc"] / 4.0}
@@ -1818,7 +2293,8 @@ def outputs(model: FactorModel, init: InitState, Y: np.ndarray, E: np.ndarray, d
         x["x_oil_cause"] = np.clip(x["x_oil_cause"], 0.0, 1.0)
     pch = np.concatenate([np.broadcast_to(init.pc_hist, (m, 3)), g["pc"]], axis=1) / 400.0
     cs = np.concatenate([np.zeros((m, 1)), np.cumsum(pch, axis=1)], axis=1)
-    lv = {"ff": ff, "ff_shadow": shadow, "y10": y10, "unrate": u, "spread": lvl["sp"], "gz": lvl["gz"], "usd": usd,
+    lv = {"ff": ff, "ff_shadow": shadow, "y10": y10, "y10_shadow": y10_sh, "unrate": u, "spread": lvl["sp"],
+          "gz": lvl["gz"], "usd": usd,
           "real_oil": g["ro"], "rff": g["rff"], "ry10": g["ry10"], "pi_trend": pi,
           "cpi": init.lvl_cpi0 + np.cumsum(g["pc"] / 4.0, axis=1), "cpi_yoy": 100.0 * (np.exp(cs[:, 4:] - cs[:, :-4]) - 1),
           "zlb": ff < cq.ZLB_FF}
@@ -1858,25 +2334,33 @@ def evaluate(st: Statement, x: dict, levels: dict, shocks: dict) -> np.ndarray:
 
 def saturation(model: FactorModel, init: InitState, H: int, stmts: list[Statement], seed: int = 0) -> tuple[list,
                                                                                                           list]:
-    """Each stated value clipped to its prior predictive mean +- SATURATION_SD sd (the model given the state alone,
-    posterior mean, Gaussian, 400 paths); d_oil and d_y10 pass through. Returns (values used, notes)."""
+    """§3.5 as written: the gap between each stated value and its conditional mean saturates at +- SATURATION_SD
+    training sd (fixed a priori). The conditional mean is the statement's observable on the model's zero-innovation
+    path from the state (posterior mean, no cycle module: analytic and deterministic, the same in step mode); the
+    training sd is statement_sd (the field's sd over the training quarters, field_stats at the train end; sums, means
+    and levels h quarters ahead by their own). d_oil and d_y10 (the mechanical own-price inputs) pass through.
+    Returns (values used, notes). `seed` is not used (the rule has no Monte Carlo)."""
+    del seed
     vals = [st.value for st in stmts]
     todo = [i for i, st in enumerate(stmts) if st.value is not None and st.var not in cq.MECHANICAL_FIELDS]
     if not todo:
         return vals, []
     Hp = max(max(int(q) for q in stmts[i].quarters) for i in todo)
-    prior = simulate(model, init, Hp, n_paths=400, seed=seed, cycle=False, gaussian=True, param_uncertainty=False,
-                     saturate=False, _internal=True)
+    mp = model.mean_path(init, Hp, model.system())[None]
+    x, lv, sh = outputs(model, init, mp, np.zeros_like(mp), np.full(1, -1), Hp, usd_hold=False)
     notes = []
     for i in todo:
         st = stmts[i]
-        v = evaluate(st, prior.x, prior.levels, prior.shocks)
-        mu, sd = float(np.mean(v)), float(np.std(v))
+        mu = float(evaluate(st, x, lv, sh)[0])
+        sd = statement_sd(model, st)
+        if not (np.isfinite(mu) and np.isfinite(sd) and sd > 0):
+            continue
         lo, hi = mu - cq.SATURATION_SD * sd, mu + cq.SATURATION_SD * sd
-        if sd > 0 and not lo <= st.value <= hi:
+        if not lo <= st.value <= hi:
             vals[i] = float(np.clip(st.value, lo, hi))
             notes.append({"statement": i, "var": st.var, "quarters": list(st.quarters), "stated": st.value,
-                          "used": vals[i], "prior_mean": mu, "prior_sd": sd, "text": f"{st.var}：{CLIP_TEXT}"})
+                          "used": vals[i], "cond_mean": mu, "train_sd": sd, "rule": "±4 training sd (§3.5)",
+                          "text": f"{st.var}：{CLIP_TEXT}"})
     return vals, notes
 
 
@@ -1936,7 +2420,8 @@ def _batch(model: FactorModel, init: InitState, H: int, n: int, ss: np.random.Se
                                                        for k, v in flags.items()}, w)[0]
         rows = compile_statements(model, init, H, stmts, _targets(stmts, vals, soft_all, path_ids[idx]), sysm) \
             if stmts else []
-        Yg, Eg = _run_paths(model, init, sysm, U[idx], H, None if cyc is None else cyc[idx], active, Lq)
+        cyc_g = None if cyc is None else cyc[idx] + model.cycle_shift(d)     # the draw's long-run IP growth (P4b)
+        Yg, Eg = _run_paths(model, init, sysm, U[idx], H, cyc_g, active, Lq)
         eq = [r for r in rows if r.target is not None]
         T_eq = np.column_stack([np.broadcast_to(np.asarray(r.target, float), (len(idx),)) for r in eq]) if eq else \
             np.zeros((len(idx), 0))
@@ -1945,9 +2430,14 @@ def _batch(model: FactorModel, init: InitState, H: int, n: int, ss: np.random.Se
             T_eq = np.hstack([T_eq, extra_T[idx]])
         if eq:
             Y0, E0 = Yg, Eg
-            Yg, Eg, pinfo = project(model, sysm, V, H, eq, T_eq, Y0, E0)
+            Yg, Eg, gi = project(model, sysm, V, H, eq, T_eq, Y0, E0)
             if any(r.ffchange for r in eq):
-                Yg, Eg, pinfo["ff_floor_repair"] = _ff_repair(model, init, sysm, V, H, eq, T_eq, Y0, E0, Yg, Eg)
+                Yg, Eg, gi["ff_floor_repair"] = _ff_repair(model, init, sysm, V, H, eq, T_eq, Y0, E0, Yg, Eg)
+            # over the posterior draws' groups: the worst Newton error and iterations, the damped steps (P4b)
+            for k_, f_ in (("newton_err", max), ("newton_iters", max), ("newton_damped", lambda a, b: a + b)):
+                if k_ in gi and k_ in pinfo:
+                    gi[k_] = f_(pinfo[k_], gi[k_])
+            pinfo = gi
         Y[idx], E[idx], dix[idx] = Yg, Eg, -1 if d is None else d
         if ranges is None:
             ranges = [r for r in rows if r.target is None]
@@ -2075,7 +2565,7 @@ def _ranges(model, init, H, n_paths, stmts, vals, soft, ranges, Y, E, lab, dix, 
     hi = np.array([np.inf if r.hi is None else float(np.min(r.hi)) for r in ranges])
 
     def ok(Yb, Eb):
-        v = _row_values(ranges, Yb, Eb)
+        v = _row_values(ranges, Yb, Eb, model.tf)
         return np.all((v >= lo - 1e-12) & (v <= hi + 1e-12), axis=1)
 
     keep = ok(Y, E)
@@ -2122,7 +2612,7 @@ def _ranges(model, init, H, n_paths, stmts, vals, soft, ranges, Y, E, lab, dix, 
             See = np.einsum("qhn,hnp->qp", Ge, VGe)
             Sre = np.einsum("qhn,hnp->qp", Gr, VGe)
             Srr = Srr - Sre @ np.linalg.lstsq(See, Sre.T, rcond=None)[0]
-    mean_r = _row_values(ranges, mu_c, np.zeros_like(mu_c))[0]
+    mean_r = _row_values(ranges, mu_c, np.zeros_like(mu_c), model.tf)[0]
     Tg = _gibbs_tmvn(mean_r, 0.5 * (Srr + Srr.T), lo, hi, n_paths, np.random.default_rng(ss_gibbs))
     eq_r = [_Row(kind=r.kind, stmt=r.stmt, coef=r.coef, const=r.const, exp_terms=r.exp_terms, target=0.0,
                  quarter=r.quarter) for r in ranges]
@@ -2153,10 +2643,35 @@ def delivery(stmts: list[Statement], vals: list, res: SimResult) -> list:
     return out
 
 
+def empirical_percentile(ref: np.ndarray, x) -> np.ndarray:
+    """Mid-rank percentile of x among the reference values (ties count half)."""
+    r = np.sort(np.asarray(ref, float))
+    x = np.asarray(x, float)
+    if not len(r):
+        return np.full(x.shape, np.nan)
+    return (np.searchsorted(r, x, "left") + np.searchsorted(r, x, "right")) / (2.0 * len(r))
+
+
+def pool_innovations(model: FactorModel, H: int, sysm: dict | None = None, draws: int = RARITY_DRAWS,
+                     seed: int = RARITY_SEED) -> np.ndarray:
+    """(K, H, n) reduced-form innovations of the simulator's own bootstrap at the posterior mean: every pool row for
+    H = 1, else `draws` stacked draws (independent rows per quarter, fixed seed): the rarity statistic's reference."""
+    L = (sysm or model.system())["L"]
+    if H == 1:
+        return (model.pool @ L.T)[:, None, :]
+    rng = np.random.default_rng([seed, H])
+    idx = rng.integers(0, len(model.pool), size=(draws, H))
+    return model.pool[idx] @ L.T
+
+
 def rarity(model: FactorModel, init: InitState, H: int, stmts: list[Statement], vals: list | None = None) -> dict:
-    """How unusual a statement set is (§3.5): d' S^-1 d for the stated means against the model's prior (S = G V G' +
-    the soft variances, linear rows), a chi-square percentile with df = the number of restrictions; per quarter the
-    mean innovation adjustment's Mahalanobis norm; sd_per_constraint = sqrt(d' S^-1 d / q) (the joint study's
+    """How unusual a statement set is (§3.5): m2 = d' S^-1 d for the stated values' gaps d to the model's mean path
+    (S = G V G' + the soft variances, V the posterior-mean Sigma, linear rows) and, per quarter, the Mahalanobis norm
+    of the mean innovation adjustment. The percentiles are those of the same statistics under the simulator's own
+    innovations (pool_innovations: each bootstrap draw read as if its own values had been stated), not a chi-square:
+    the chi-square assumes Gaussian innovations with covariance Sigma, while the pool's covariance is 1.2-3.9 times
+    Sigma on the core diagonal and heavy-tailed, so it read 13% of the model's own draws as rarer than its 99th
+    percentile. Above RARITY_WARN_PCT: "这个组合在历史上极少见". sd_per_constraint = sqrt(m2 / q) (the joint study's
     stagflation set needed 0.81)."""
     vals = [st.value for st in stmts] if vals is None else vals
     keep = [i for i, st in enumerate(stmts) if vals[i] is not None]
@@ -2172,36 +2687,47 @@ def rarity(model: FactorModel, init: InitState, H: int, stmts: list[Statement], 
     VG = np.einsum("ab,qhb->haq", sysm["Sigma"], G)
     S = np.einsum("qhn,hnp->qp", G, VG)
     mu = model.mean_path(init, H, sysm)[None]
-    d = np.array([float(np.ravel(r.target)[0]) for r in rows]) - _row_values(rows, mu, np.zeros_like(mu))[0]
+    d = np.array([float(np.ravel(r.target)[0]) for r in rows]) - _row_values(rows, mu, np.zeros_like(mu), model.tf)[0]
     sd2 = np.zeros(len(rows))
     for k, r in enumerate(rows):
         st = sub[r.stmt]
         if st.sd:
             scale = 1.0
-            if st.var in EXP_OBS and r.kind == "y":
-                v = EXP_OBS[st.var][0]
-                scale = 1.0 / max(float(np.exp(mu[0, r.quarter, IDX[v]])), 1e-3)
+            if st.var in model.tf.obs and r.kind == "y":
+                v = model.tf.obs[st.var][0]
+                scale = 1.0 / max(float(model.tf.dlevel(v, mu[0, r.quarter, IDX[v]])), 1e-3)
             sd2[k] = (st.sd * scale) ** 2
     q = len(rows)
-    m2 = float(d @ np.linalg.lstsq(S + np.diag(sd2), d, rcond=None)[0])
-    dE = np.einsum("haq,q->ha", VG, np.linalg.lstsq(S + 1e-12 * np.eye(q), d, rcond=None)[0])
+    Ssoft = S + np.diag(sd2)
+    m2 = float(d @ np.linalg.lstsq(Ssoft, d, rcond=None)[0])
+    S_reg = S + 1e-12 * np.eye(q)
+    dE = np.einsum("haq,q->ha", VG, np.linalg.lstsq(S_reg, d, rcond=None)[0])
     Si = np.linalg.inv(sysm["Sigma"])
     nq = np.zeros(H, int)
     for r in rows:
         nq[r.quarter] += 1
+    # the reference: the same statistics for the simulator's own innovations
+    Eu = pool_innovations(model, H, sysm)
+    du = np.einsum("qhn,khn->kq", G, Eu)
+    ref_m2 = np.einsum("kq,kq->k", du, np.linalg.lstsq(Ssoft, du.T, rcond=None)[0].T)
+    au = np.linalg.lstsq(S_reg, du.T, rcond=None)[0]                     # (q, K)
     per_q, warnings = [], []
     for h in range(H):
         mh = float(dE[h] @ Si @ dE[h])
         if nq[h] or mh > 1e-9:
-            pct = float(chi2.cdf(mh, max(int(nq[h]), 1)))
-            per_q.append({"q": h + 1, "m2": mh, "df": int(nq[h]), "percentile": pct, "sd": math.sqrt(mh)})
+            dEu = VG[h] @ au                                              # (n, K)
+            ref_h = np.einsum("nk,nk->k", dEu, Si @ dEu)
+            pct = float(empirical_percentile(ref_h, mh))
+            per_q.append({"q": h + 1, "m2": mh, "df": int(nq[h]), "percentile": pct, "sd": math.sqrt(mh),
+                          "chi2_percentile": float(chi2.cdf(mh, max(int(nq[h]), 1)))})
             if pct > cq.RARITY_WARN_PCT and nq[h]:
                 warnings.append(f"第 {h + 1} 季：这个组合在历史上极少见（需要约 {math.sqrt(mh):.1f} 个标准差的冲击）")
-    pct = float(chi2.cdf(m2, q))
+    pct = float(empirical_percentile(ref_m2, m2))
     if pct > cq.RARITY_WARN_PCT and not warnings:
         warnings.append(f"这个组合在历史上极少见（需要约 {math.sqrt(m2):.1f} 个标准差的冲击）")
-    return {"m2": m2, "df": q, "percentile": pct, "sd_per_constraint": math.sqrt(m2 / q), "per_quarter": per_q,
-            "warnings": warnings}
+    return {"m2": m2, "df": q, "percentile": pct, "chi2_percentile": float(chi2.cdf(m2, q)),
+            "reference": {"kind": "pool_rows" if H == 1 else "pool_draws", "n": int(len(ref_m2))},
+            "sd_per_constraint": math.sqrt(m2 / q), "per_quarter": per_q, "warnings": warnings}
 
 
 def step(model: FactorModel, init: InitState, n_paths: int = 500, seed: int = 0, statements=(), **kw) -> SimResult:
