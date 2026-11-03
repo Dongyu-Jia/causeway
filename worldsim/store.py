@@ -5,8 +5,12 @@
     worlds/<id>/iterations/000001.json  the iteration that produced step n: actors' outputs, the synthesizer's
                                         answer, flags, changes, every LLM call (prompt, raw response, usage, cost)
     worlds/<id>/pending.json            a failed synthesizer attempt (actors' outputs kept for a retry)
+    worlds/<id>/pre_v2/                 world.json and steps/ as they were before a first-format world was migrated
 
 Every write is atomic (temp file + rename). World ids are checked against model.WORLD_ID_RE, so no path escapes.
+A world saved in the first format is migrated when it is first loaded (model.migrate_v1: key questions and
+attributes become predefined state questions, an action space becomes a decision question); the files as they were
+are copied to pre_v2/ first.
 """
 from __future__ import annotations
 
@@ -121,7 +125,38 @@ class Store:
         path = self.world_dir(wid) / "world.json"
         if not path.exists():
             raise NotFound(f"no world {wid!r}")
-        return read_json(path)
+        world = read_json(path)
+        if world.get("format") != M.FORMAT or M.needs_migration(world) or any(
+                M.is_legacy_actor(a) for a in world.get("actors") or []):
+            world = self._migrate(wid, world)
+        return world
+
+    def _migrate(self, wid: str, raw: dict) -> dict:
+        """Bring a world saved in an older format (and its steps) to the current one, on disk. The files as they
+        were are copied to pre_v2/ first (once)."""
+        with _LOCK:
+            d = self.world_dir(wid)
+            steps = [read_json(self._step_path(wid, n)) for n in self.step_numbers(wid)]
+            world, states = M.migrate_v1(raw, steps)
+            norm, problems = M.normalize_world(world)
+            if problems:
+                raise M.WorldError([f"world {wid} could not be migrated: {p}" for p in problems])
+            backup = d / "pre_v2"
+            if not backup.exists():
+                tmp = d / ".pre_v2.tmp"
+                shutil.rmtree(tmp, ignore_errors=True)
+                tmp.mkdir()
+                shutil.copy2(d / "world.json", tmp / "world.json")
+                if (d / "steps").exists():
+                    shutil.copytree(d / "steps", tmp / "steps")
+                os.replace(tmp, backup)
+            norm["created"] = raw.get("created") or norm.get("created") or now_iso()
+            norm["updated"] = raw.get("updated") or norm["created"]
+            for st in states:
+                state, _ = M.normalize_state(norm["schema"], st, step=int(st.get("step") or 0))
+                self.save_step(wid, state)
+            write_json(d / "world.json", norm)
+            return norm
 
     def save_world(self, world: dict) -> dict:
         """Normalize and save a world's configuration (raises model.WorldError); keeps step 0 in sync with the
@@ -142,6 +177,11 @@ class Store:
         """A new world (a fresh id when the given one is taken or missing), with optional history
         {steps: [state], iterations: [record]} (validated: step numbers 0..n, iterations 1..n)."""
         w = copy.deepcopy(world)
+        if M.needs_migration(w):
+            steps_raw = (history or {}).get("steps") if isinstance(history, dict) else None
+            w, migrated = M.migrate_v1(w, steps_raw if isinstance(steps_raw, list) else [])
+            if history and migrated:
+                history = {**history, "steps": migrated}
         with _LOCK:
             wid = w.get("id")
             if not isinstance(wid, str) or not M.WORLD_ID_RE.match(wid) or self.exists(wid):

@@ -1,9 +1,11 @@
-// Actors: the list and an editor (role, what they care about, action space, private info, visible fields, model).
-// Edits stay in a draft until "Save actors" (one PUT of the whole list, validated by the server).
+// Actors: the list and an editor (role, what they care about, decision questions, autonomous actions, private info,
+// visible fields, model). Edits stay in a draft until "Save actors" (one PUT of the whole list, validated by the server).
+const MAX_QUESTIONS = 8;
 export async function render(root, ctx) {
   const { api, ui, wid } = ctx;
   const h = ui.h;
   const world = ctx.world;
+  const zh = /中|chinese|^zh/i.test(world.language || '');
   let draft = structuredClone(world.actors);
   let current = draft.length ? 0 : -1;
   let dirty = false;
@@ -19,8 +21,9 @@ export async function render(root, ctx) {
     h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, `Actors (${draft.length})`),
       h('div', { class: 'row' },
         h('button', { class: 'btn', type: 'button', onclick: addActor }, '+ Add actor'))),
-    h('p', { class: 'small muted' }, 'Each actor is called once per iteration (in parallel) with its role, what it cares about, '
-      + 'its action space, its private information and the current state. Disabled actors sit out.')),
+    h('p', { class: 'small muted' }, 'Each actor is called once per iteration (in parallel) with the world description, its role, '
+      + 'what it cares about, its private information and the current state. It answers every decision question in text, '
+      + 'and may take autonomous actions of its own beyond them. Disabled actors sit out.')),
     errors,
     h('div', { class: 'split' }, h('div', { class: 'card' }, listBox), h('div', null, editor)),
     h('div', { class: 'savebar' }, saveBtn, revertBtn, status));
@@ -41,7 +44,8 @@ export async function render(root, ctx) {
       listBox.append(h('button', { type: 'button', class: `item${i === current ? ' active' : ''}${a.enabled ? '' : ' off'}`,
         onclick: () => { current = i; drawList(); drawEditor(); } },
       h('span', { class: 'nm' }, a.name || a.id || '(unnamed)'),
-      h('span', { class: 'row' }, h('span', { class: 'badge' }, `${a.action_space.length} actions`),
+      h('span', { class: 'row' }, h('span', { class: 'badge' }, `${a.decision_questions.length} Q`),
+        a.autonomy?.enabled ? h('span', { class: 'badge', title: 'autonomous actions per iteration' }, `≤${a.autonomy.max_actions} auto`) : null,
         a.model ? h('span', { class: 'badge accent', title: a.model }, 'model') : null)));
     });
   }
@@ -61,44 +65,71 @@ export async function render(root, ctx) {
     role.addEventListener('input', () => { a.role = role.value; touch(); });
     const priv = h('textarea', { rows: 10, class: 'mono' }); priv.value = a.private_info;
     priv.addEventListener('input', () => { a.private_info = priv.value; touch(); });
-    const free = h('input', { type: 'checkbox', checked: a.allow_free_action, onchange: (e) => { a.allow_free_action = e.target.checked; touch(); } });
     const model = ui.modelInput(a.model, { placeholder: world.model?.model || ctx.settings?.default_model || 'the default model',
       onchange: (v) => { a.model = v; touch(); } });
 
-    const actionsBox = h('div', { class: 'list-editor' });
-    const drawActions = () => {
-      ui.clear(actionsBox);
-      a.action_space.forEach((act, i) => {
-        const id = h('input', { type: 'text', value: act.id, placeholder: 'id', 'aria-label': 'Action id',
-          class: ui.ID_RE.test(act.id) && act.id !== 'free' ? '' : 'bad' });
-        id.addEventListener('input', () => { act.id = id.value.trim(); id.classList.toggle('bad', !ui.ID_RE.test(act.id) || act.id === 'free'); touch(); });
-        const label = h('input', { type: 'text', value: act.label, placeholder: 'label', 'aria-label': 'Action label' });
-        label.addEventListener('input', () => {
-          const was = ui.slugify(act.label, 'action');
-          act.label = label.value;
-          if (!act.id || act.id === was) { act.id = ui.slugify(label.value, 'action'); id.value = act.id; }
-          touch();
-        });
-        const desc = h('textarea', { rows: 2, placeholder: 'description (what it means, size, conditions)', 'aria-label': 'Action description' });
-        desc.value = act.description;
-        desc.addEventListener('input', () => { act.description = desc.value; touch(); });
-        const move = (d) => { const j = i + d; if (j < 0 || j >= a.action_space.length) return;
-          [a.action_space[i], a.action_space[j]] = [a.action_space[j], a.action_space[i]]; touch(); drawActions(); };
-        actionsBox.append(h('div', { class: 'action-row' }, id, label,
-          h('div', { class: 'row-tools' },
-            h('button', { class: 'btn tiny', type: 'button', title: 'Move up', 'aria-label': 'Move up', onclick: () => move(-1) }, '↑'),
-            h('button', { class: 'btn tiny', type: 'button', title: 'Move down', 'aria-label': 'Move down', onclick: () => move(1) }, '↓'),
-            h('button', { class: 'btn tiny danger', type: 'button', title: 'Remove', 'aria-label': 'Remove action',
-              onclick: () => { a.action_space.splice(i, 1); touch(); drawActions(); } }, '✕')),
-          desc));
+    // decision questions: answered in text every iteration
+    const qBox = h('div', { class: 'list-editor' });
+    const drawQs = () => {
+      ui.clear(qBox);
+      const qs = a.decision_questions;
+      qs.forEach((q, i) => {
+        const id = h('input', { type: 'text', value: q.id, placeholder: 'id', 'aria-label': 'Question id',
+          class: ui.ID_RE.test(q.id) ? 'qid' : 'qid bad' });
+        id.addEventListener('input', () => { q.id = id.value.trim(); id.classList.toggle('bad', !ui.ID_RE.test(q.id)); touch(); });
+        const text = h('textarea', { rows: 2, placeholder: 'the question, e.g. 本季政策利率怎么调、调多少？', 'aria-label': 'Question text',
+          class: q.text.trim() ? '' : 'bad' });
+        text.value = q.text;
+        text.addEventListener('input', () => { q.text = text.value; text.classList.toggle('bad', !q.text.trim()); touch(); });
+        const guide = h('textarea', { rows: 2, placeholder: 'guidance (optional): what a good answer covers, typical options or magnitudes, units',
+          'aria-label': 'Question guidance' });
+        guide.value = q.guidance || '';
+        guide.addEventListener('input', () => { q.guidance = guide.value; touch(); });
+        const req = h('label', { class: 'check small' }, h('input', { type: 'checkbox', checked: q.required !== false,
+          onchange: (e) => { q.required = e.target.checked; touch(); } }), 'Required');
+        const move = (d) => { const j = i + d; if (j < 0 || j >= qs.length) return;
+          [qs[i], qs[j]] = [qs[j], qs[i]]; touch(); drawQs(); };
+        qBox.append(h('div', { class: 'dq-row' },
+          h('div', { class: 'dq-head' }, h('span', { class: 'dq-n' }, `Q${i + 1}`), id, req,
+            h('div', { class: 'row-tools' },
+              h('button', { class: 'btn tiny', type: 'button', title: 'Move up', 'aria-label': 'Move up', onclick: () => move(-1) }, '↑'),
+              h('button', { class: 'btn tiny', type: 'button', title: 'Move down', 'aria-label': 'Move down', onclick: () => move(1) }, '↓'),
+              h('button', { class: 'btn tiny danger', type: 'button', title: 'Remove', 'aria-label': 'Remove question',
+                onclick: () => { qs.splice(i, 1); touch(); drawQs(); } }, '✕'))),
+          text, guide));
       });
-      actionsBox.append(h('div', null, h('button', { class: 'btn tiny', type: 'button', onclick: () => {
-        const taken = new Set(a.action_space.map((x) => x.id));
-        a.action_space.push({ id: ui.uniqueId('new_action', taken), label: 'New action', description: '' });
-        touch(); drawActions();
-      } }, '+ Add action')));
+      if (!qs.length) qBox.append(h('div', { class: 'hint small muted' }, 'No questions: the actor only takes autonomous actions.'));
+      qBox.append(h('div', null, h('button', { class: 'btn tiny', type: 'button', disabled: qs.length >= MAX_QUESTIONS, onclick: () => {
+        const taken = new Set(qs.map((x) => x.id));
+        qs.push({ id: ui.uniqueId(`q${qs.length + 1}`, taken), text: '', guidance: '', required: true });
+        touch(); drawQs();
+        qBox.querySelectorAll('textarea')[2 * (qs.length - 1)]?.focus();
+      } }, '+ Add question')));
     };
-    drawActions();
+    drawQs();
+
+    // autonomous actions: beyond the questions, up to a maximum
+    a.autonomy = a.autonomy || { enabled: true, max_actions: 3, guidance: '' };
+    const auto = a.autonomy;
+    const autoMax = h('input', { type: 'number', min: 1, max: 10, step: 1, value: auto.max_actions, disabled: !auto.enabled,
+      'aria-label': 'Maximum autonomous actions per iteration' });
+    autoMax.addEventListener('input', () => {
+      const n = Number(autoMax.value);
+      auto.max_actions = Number.isInteger(n) ? n : autoMax.value;
+      autoMax.classList.toggle('bad', !(Number.isInteger(n) && n >= 1 && n <= 10)); touch();
+    });
+    const autoGuide = h('textarea', { rows: 3, disabled: !auto.enabled, placeholder: 'what kind of actions fit this actor (optional)',
+      'aria-label': 'Autonomous action guidance' });
+    autoGuide.value = auto.guidance || '';
+    autoGuide.addEventListener('input', () => { auto.guidance = autoGuide.value; touch(); });
+    const autoOn = h('input', { type: 'checkbox', checked: auto.enabled, onchange: (e) => {
+      auto.enabled = e.target.checked; autoMax.disabled = !auto.enabled; autoGuide.disabled = !auto.enabled; touch();
+    } });
+    const autoBox = h('div', { class: 'auto-box' },
+      h('div', { class: 'row' }, h('label', { class: 'check' }, autoOn, 'Allow autonomous actions'),
+        h('label', { class: 'check small' }, 'at most', autoMax, 'per iteration')),
+      autoGuide,
+      h('span', { class: 'hint' }, 'Each action: a title, what exactly is done, its target (who or what it acts on) and the intended effect.'));
 
     // visible fields
     const visBox = h('div');
@@ -138,9 +169,10 @@ export async function render(root, ctx) {
         h('div', { class: 'field' }, h('span', null, 'Cares about (goals, interests, constraints)'),
           ui.textList(a.cares_about, { placeholder: 'something this actor cares about', addLabel: 'Add item',
             onchange: (list) => { a.cares_about = list; touch(); } })),
-        h('div', { class: 'field' }, h('span', null, `Action space (${a.action_space.length})`),
-          h('span', { class: 'hint' }, 'Put the status quo first. The actor picks one id per iteration.'), actionsBox,
-          h('label', { class: 'check' }, free, 'Allow free actions (an action of its own, described in its answer)')),
+        h('div', { class: 'field' }, h('span', null, `Decision questions (${a.decision_questions.length})`),
+          h('span', { class: 'hint' }, 'Answered in text every iteration. Use the guidance for the constraints: units, '
+            + 'typical options, magnitudes. A required question left unanswered after one repair is marked “unanswered”.'), qBox),
+        h('div', { class: 'field' }, h('span', null, 'Autonomous actions'), autoBox),
         ui.field('Private information (only this actor sees it)', priv),
         h('div', { class: 'field' }, h('span', null, 'Visible state fields'), visBox),
         h('div', { class: 'field' }, h('span', null, 'Model override'), model.el))));
@@ -149,8 +181,8 @@ export async function render(root, ctx) {
   function addActor() {
     const taken = new Set(draft.map((a) => a.id));
     draft.push({ id: ui.uniqueId('new_actor', taken), name: 'New actor', enabled: true, role: '', cares_about: [],
-      action_space: [{ id: 'status_quo', label: 'Keep the status quo', description: '' }], allow_free_action: true,
-      private_info: '', visible_fields: null, model: '' });
+      decision_questions: [{ id: 'q1', text: zh ? '本期你会怎么做？' : 'What do you do this period?', guidance: '', required: true }],
+      autonomy: { enabled: true, max_actions: 3, guidance: '' }, private_info: '', visible_fields: null, model: '' });
     current = draft.length - 1;
     touch(); drawEditor();
   }

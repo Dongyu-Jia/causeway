@@ -1,4 +1,4 @@
-// Worlds: the current world's settings (name, description, language, period step, history, model), the list of
+// Worlds: the current world's settings (name, language, period step, history, model), the list of
 // worlds (open, duplicate, export, delete) and creating one (blank, from the template, import a JSON file).
 export async function render(root, ctx) {
   const { api, ui } = ctx;
@@ -17,14 +17,12 @@ export async function render(root, ctx) {
   function drawSettings() {
     ui.clear(settingsCard);
     if (!world) { settingsCard.append(h('h2', null, 'Current world'), h('div', { class: 'empty' }, 'No world selected.')); return; }
-    const d = { name: world.name, description: world.description, language: world.language,
+    const d = { name: world.name, language: world.language,
       period_step: { ...world.period_step }, history_window: world.history_window, model: { ...world.model } };
     const status = h('span', { class: 'dirty' });
     const touch = () => { ctx.setDirty(true); status.textContent = 'Unsaved changes'; };
     const text = (key, attrs = {}) => { const el = h('input', { type: 'text', value: d[key] ?? '', ...attrs });
       el.addEventListener('input', () => { d[key] = el.value; touch(); }); return el; };
-    const desc = h('textarea', { rows: 4 }); desc.value = d.description || '';
-    desc.addEventListener('input', () => { d.description = desc.value; touch(); });
     const unit = h('select', null, ['quarter', 'month', 'year'].map((u) => h('option', { value: u, selected: d.period_step.unit === u }, u)));
     unit.addEventListener('change', () => { d.period_step.unit = unit.value; touch(); });
     const count = h('input', { type: 'number', min: 1, max: 120, value: d.period_step.count });
@@ -43,7 +41,8 @@ export async function render(root, ctx) {
       h('div', { class: 'form' },
         h('div', { class: 'inline-fields' }, ui.field('Name', text('name')),
           ui.field('Output language', text('language', { placeholder: 'e.g. 中文, English' }), 'generated text is written in it')),
-        ui.field('Description (given to every actor and the synthesizer)', desc),
+        h('div', { class: 'field' }, h('span', null, 'World description'),
+          h('span', { class: 'hint' }, 'Shown to every actor and the synthesizer; edit it on the ', h('a', { href: '#schema' }, 'Schema page'), '.')),
         h('div', { class: 'inline-fields' }, ui.field('Period step', unit), ui.field('Steps per iteration', count, 'e.g. 1 quarter'),
           ui.field('History window', win, 'recent steps shown in prompts')),
         h('div', { class: 'inline-fields' }, ui.field('Temperature (world)', temp), ui.field('Reasoning effort (world)', effort)),

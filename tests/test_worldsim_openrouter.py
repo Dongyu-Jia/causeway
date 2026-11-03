@@ -163,8 +163,13 @@ def test_an_iteration_over_openrouter_never_writes_or_logs_the_key(tmp_path, cap
                  backend_factory=lambda s: OpenRouterBackend(s["api_key"], catalog=catalog, transport=fake))
     assert eng.run(w["id"])["status"] == "done"
     it = store.load_iteration(w["id"], 1)
-    assert len(fake.chats) == 5                                                  # 3 actors, 1 retry, the synthesizer
-    assert it["cost"] == pytest.approx(0.0123 * 4) and it["usage"]["prompt_tokens"] == 4000
+    assert len(fake.chats) == 9                                    # 3 actors, 1 retry, the synthesizer's 5 steps
+    assert it["cost"] == pytest.approx(0.0123 * 8) and it["usage"]["prompt_tokens"] == 8000
+    assert [s["status"] for s in it["synthesizer"]["steps"]] == ["ok"] * 5
+    schemas = [r["body"]["response_format"]["json_schema"] for r in fake.chats]
+    assert [x["name"] for x in schemas[4:]] == ["digest", "indicator_values", "indicator_values", "question_statuses",
+                                                "narrative"]
+    assert store.load_step(w["id"], 1)["statuses"] == {"talks": "status of talks", "mood": "status of mood"}
     assert any("redacted" in (c.get("error") or "") for c in it["calls"])        # the 500 was retried, its text redacted
     assert all(r["headers"]["Authorization"] == f"Bearer {TEST_KEY}" for r in fake.chats)
     # the key appears in exactly one file, settings.json, which only the owner can read

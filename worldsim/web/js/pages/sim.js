@@ -1,5 +1,6 @@
-// Simulation: the current (or a past) state, one-click iterations with live progress, the step history with the
-// iteration that produced each step, rewind and fork.
+// Simulation: the world description, the current (or a past) state (narrative, indicator values, the predefined state
+// questions' statuses), one-click iterations with live progress per actor and per synthesizer step, the step history
+// with the iteration that produced each step (actors' answers and actions, every synthesizer call), rewind and fork.
 const POLL_MS = 600;
 
 export async function render(root, ctx) {
@@ -15,7 +16,9 @@ export async function render(root, ctx) {
   ctx.signal.addEventListener('abort', () => clearTimeout(pollTimer));
 
   const fields = () => world.schema.fields;
+  const questions = () => world.schema.questions || [];
   const fieldMap = () => new Map(fields().map((f) => [f.id, f]));
+  const questionMap = () => new Map(questions().map((q) => [q.id, q]));
   const W = `worlds/${api.enc(wid)}`;
 
   const headCard = h('div', { class: 'card' });
@@ -25,6 +28,7 @@ export async function render(root, ctx) {
 
   // ---------------------------------------------------------------- head: run button, estimate, progress, failure
   const runBtn = h('button', { class: 'btn primary big', type: 'button', onclick: () => startRun('run') }, 'Run one iteration');
+  const callsLine = h('div', { class: 'cost-line calls-line' });
   const costLine = h('div', { class: 'cost-line' }, 'Estimating cost…');
   const lastCost = h('div', { class: 'cost-line' });
   const banners = h('div');
@@ -36,16 +40,24 @@ export async function render(root, ctx) {
     const enabled = world.actors.filter((a) => a.enabled).length;
     const mock = s.effective_backend === 'mock';
     const top = steps.length ? steps[steps.length - 1] : null;
+    const c = (ctx.meta && ctx.meta.calls_per_iteration) || null;
+    callsLine.textContent = c
+      ? `${c.total} calls per iteration: ${c.actors} actors + ${c.synthesizer} synthesizer steps (1 digest, ${c.synth_values} indicator, `
+        + `${c.synth_statuses} question, 1 narrative; at most ${world.synthesizer.max_items_per_call} items each)`
+      : '';
     headCard.append(
       h('div', { class: 'sim-head' },
         h('div', { class: 'stack' },
           h('h2', { class: 'sim-title' }, world.name),
           h('div', { class: 'sim-meta' },
             h('span', { class: 'badge accent' }, `Step ${latest}`), h('span', { class: 'badge' }, top ? top.period : '—'),
-            h('span', null, `${enabled}/${world.actors.length} actors enabled · ${fields().length} fields · ${world.language}`),
+            h('span', null, `${enabled}/${world.actors.length} actors enabled · ${fields().length} indicators · `
+              + `${questions().length} state questions · ${world.language}`),
             h('span', { class: `badge ${mock ? 'warn' : 'ok'}` }, mock ? 'Mock (no key)' : 'OpenRouter')),
           top && top.summary ? h('div', { class: 'small muted' }, top.summary) : null),
-        h('div', { class: 'run-box' }, runBtn, costLine, lastCost)),
+        h('div', { class: 'run-box' }, runBtn, callsLine, costLine, lastCost)),
+      world.description ? h('details', { class: 'world-desc' }, h('summary', null, 'World description'),
+        h('p', { class: 'pre' }, world.description)) : null,
       banners, progressBox);
     runBtn.disabled = running || !enabled;
     drawBanners();
@@ -102,7 +114,7 @@ export async function render(root, ctx) {
 
   // ---------------------------------------------------------------- live progress
   const STATUS = { queued: ['queued', ''], running: ['running', 'accent'], retrying: ['retrying', 'warn'], done: ['done', 'ok'],
-    failed: ['no response', 'bad'], waiting: ['waiting', ''], repairing: ['repairing JSON', 'warn'] };
+    failed: ['no response', 'bad'], waiting: ['waiting', ''], repairing: ['repairing', 'warn'], partial: ['partial', 'warn'] };
 
   function chip(status, synth = false) {
     const [label, cls] = synth && status === 'failed' ? ['failed', 'bad'] : (STATUS[status] || [status, '']);
@@ -117,15 +129,23 @@ export async function render(root, ctx) {
     const head = isLive
       ? `${run.mode === 'retry' ? 'Retrying the synthesizer' : 'Running'}: ${run.phase === 'actors' ? 'actors deciding' : 'synthesizer writing'} ${run.period} …`
       : run.status === 'done' ? `Finished: step ${run.step} (${run.period}) saved` : `Failed: ${run.error || ''}`;
+    const syn = run.synthesizer || {};
+    const sSteps = syn.steps || [];
+    const nDone = sSteps.filter((x) => x.status === 'done' || x.status === 'failed').length;
     progressBox.append(h('div', { class: 'progress' },
       h('div', { class: 'row spread' }, h('strong', null, head),
         h('span', { class: 'small muted' }, `cost so far ${ui.money(run.cost)}`)),
+      h('h3', { class: 'small muted' }, 'Actors'),
       h('div', { class: 'progress-grid' },
-        run.actors.map((a) => h('div', { class: 'prog-item', title: a.error || a.action_label || '' },
+        run.actors.map((a) => h('div', { class: 'prog-item', title: a.error || a.summary || '' },
           h('div', { class: 'stack' }, h('span', { class: 'nm' }, a.name),
-            a.action_label ? h('span', { class: 'act' }, a.action_label) : a.error ? h('span', { class: 'act' }, a.error) : null),
-          chip(a.status))),
-        h('div', { class: 'prog-item', title: run.synthesizer.error || '' }, h('span', { class: 'nm' }, h('strong', null, 'Synthesizer')), chip(run.synthesizer.status, true)))));
+            a.summary ? h('span', { class: 'act' }, a.summary) : a.error ? h('span', { class: 'act' }, a.error) : null),
+          chip(a.status)))),
+      h('h3', { class: 'small muted' }, `Synthesizer · ${nDone}/${sSteps.length} steps`, ' ', chip(syn.status, true)),
+      h('div', { class: 'synth-steps' }, sSteps.map((x) => h('span', {
+        class: `synth-step ${x.status}`, title: x.error || `${x.items ? x.items + ' items' : ''}` },
+      x.status === 'running' || x.status === 'retrying' || x.status === 'repairing' ? h('span', { class: 'spin', 'aria-hidden': 'true' }) : null,
+      x.label, x.status === 'failed' ? ' ✕' : x.status === 'done' ? ' ✓' : '')))));
   }
 
   async function startRun(mode) {
@@ -155,7 +175,7 @@ export async function render(root, ctx) {
     world = ctx.world;
     await loadSteps();
     if (run && run.status === 'done') {
-      ui.toast(`Step ${run.step} (${run.period}) saved`, 'ok');
+      ui.toast(`Step ${run.step} (${run.period}) saved${run.partial ? ' — partial: some synthesizer steps failed' : ''}`, run.partial ? 'bad' : 'ok');
       selected = latest;
     } else if (run) {
       ui.toast('The iteration failed: the state is unchanged.', 'bad');
@@ -183,7 +203,7 @@ export async function render(root, ctx) {
       steps.map((s) => h('button', { class: `step-chip${s.step === selected ? ' active' : ''}`, type: 'button', role: 'tab',
         'aria-selected': s.step === selected ? 'true' : 'false', title: s.summary || '',
         onclick: () => { selected = s.step; drawHistory(); showStep(s.step); } },
-      h('span', { class: 'n' }, String(s.step)), s.period))));
+      h('span', { class: 'n' }, String(s.step)), s.period, s.partial ? h('span', { class: 'partial-dot', title: 'partial' }, ' ⚑') : null))));
   }
 
   // ---------------------------------------------------------------- one step
@@ -194,7 +214,7 @@ export async function render(root, ctx) {
     if (!ctx.alive() || n !== selected) return;
     ui.clear(stepBox);
     const { state, previous, iteration } = data;
-    stepBox.append(stepHeader(state), textCard(state, previous), valuesCard(state, previous));
+    stepBox.append(stepHeader(state), narrativeCard(state), valuesCard(state, previous), questionsCard(state, previous));
     if (iteration) stepBox.append(iterationCard(iteration, n));
   }
 
@@ -208,7 +228,8 @@ export async function render(root, ctx) {
     return h('div', { class: 'card' },
       h('div', { class: 'card-head' },
         h('div', { class: 'row' }, h('h2', null, `Step ${state.step} · ${state.period}`),
-          h('span', { class: `badge ${isLatest ? 'ok' : 'warn'}` }, isLatest ? 'current state' : `past step (latest is ${latest})`)),
+          h('span', { class: `badge ${isLatest ? 'ok' : 'warn'}` }, isLatest ? 'current state' : `past step (latest is ${latest})`),
+          state.partial ? h('span', { class: 'badge bad', title: 'some synthesizer steps failed: their items were carried forward' }, 'partial') : null),
         tools),
       state.summary ? h('div', { class: 'summary-line' }, state.summary) : null,
       h('div', { class: 'small muted' },
@@ -216,36 +237,56 @@ export async function render(root, ctx) {
           : `Saved ${ui.when(state.created)} · cost ${ui.money(state.cost)} · ${state.usage ? `${state.usage.calls} calls, ${ui.tokens((state.usage.prompt_tokens || 0) + (state.usage.completion_tokens || 0))} tokens` : ''}`));
   }
 
-  function textCard(state, previous) {
-    const t = state.text || {};
-    const pt = (previous && previous.text) || null;
-    const prevQ = new Map((pt?.key_questions || []).map((q) => [q.question, q]));
-    const prevA = new Map((pt?.attributes || []).map((a) => [a.name, a.value]));
-    const qs = (t.key_questions || []).map((q) => {
-      const old = prevQ.get(q.question);
-      const isNew = pt && !old;
-      const nowAnswered = pt && old && old.status !== 'answered' && q.status === 'answered';
-      return h('li', null,
-        h('div', { class: 'row' }, h('span', { class: `badge ${q.status === 'answered' ? 'ok' : 'accent'}` }, q.status),
-          isNew ? h('span', { class: 'badge warn' }, 'new') : null, nowAnswered ? h('span', { class: 'badge ok' }, 'answered this step') : null),
-        h('div', { class: 'q' }, q.question), q.answer ? h('div', { class: 'a' }, q.answer) : null);
-    });
-    const dropped = pt ? [...prevQ.keys()].filter((q) => !(t.key_questions || []).some((x) => x.question === q)) : [];
-    const attrs = (t.attributes || []).map((a) => {
-      const was = prevA.has(a.name) ? prevA.get(a.name) : undefined;
-      const changed = pt && was !== a.value;
-      return h('li', null, h('span', { class: 'an' }, a.name, changed ? h('span', { class: 'changed-dot', title: 'changed' }, '•') : null),
-        h('span', { class: 'av' }, a.value, changed && was !== undefined ? h('span', { class: 'was' }, was) : null));
-    });
-    return h('div', { class: 'card' },
-      h('h2', null, 'Narrative'), h('p', { class: 'narrative' }, t.narrative || '(none)'),
-      h('hr'),
-      h('div', { class: 'grid2' },
-        h('div', null, h('h2', null, `Key questions (${(t.key_questions || []).length})`),
-          qs.length ? h('ul', { class: 'qlist' }, qs) : h('div', { class: 'empty' }, 'No key questions.'),
-          dropped.length ? h('div', { class: 'small muted' }, 'Dropped this step: ', dropped.join(' · ')) : null),
-        h('div', null, h('h2', null, `Attributes (${(t.attributes || []).length})`),
-          attrs.length ? h('ul', { class: 'alist' }, attrs) : h('div', { class: 'empty' }, 'No attributes.'))));
+  function legacyText(state) { return state.text || null; }
+
+  function narrativeCard(state) {
+    const narrative = state.narrative ?? legacyText(state)?.narrative ?? '';
+    return h('div', { class: 'card narrative-card' },
+      h('div', { class: 'card-head' }, h('h2', null, 'Narrative'),
+        h('span', { class: 'small muted' }, `${[...narrative].length} characters · a summary of all values and statuses`)),
+      h('p', { class: 'narrative' }, narrative || '(none)'));
+  }
+
+  function questionsCard(state, previous) {
+    const card = h('div', { class: 'card' });
+    const qs = questions();
+    const sts = state.statuses || {};
+    const prev = previous ? (previous.statuses || {}) : null;
+    const reasons = state.status_reasons || {};
+    const changes = new Map((state.status_changes || []).map((c) => [c.question, c]));
+    const flagsBy = new Map();
+    for (const f of state.flags || []) {
+      if (!f.question) continue;
+      if (!flagsBy.has(f.question)) flagsBy.set(f.question, []);
+      flagsBy.get(f.question).push(f);
+    }
+    const isChanged = (q) => changes.has(q.id) || (prev && !state.status_changes && (prev[q.id] || '') !== (sts[q.id] || ''));
+    const nChanged = prev ? qs.filter(isChanged).length : 0;
+    card.append(h('div', { class: 'card-head' }, h('h2', null, `State questions (${qs.length})`),
+      h('span', { class: 'small muted' }, prev ? `${nChanged} of ${qs.length} statuses changed this step` : 'status at the start')));
+    if (!qs.length) {
+      const legacy = legacyText(state);
+      card.append(h('div', { class: 'empty' }, legacy ? 'This step was saved in the old format.' : 'No state questions: add them on the Schema page.'));
+      return card;
+    }
+    let group = null;
+    const list = h('div', { class: 'sq-list' });
+    for (const q of qs) {
+      if (q.group !== group) { group = q.group; list.append(h('h3', { class: 'small muted' }, group)); }
+      const ch = prev ? isChanged(q) : false;
+      const c = changes.get(q.id);
+      const was = c ? c.from : (prev ? prev[q.id] : null);
+      const fl = flagsBy.get(q.id) || [];
+      list.append(h('div', { class: `sq-item${ch ? ' changed' : ''}` },
+        h('div', { class: 'row' }, h('span', { class: 'q' }, q.text),
+          ch ? h('span', { class: 'badge accent' }, 'changed') : (prev ? h('span', { class: 'badge' }, 'unchanged') : null)),
+        h('div', { class: 'st' }, sts[q.id] || h('span', { class: 'muted' }, '(no status yet)')),
+        ch && reasons[q.id] ? h('div', { class: 'reason' }, `Why: ${reasons[q.id]}`) : null,
+        ch && was ? h('details', { class: 'was-box' }, h('summary', null, 'Previous status'), h('div', { class: 'was-st' }, was)) : null,
+        fl.map((x) => h('span', { class: `flag ${x.level}` }, `⚑ ${x.message}`))));
+    }
+    card.append(list);
+    return card;
   }
 
   function valuesCard(state, previous) {
@@ -308,7 +349,7 @@ export async function render(root, ctx) {
         body.append(det);
       }
       if (!body.children.length) body.append(h('div', { class: 'empty' }, 'No field changed in this step.'));
-      const general = (state.flags || []).filter((f) => !f.field);
+      const general = (state.flags || []).filter((f) => !f.field && !f.question);
       if (general.length) {
         body.append(h('div', { class: 'banner warn' }, h('strong', null, 'Validation notes'),
           h('ul', null, general.map((f) => h('li', null, `${f.level}: ${f.message}`)))));
@@ -318,37 +359,136 @@ export async function render(root, ctx) {
     return card;
   }
 
-  function iterationCard(it, n) {
-    const fmap = fieldMap();
-    const card = h('div', { class: 'card' });
-    const actorCards = (it.actors || []).map((r) => {
-      const o = r.output;
-      if (r.status !== 'ok' || !o) {
-        return h('div', { class: 'actor-out' }, h('h4', null, r.name, h('span', { class: 'badge bad' }, 'no response')),
-          h('div', { class: 'small muted' }, r.error || ''), h('div', { class: 'small muted' }, `${r.attempts} attempt(s) · ${r.model || ''}`));
-      }
+  function answerList(o) {
+    return h('div', { class: 'answers' }, (o.answers || []).map((a) => {
+      const bad = a.status === 'unanswered';
+      return h('div', { class: `answer${bad ? ' bad' : ''}` },
+        h('div', { class: 'aq' }, a.question || a.id, bad ? h('span', { class: 'badge bad' }, 'unanswered') : null,
+          a.status === 'skipped' ? h('span', { class: 'badge' }, 'optional · skipped') : null),
+        bad ? h('div', { class: 'av muted' }, 'Required, still no answer after one repair: the synthesizer was told not to invent one.')
+          : a.value ? h('div', { class: 'av' }, a.value) : null,
+        a.rationale ? h('div', { class: 'ar' }, a.rationale) : null);
+    }));
+  }
+
+  function actionCards(o) {
+    const acts = o.actions || [];
+    if (!acts.length) return h('div', { class: 'small muted' }, 'No autonomous actions.');
+    return h('div', { class: 'auto-acts' }, acts.map((x) => h('div', { class: 'auto-act' },
+      h('div', { class: 'row' }, h('strong', null, x.title), x.target ? h('span', { class: 'badge accent', title: 'target' }, `→ ${x.target}`) : null),
+      x.detail ? h('div', null, x.detail) : null,
+      x.intended_effect ? h('div', { class: 'small muted' }, `Intended effect: ${x.intended_effect}`) : null)));
+  }
+
+  function actorCard(r) {
+    const o = r.output;
+    if (r.status !== 'ok' || !o) {
+      return h('div', { class: 'actor-out' }, h('h4', null, r.name, h('span', { class: 'badge bad' }, 'no response')),
+        h('div', { class: 'small muted' }, r.error || ''), h('div', { class: 'small muted' }, `${r.attempts} attempt(s) · ${r.model || ''}`));
+    }
+    if (!o.answers && o.action_id) {                // an iteration saved before decision questions existed
       return h('div', { class: 'actor-out' },
         h('h4', null, r.name, h('span', { class: `badge ${o.action_id === 'free' ? 'warn' : 'accent'}` }, o.action_label)),
         h('dl', null,
           o.action_detail ? [h('dt', null, 'Action'), h('dd', null, o.action_detail)] : null,
           o.rationale ? [h('dt', null, 'Rationale'), h('dd', null, o.rationale)] : null,
-          o.public_statement ? [h('dt', null, 'Statement'), h('dd', null, `“${o.public_statement}”`)] : null,
-          (o.expected_consequences || []).length ? [h('dt', null, 'Expects'), h('dd', null, o.expected_consequences.join(' · '))] : null),
-        (r.notes || []).length ? h('div', { class: 'flag warn' }, r.notes.join('; ')) : null,
-        h('div', { class: 'small muted' }, `${r.attempts > 1 ? `${r.attempts} attempts · ` : ''}${r.model || ''}`));
-    });
+          o.public_statement ? [h('dt', null, 'Statement'), h('dd', null, `“${o.public_statement}”`)] : null));
+    }
+    const unanswered = (o.answers || []).filter((a) => a.status === 'unanswered').length;
+    return h('div', { class: 'actor-out' },
+      h('h4', null, r.name, h('span', { class: 'badge' }, `${(o.answers || []).length} answers`),
+        h('span', { class: 'badge' }, `${(o.actions || []).length} actions`),
+        unanswered ? h('span', { class: 'badge bad' }, `${unanswered} unanswered`) : null),
+      answerList(o),
+      h('div', { class: 'sub-h' }, 'Autonomous actions'), actionCards(o),
+      h('dl', null,
+        o.public_statement ? [h('dt', null, 'Statement'), h('dd', null, `“${o.public_statement}”`)] : null,
+        o.rationale ? [h('dt', null, 'Rationale'), h('dd', null, o.rationale)] : null,
+        (o.expected_consequences || []).length ? [h('dt', null, 'Expects'), h('dd', null, o.expected_consequences.join(' · '))] : null),
+      (r.notes || []).length ? h('div', { class: 'flag warn' }, r.notes.join('; ')) : null,
+      h('div', { class: 'small muted' }, `${r.attempts > 1 ? `${r.attempts} attempts · ` : ''}${r.model || ''}`));
+  }
+
+  function synthSteps(it, n) {
+    const syn = it.synthesizer || {};
+    const stepsList = syn.steps || [];
+    if (!stepsList.length) return null;
+    let callsCache = null;
+    const loadCalls = async () => {
+      if (!callsCache) callsCache = (await api.get(`${W}/iterations/${n}/calls`)).calls || [];
+      return callsCache;
+    };
+    const fmap = fieldMap();
+    const qmap = questionMap();
+    const box = h('div', { class: 'synth-list' });
+    for (const st of stepsList) {
+      const body = h('div', { class: 'synth-body' });
+      const out = st.output;
+      if (st.status === 'failed') body.append(h('div', { class: 'flag error' }, `Failed: ${st.error || ''} — its items were carried forward.`));
+      if (out && st.kind === 'digest') {
+        body.append(h('p', { class: 'pre' }, out.digest || ''),
+          (out.threads || []).length ? h('ul', { class: 'threads' }, out.threads.map((t) => h('li', null, t))) : null);
+      } else if (out && st.kind === 'values') {
+        body.append(h('ul', { class: 'changes' }, Object.entries(out.values || {}).map(([fid, e]) => {
+          const f = fmap.get(fid) || { label: fid, type: 'text' };
+          const v = e && typeof e === 'object' && 'value' in e ? e.value : e;
+          return h('li', null, h('strong', null, f.label), ': ', ui.valueText(f, v), ui.NUMERIC.has(f.type) ? ` ${ui.unitText(f)}` : '',
+            e && e.reason ? h('div', { class: 'reason' }, e.reason) : null);
+        })));
+      } else if (out && st.kind === 'statuses') {
+        body.append(h('ul', { class: 'changes' }, Object.entries(out.statuses || {}).map(([qid, e]) => {
+          const q = qmap.get(qid) || { text: qid };
+          const o = typeof e === 'object' && e ? e : { status: e };
+          return h('li', null, h('strong', null, q.text), o.changed ? h('span', { class: 'badge accent' }, 'changed') : h('span', { class: 'badge' }, 'unchanged'),
+            h('div', null, o.status || ''), o.reason ? h('div', { class: 'reason' }, o.reason) : null);
+        })));
+      } else if (out && st.kind === 'narrative') {
+        body.append(h('p', null, out.narrative || ''));
+      }
+      if ((st.dropped || []).length) body.append(h('div', { class: 'flag warn' }, `Dropped keys outside this step: ${st.dropped.join(', ')}`));
+      const io = h('div');
+      body.append(h('button', { class: 'btn tiny', type: 'button', onclick: async (e) => {
+        e.target.disabled = true;
+        try {
+          const calls = (await loadCalls()).filter((c) => c.who === `synthesizer:${st.key}`);
+          ui.clear(io).append(...(calls.length ? calls.map((c) => h('div', { class: 'calls' },
+            h('div', { class: 'small muted' }, `attempt ${c.attempt}${c.repair ? ' · repair' : ''} · ${c.served_model || c.model} · `
+              + `${ui.tokens((c.usage || {}).prompt_tokens)}/${ui.tokens((c.usage || {}).completion_tokens)} tok`),
+            c.error ? h('pre', null, `Error: ${c.error}`) : null,
+            h('details', null, h('summary', null, 'Input (prompt)'),
+              h('pre', null, (c.messages || []).map((m) => [h('span', { class: 'msg-role' }, `[${m.role}]`), '\n', m.content, '\n\n']))),
+            h('details', null, h('summary', null, 'Output (raw response)'), h('pre', null, c.response_text ?? '(no response)'))))
+            : [h('div', { class: 'small muted' }, 'No call recorded for this step.')]));
+        } catch (err) { ui.toast(err.message, 'bad'); e.target.disabled = false; }
+      } }, 'Show input & raw output'), io);
+      const items = st.items || [];
+      box.append(h('details', { class: `synth-item ${st.status}` },
+        h('summary', null, h('strong', null, st.label), h('span', { class: `badge ${st.status === 'ok' ? 'ok' : 'bad'}` }, st.status),
+          items.length ? h('span', { class: 'small muted' }, `${items.length} item${items.length === 1 ? '' : 's'}${(st.groups || []).length ? ' · ' + st.groups.join(' · ') : ''}`) : null,
+          st.attempts > 1 ? h('span', { class: 'badge warn' }, `${st.attempts} attempts`) : null),
+        body));
+    }
+    return box;
+  }
+
+  function iterationCard(it, n) {
+    const fmap = fieldMap();
+    const card = h('div', { class: 'card' });
+    const actorCards = (it.actors || []).map(actorCard);
     const changes = (it.changes || []).map((c) => {
       const f = fmap.get(c.field) || { type: typeof c.to === 'number' ? 'number' : 'text', unit: '' };
       return h('li', null, h('strong', null, c.label || c.field), ': ', ui.valueText(f, c.from), ' → ', h('strong', null, ui.valueText(f, c.to)),
         ui.NUMERIC.has(f.type) ? ` ${ui.unitText(f)}` : '', c.reason ? h('div', { class: 'reason' }, c.reason) : null);
     });
+    const sChanges = (it.status_changes || []).map((c) => h('li', null, h('strong', null, c.text || c.question),
+      h('div', { class: 'st-from' }, c.from || '(none)'), h('div', { class: 'st-to' }, '→ ', c.to), c.reason ? h('div', { class: 'reason' }, c.reason) : null));
     const tc = it.text_changes || {};
     const textBits = [];
     if ((tc.new_questions || []).length) textBits.push(h('li', null, h('strong', null, 'New questions: '), tc.new_questions.join(' · ')));
     if ((tc.answered_questions || []).length) textBits.push(h('li', null, h('strong', null, 'Answered: '), tc.answered_questions.join(' · ')));
-    if ((tc.dropped_questions || []).length) textBits.push(h('li', null, h('strong', null, 'Dropped questions: '), tc.dropped_questions.join(' · ')));
-    for (const a of tc.changed_attributes || []) textBits.push(h('li', null, h('strong', null, a.name), `: ${a.from ?? '(new)'} → ${a.to}`));
     const u = it.usage || {};
+    const syn = it.synthesizer || {};
+    const nSyn = (syn.steps || []).length;
     ui.add(card,
       h('div', { class: 'card-head' }, h('h2', null, `Iteration ${it.period_from} → ${it.period}`),
         h('div', { class: 'row small muted' },
@@ -356,12 +496,19 @@ export async function render(root, ctx) {
           + (u.reasoning_tokens ? ` (${ui.tokens(u.reasoning_tokens)} reasoning)` : '')
           + ` · ${ui.money(it.cost)}${it.cost_complete === false ? ' (some calls unpriced)' : ''} · ${it.backend}`,
           h('button', { class: 'btn tiny', type: 'button', onclick: () => showCalls(`${W}/iterations/${n}/calls`, `Calls of step ${n}`) },
-            'Show prompts & raw responses'))),
-      h('h3', { class: 'small muted' }, 'Actors'),
+            'Show all prompts & raw responses'))),
+      it.partial ? h('div', { class: 'banner warn' }, 'Partial iteration: some synthesizer steps failed after a retry, so their items '
+        + 'were carried forward from the previous step (「合成失败，沿用上期」) and flagged.') : null,
+      h('h3', { class: 'small muted' }, `Actors (${(it.actors || []).length})`),
       h('div', { class: 'actor-grid' }, actorCards),
       h('hr'),
-      h('h3', { class: 'small muted' }, `Synthesizer changes (${changes.length})${it.synthesizer?.model ? ' · ' + it.synthesizer.model : ''}`),
+      nSyn ? [h('h3', { class: 'small muted' }, `Synthesizer: ${nSyn} steps${syn.model ? ' · ' + syn.model : ''}`
+        + `${syn.max_items_per_call ? ` · at most ${syn.max_items_per_call} items per call` : ''} · expand a step to see its input and output`),
+      synthSteps(it, n), h('hr')] : null,
+      h('h3', { class: 'small muted' }, `Indicator changes (${changes.length})`),
       changes.length ? h('ul', { class: 'changes' }, changes) : h('div', { class: 'empty' }, 'No value changed.'),
+      h('h3', { class: 'small muted' }, `Status changes (${sChanges.length})`),
+      sChanges.length ? h('ul', { class: 'changes' }, sChanges) : h('div', { class: 'empty' }, 'No status changed.'),
       textBits.length ? [h('h3', { class: 'small muted' }, 'Text changes'), h('ul', { class: 'changes' }, textBits)] : null);
     return card;
   }

@@ -6,8 +6,9 @@ A backend answers ``complete(CallRequest) -> Completion`` or raises LLMError:
   lists them, else json_object; a json_schema request the provider refuses (HTTP 400/404/422) is retried once as
   json_object. Usage accounting on; the cost comes from OpenRouter's usage.cost, else from the catalogue's prices.
 - MockBackend: deterministic, schema-valid answers built from the request's context (no key, no network). A script
-  ``{call key: [behaviour, ...]}`` (call key "actor:<id>" or "synth"; behaviour ok | error | bad_json | timeout |
-  invalid) makes the next calls fail in a chosen way, for tests and demos.
+  ``{call key: [behaviour, ...]}`` (call keys "actor:<id>", "synth:<step key>", "synth:<step kind>", "synth";
+  behaviours ok | error | bad_json | timeout | invalid | long | extra) makes the next calls behave in a chosen way,
+  for tests and demos.
 
 extract_json(text) -> (object | None, error | None): the JSON object in a model's text (code fences, prose around it,
 trailing commas, Python literals and smart quotes outside strings are tolerated).
@@ -251,8 +252,7 @@ def _h(*parts: Any) -> int:
 
 
 def _zh(language: str) -> bool:
-    lang = (language or "").lower()
-    return "中" in lang or "chinese" in lang or lang.startswith("zh")
+    return M.is_cjk(language)
 
 
 def est_tokens(text: str) -> int:
@@ -262,10 +262,32 @@ def est_tokens(text: str) -> int:
     return int(cjk + (len(s) - cjk) / 4) + 1
 
 
+def _short(text: Any, n: int) -> str:
+    s = str(text or "").strip()
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+VARIANTS = {"zh": ["维持现状，暂不调整", "小幅调整，力度温和", "明显加码，力度较大"],
+            "en": ["keep the status quo for now", "a small, measured adjustment", "a clear, larger move"]}
+ACTION_KINDS = {"zh": [("公开表态", "就局势发表公开讲话，释放政策信号"), ("与他方沟通", "与相关各方进行非公开沟通"),
+                       ("调整内部安排", "调整内部资源与优先事项")],
+                "en": [("A public signal", "a public speech that signals the next steps"),
+                       ("Talks with others", "private talks with the parties concerned"),
+                       ("An internal adjustment", "a shift of internal resources and priorities")]}
+
+
 class MockBackend:
-    """Deterministic answers from the request context: actors pick an action by hash of (world, step, actor); the
-    synthesizer moves about a third of the numeric fields a little (inside their plausible range), keeps every other
-    value, and writes a narrative from the actions. Free of charge (cost 0)."""
+    """Deterministic, schema-valid answers from the request context (no key, no network, cost 0). Actors answer every
+    decision question with a short text picked by hash of (world, step, actor, question) and add 0-2 autonomous
+    actions; the synthesizer's digest lists the decisions, each indicator chunk moves about a third of its numeric
+    fields a little (inside their plausible range), each question chunk updates about a third of its statuses, and
+    the narrative counts what moved.
+
+    A script {call key: [behaviour, ...]} makes the next calls of that key behave in a chosen way: behaviours ok |
+    error | timeout | bad_json | invalid (an actor leaves its required questions unanswered; a synthesizer step
+    answers {}) | long (a narrative over the limit) | extra (an indicator chunk adds a key outside its chunk). Call
+    keys: "actor:<id>"; for the synthesizer the most specific queue that has entries is used: "synth:values:2", then
+    "synth:values" (any indicator chunk), then "synth" (any step). Repairs use the same keys with ":repair"."""
     name = "mock"
 
     def __init__(self, delay_s: float | None = None, script: dict[str, list[str]] | None = None):
@@ -274,10 +296,13 @@ class MockBackend:
         self._lock = threading.Lock()
         self.calls: list[CallRequest] = []
 
-    def _next(self, key: str) -> str:
+    def _next(self, keys: list[str]) -> str:
         with self._lock:
-            queue = self._script.get(key)
-            return queue.pop(0) if queue else "ok"
+            for key in keys:
+                queue = self._script.get(key)
+                if queue:
+                    return queue.pop(0)
+            return "ok"
 
     def complete(self, req: CallRequest) -> Completion:
         with self._lock:
@@ -285,23 +310,26 @@ class MockBackend:
         if self.delay_s:
             time.sleep(self.delay_s)
         ctx = req.context or {}
-        key = f"actor:{ctx.get('actor', {}).get('id')}" if req.purpose == "actor" else "synth"
-        behaviour = self._next(key + (":repair" if req.repair else ""))
+        sfx = ":repair" if req.repair else ""
+        if req.purpose == "actor":
+            keys = [f"actor:{ctx.get('actor', {}).get('id')}{sfx}"]
+        else:
+            step = ctx.get("step") or {}
+            keys = [f"synth:{step.get('key')}{sfx}", f"synth:{step.get('kind')}{sfx}", f"synth{sfx}"]
+        behaviour = self._next(keys)
         if behaviour == "error":
             raise LLMError("mock: injected failure", "http")
         if behaviour == "timeout":
             raise LLMError("mock: injected timeout", "timeout")
         if behaviour == "bad_json":
-            text = "Sure! Here is my answer: {\"action_id\": oops, not json"
+            text = "Sure! Here is my answer: {\"answers\": oops, not json"
         elif req.purpose == "actor":
             obj = self._actor(ctx)
             if behaviour == "invalid":
-                obj["action_id"] = "no_such_action"
+                obj["answers"] = {}
             text = json.dumps(obj, ensure_ascii=False)
         else:
-            obj = self._synth(ctx)
-            if behaviour == "invalid":
-                obj = {"summary": "missing values"}
+            obj = {} if behaviour == "invalid" else self._synth(ctx, behaviour)
             text = json.dumps(obj, ensure_ascii=False)
         prompt = "".join(m.get("content", "") for m in req.messages)
         usage = {"prompt_tokens": est_tokens(prompt), "completion_tokens": est_tokens(text), "reasoning_tokens": 0}
@@ -309,50 +337,109 @@ class MockBackend:
         return Completion(text=text, usage=usage, cost=0.0, model=f"mock/{req.model}", response_format="mock",
                           meta={"cost_source": "mock"})
 
+    # ------------------------------------------------------------------ actors
     @staticmethod
     def _actor(ctx: dict) -> dict:
         actor = ctx.get("actor") or {}
         world = ctx.get("world") or {}
         state = ctx.get("state") or {}
-        zh = _zh(world.get("language", ""))
-        actions = actor.get("action_space") or []
-        idx = _h(world.get("id"), state.get("step"), actor.get("id")) % (len(actions) + (1 if actor.get("allow_free_action") else 0) or 1)
-        if idx < len(actions):
-            act = actions[idx]
-            aid, label = act["id"], act["label"]
-            detail = (f"（模拟）{actor.get('name')}选择：{label}。" if zh else f"(mock) {actor.get('name')} chooses: {label}.")
+        lang = "zh" if _zh(world.get("language", "")) else "en"
+        name = actor.get("name") or actor.get("id")
+        cares = actor.get("cares_about") or ["自身目标" if lang == "zh" else "its goals"]
+        seed = (world.get("id"), state.get("step"), actor.get("id"))
+        answers = {}
+        for i, q in enumerate(actor.get("decision_questions") or []):
+            variant = VARIANTS[lang][_h(*seed, q["id"]) % 3]
+            if lang == "zh":
+                answers[q["id"]] = {"value": f"（模拟）关于「{_short(q['text'], 18)}」：{variant}。",
+                                    "rationale": f"（模拟）优先考虑：{cares[i % len(cares)]}。"}
+            else:
+                answers[q["id"]] = {"value": f"(mock) On “{_short(q['text'], 40)}”: {variant}.",
+                                    "rationale": f"(mock) The priority is: {cares[i % len(cares)]}."}
+        out: dict[str, Any] = {"answers": answers}
+        auto = actor.get("autonomy") or {}
+        if auto.get("enabled"):
+            n = min(_h(*seed, "actions") % 3, int(auto.get("max_actions") or 0))
+            peers = ctx.get("peers") or []
+            acts = []
+            for k in range(n):
+                title, detail = ACTION_KINDS[lang][_h(*seed, "kind", k) % 3]
+                target = peers[_h(*seed, "target", k) % len(peers)] if peers else ("公众" if lang == "zh" else "the public")
+                if lang == "zh":
+                    acts.append({"title": f"（模拟）{title}", "detail": f"（模拟）{detail}。", "target": target,
+                                 "intended_effect": "（模拟）稳定预期，为下一步争取空间。"})
+                else:
+                    acts.append({"title": f"(mock) {title}", "detail": f"(mock) {detail}.", "target": target,
+                                 "intended_effect": "(mock) steady expectations and buy time."})
+            out["actions"] = acts
+        if lang == "zh":
+            out.update({"public_statement": f"（模拟）{name}：我们已作出本期决定，并将密切关注局势。",
+                        "rationale": f"（模拟）基于{state.get('period', '')}的状态，优先考虑：{cares[0]}。",
+                        "expected_consequences": ["（模拟）影响有限且可控。"]})
         else:
-            aid = M.FREE_ACTION
-            label = "采取一项清单外的小步调整" if zh else "take a small step outside the list"
-            detail = ("（模拟）一项不在清单上的小步调整：先观察其他各方的动作。" if zh
-                      else "(mock) a small step outside the list: wait and watch the others.")
-        cares = actor.get("cares_about") or []
-        first = cares[0] if cares else ("自身目标" if zh else "its goals")
-        if zh:
-            return {"action_id": aid, "action_detail": detail,
-                    "rationale": f"（模拟）基于{state.get('period', '')}的状态，优先考虑：{first}。",
-                    "public_statement": f"（模拟）{actor.get('name')}：我们将{label}，并密切关注局势。",
-                    "expected_consequences": [f"（模拟）{label}对局势的影响有限且可控。"]}
-        return {"action_id": aid, "action_detail": detail,
-                "rationale": f"(mock) Given the state at {state.get('period', '')}, the priority is: {first}.",
-                "public_statement": f"(mock) {actor.get('name')}: we will {label.lower()} and watch closely.",
-                "expected_consequences": [f"(mock) {label} has a limited, contained effect."]}
+            out.update({"public_statement": f"(mock) {name}: we have decided for this period and will watch closely.",
+                        "rationale": f"(mock) Given the state at {state.get('period', '')}, the priority is: {cares[0]}.",
+                        "expected_consequences": ["(mock) a limited, contained effect."]})
+        return out
+
+    # ------------------------------------------------------------------ synthesizer
+    @staticmethod
+    def _synth(ctx: dict, behaviour: str = "ok") -> dict:
+        kind = (ctx.get("step") or {}).get("kind")
+        if kind == "digest":
+            return MockBackend._digest(ctx)
+        if kind == "values":
+            out = MockBackend._values(ctx)
+            if behaviour == "extra":
+                out["values"]["not_in_this_chunk"] = {"value": 1, "reason": "extra"}
+            return out
+        if kind == "statuses":
+            return MockBackend._statuses(ctx)
+        out = MockBackend._narrative(ctx)
+        if behaviour == "long":
+            out["narrative"] = out["narrative"] * 40
+        return out
 
     @staticmethod
-    def _synth(ctx: dict) -> dict:
+    def _digest(ctx: dict) -> dict:
+        from .prompts import output_brief
+        world = ctx.get("world") or {}
+        results = ctx.get("actor_results") or []
+        zh = _zh(world.get("language", ""))
+        period = ctx.get("next_period", "")
+        acted = [r for r in results if r.get("status") == "ok" and r.get("output")]
+        silent = [r for r in results if r.get("status") != "ok" or not r.get("output")]
+        if zh:
+            parts = [f"【模拟】{period} 要事：" + "；".join(f"{r['name']}——{output_brief(r['output'], 40)}" for r in acted) + "。"]
+            if silent:
+                parts.append("未回应：" + "、".join(r["name"] for r in silent) + "。")
+            parts.append("各方决策相互作用有限，局势总体延续上一季。")
+            return {"summary": f"（模拟）{len(acted)} 方作出决策", "digest": "".join(parts),
+                    "threads": ["（模拟）政策决定 → 金融条件", "（模拟）能源供给 → 通胀与信心"]}
+        parts = [f"[mock] {period}: " + "; ".join(f"{r['name']} — {output_brief(r['output'], 60)}" for r in acted) + "."]
+        if silent:
+            parts.append("No response: " + ", ".join(r["name"] for r in silent) + ".")
+        parts.append("The decisions interact little; the situation mostly continues.")
+        return {"summary": f"(mock) {len(acted)} actors decided", "digest": " ".join(parts),
+                "threads": ["(mock) policy decisions → financial conditions", "(mock) supply → prices and confidence"]}
+
+    @staticmethod
+    def _values(ctx: dict) -> dict:
         world = ctx.get("world") or {}
         state = ctx.get("state") or {}
         schema = ctx.get("schema") or {"fields": []}
-        results = ctx.get("actor_results") or []
         zh = _zh(world.get("language", ""))
-        step = int(state.get("step") or 0) + 1
+        step_no = int(state.get("step") or 0) + 1
         cur = state.get("values") or {}
+        fmap = {f["id"]: f for f in schema.get("fields", [])}
         values: dict[str, dict] = {}
-        moved = 0
-        for f in schema.get("fields", []):
-            fid, prev = f["id"], cur.get(f["id"])
+        for fid in (ctx.get("step") or {}).get("items") or list(fmap):
+            f = fmap.get(fid)
+            if not f:
+                continue
+            prev = cur.get(fid)
             val, reason = prev, ""
-            h = _h(world.get("id"), step, fid)
+            h = _h(world.get("id"), step_no, fid)
             if f["type"] in M.NUMERIC_TYPES and isinstance(prev, (int, float)) and not isinstance(prev, bool) and h % 3 == 0:
                 lo, hi = f.get("min"), f.get("max")
                 span = (hi - lo) if (lo is not None and hi is not None and hi > lo) else 0.0
@@ -366,38 +453,66 @@ class MockBackend:
                 new = int(round(new)) if f["type"] == "integer" else round(new, 2)
                 if new != prev:
                     val = new
-                    moved += 1
-                    reason = ("（模拟）各方行动的综合结果带来小幅变动。" if zh
-                              else "(mock) a small move from the actors' combined actions.")
+                    reason = "（模拟）各方决策的综合结果带来小幅变动。" if zh else "(mock) a small move from the decisions combined."
             if val is None:
                 val = {"number": 0.0, "percent": 0.0, "integer": 0, "boolean": False,
                        "enum": (f.get("options") or [""])[0], "text": ""}.get(f["type"], "")
                 reason = "（模拟）此前没有数值，取默认值。" if zh else "(mock) no previous value: a default."
             values[fid] = {"value": val, "reason": reason}
-        acted = [r for r in results if r.get("status") == "ok"]
-        silent = [r for r in results if r.get("status") != "ok"]
+        return {"values": values}
+
+    @staticmethod
+    def _statuses(ctx: dict) -> dict:
+        world = ctx.get("world") or {}
+        state = ctx.get("state") or {}
+        schema = ctx.get("schema") or {"questions": []}
+        zh = _zh(world.get("language", ""))
         period = ctx.get("next_period", "")
+        step_no = int(state.get("step") or 0) + 1
+        cur = state.get("statuses") or {}
+        qmap = {q["id"]: q for q in schema.get("questions", [])}
+        out: dict[str, dict] = {}
+        for qid in (ctx.get("step") or {}).get("items") or list(qmap):
+            prev = (cur.get(qid) or "").strip()
+            if not prev:
+                out[qid] = {"status": "（模拟）此前没有现状描述：本季开始跟踪。" if zh else "(mock) No status before: tracked from now on.",
+                            "changed": True, "reason": "（模拟）补上缺失的现状。" if zh else "(mock) a missing status filled in."}
+            elif _h(world.get("id"), step_no, qid, "status") % 3 == 0:
+                base = re.sub(r"^(（模拟）截至 [^：]+：|\(mock\) As of [^:]+: )+", "", prev)
+                head = re.split(r"(?<=[。！？])|(?<=[.!?])\s", base)[0].strip()
+                head = head if len(head) <= 80 else head[:79] + "…"
+                new = (f"（模拟）截至 {period}：{head}本季各方决策后出现小幅变化。" if zh
+                       else f"(mock) As of {period}: {head} A small change after this period's decisions.")
+                out[qid] = {"status": new, "changed": True,
+                            "reason": "（模拟）各方决策的综合影响。" if zh else "(mock) the combined effect of the decisions."}
+            else:
+                out[qid] = {"status": prev, "changed": False, "reason": ""}
+        return {"statuses": out}
+
+    @staticmethod
+    def _narrative(ctx: dict) -> dict:
+        world = ctx.get("world") or {}
+        state = ctx.get("state") or {}
+        schema = ctx.get("schema") or {}
+        written = ctx.get("written") or {}
+        zh = _zh(world.get("language", ""))
+        period = ctx.get("next_period", "")
+        results = ctx.get("actor_results") or []
+        acted = sum(1 for r in results if r.get("status") == "ok" and r.get("output"))
+        silent = [r["name"] for r in results if r.get("status") != "ok" or not r.get("output")]
+        fmap = {f["id"]: f for f in schema.get("fields", [])}
+        prev = state.get("values") or {}
+        moved = sum(1 for fid, v in (written.get("values") or {}).items()
+                    if fid in fmap and not M.values_equal(fmap[fid], prev.get(fid), v))
+        changed = sum(1 for v in (written.get("status_changed") or {}).values() if v)
         if zh:
-            parts = [f"【模拟】{period}：" + "；".join(f"{r['name']}{r['output']['action_label']}" for r in acted) + "。"]
-            if silent:
-                parts.append("未回应：" + "、".join(r["name"] for r in silent) + "。")
-            parts.append(f"共有 {moved} 个数值小幅变动，其余保持不变。")
-            summary = f"（模拟）{len(acted)} 方行动，{moved} 个字段变动"
+            text = (f"（模拟）{period}：{acted} 方作出决策" + (f"，{len(silent)} 方未回应" if silent else "")
+                    + f"；{moved} 个指标小幅变动，{changed} 个问题的现状有更新，其余大体延续。")
         else:
-            parts = [f"[mock] {period}: " + "; ".join(f"{r['name']} — {r['output']['action_label']}" for r in acted) + "."]
-            if silent:
-                parts.append("No response: " + ", ".join(r["name"] for r in silent) + ".")
-            parts.append(f"{moved} values moved slightly; the rest held.")
-            summary = f"(mock) {len(acted)} actors acted, {moved} fields moved"
-        text = state.get("text") or {}
-        questions = [dict(q) for q in text.get("key_questions") or []]
-        open_q = [q for q in questions if q.get("status") == "open"]
-        if open_q:
-            q = open_q[(step - 1) % len(open_q)]
-            q["answer"] = (f"（模拟）截至 {period}：仍待观察。" if zh else f"(mock) as of {period}: still open.")
-        attributes = [dict(a) for a in text.get("attributes") or []]
-        return {"summary": summary, "values": values, "narrative": " ".join(parts), "key_questions": questions,
-                "attributes": attributes}
+            text = (f"[mock] {period}: {acted} actors decided" + (f"; no response: {', '.join(silent)}" if silent else "")
+                    + f"; {moved} values moved a little and {changed} statuses changed; the rest held.")
+        limit = int(ctx.get("narrative_max") or 0)
+        return {"narrative": text[:limit] if limit else text}
 
 
 _SCRIPTED: dict[str, MockBackend] = {}

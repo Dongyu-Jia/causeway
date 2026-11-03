@@ -18,23 +18,31 @@ def chat_response(content, cost=0.0123, model="google/gemini-4-argon", usage=Non
 
 
 def answer_for(body):
-    """A valid answer for an actor or synthesizer request, read from its response_format schema when present."""
+    """A valid answer for an actor or synthesizer request, read from its response_format schema when present (the
+    synthesizer's steps are told apart by their schema's top-level keys)."""
     rf = body.get("response_format") or {}
     schema = (rf.get("json_schema") or {}).get("schema")
-    text = json.dumps(body.get("messages"), ensure_ascii=False)
-    if (schema and "action_id" in schema["properties"]) or (not schema and '"action_id"' in text):
-        ids = schema["properties"]["action_id"]["enum"] if schema else ["free"]
-        return {"action_id": ids[0], "action_detail": "detail", "rationale": "because", "public_statement": "we act",
-                "expected_consequences": ["calm"]}
-    props = schema["properties"]["values"]["properties"] if schema else {}
-    values = {}
-    for fid, spec in props.items():
-        t = spec["properties"]["value"]
-        values[fid] = {"value": {"number": 1.5, "integer": 2, "boolean": True}.get(t["type"], (t.get("enum") or ["x"])[0]),
-                       "reason": "moved"}
-    return {"summary": "one line", "values": values, "narrative": "What happened.",
-            "key_questions": [{"question": "Q?", "status": "open", "answer": "not yet"}],
-            "attributes": [{"name": "Mood", "value": "calm"}]}
+    props = (schema or {}).get("properties") or {}
+    if "answers" in props or "public_statement" in props:
+        answers = {qid: {"value": f"answer to {qid}", "rationale": "because"}
+                   for qid in (props.get("answers") or {}).get("properties", {})}
+        out = {"answers": answers, "public_statement": "we act", "rationale": "because", "expected_consequences": ["calm"]}
+        if "actions" in props:
+            out["actions"] = [{"title": "a step", "detail": "detail", "target": "others", "intended_effect": "calm"}]
+        return out
+    if "digest" in props:
+        return {"summary": "one line", "digest": "What happened.", "threads": ["a → b"]}
+    if "values" in props:
+        values = {}
+        for fid, spec in props["values"]["properties"].items():
+            t = spec["properties"]["value"]
+            values[fid] = {"value": {"number": 1.5, "integer": 2, "boolean": True}.get(t["type"], (t.get("enum") or ["x"])[0]),
+                           "reason": "moved"}
+        return {"values": values}
+    if "statuses" in props:
+        return {"statuses": {qid: {"status": f"status of {qid}", "changed": True, "reason": "news"}
+                             for qid in props["statuses"]["properties"]}}
+    return {"narrative": "A short summary."}
 
 
 class FakeTransport:
@@ -90,11 +98,36 @@ def small_world(n_actors=3):
             "schema": {"fields": [
                 {"id": "rate", "label": "Rate", "group": "Policy", "type": "percent", "min": 0, "max": 20},
                 {"id": "tension", "label": "Tension", "group": "Politics", "type": "number", "min": 0, "max": 10},
-                {"id": "phase", "label": "Phase", "group": "Politics", "type": "enum", "options": ["calm", "crisis"]}]},
+                {"id": "phase", "label": "Phase", "group": "Politics", "type": "enum", "options": ["calm", "crisis"]}],
+                "questions": [{"id": "talks", "text": "Where do the talks stand?", "group": "Politics",
+                               "guidance": "Who offered what."},
+                              {"id": "mood", "text": "What is the public mood?", "group": "Society"}]},
             "actors": [{"id": f"a{i}", "name": f"Actor {i}", "role": f"role {i}", "cares_about": ["peace"],
-                        "action_space": [{"id": "hold", "label": "Hold"}, {"id": "push", "label": "Push"}],
+                        "decision_questions": [
+                            {"id": "move", "text": f"How far does Actor {i} push?", "guidance": "hold or push; say how far",
+                             "required": True},
+                            {"id": "note", "text": "Anything else to say?", "required": False}],
+                        "autonomy": {"enabled": True, "max_actions": 2, "guidance": f"GUIDE-{i}"},
                         "private_info": f"SECRET-{i}"} for i in range(n_actors)],
-            "synthesizer": {"instructions": "Be consistent."},
+            "synthesizer": {"instructions": "Be consistent.", "max_items_per_call": 2},
             "initial_state": {"period": "2026Q4", "values": {"rate": 3.88, "tension": 5, "phase": "calm"},
-                              "text": {"narrative": "Start.", "key_questions": [{"question": "Q?", "status": "open"}],
-                                       "attributes": [{"name": "Mood", "value": "uneasy"}]}}}
+                              "statuses": {"talks": "Talks are stalled.", "mood": "Uneasy."},
+                              "narrative": "Calm, stalled talks, uneasy public."}}
+
+
+def legacy_world(n_actors=2):
+    """A world in the first format (worldsim-world/1): action spaces, key questions and attributes."""
+    return {"format": "worldsim-world/1", "id": "old", "name": "Old world", "language": "中文",
+            "description": "An old world.", "period_step": {"unit": "quarter", "count": 1},
+            "schema": {"fields": [{"id": "rate", "label": "Rate", "group": "Policy", "type": "percent", "min": 0,
+                                   "max": 20}]},
+            "actors": [{"id": f"a{i}", "name": f"Actor {i}", "role": "r", "cares_about": ["x"],
+                        "action_space": [{"id": "hold", "label": "维持", "description": "维持现状（现状）。"},
+                                         {"id": "push", "label": "加码", "description": "加大力度。"}],
+                        "allow_free_action": True, "private_info": ""} for i in range(n_actors)],
+            "synthesizer": {"instructions": "合成。", "model": ""},
+            "initial_state": {"step": 0, "period": "2026Q4", "values": {"rate": 3.88},
+                              "text": {"narrative": "很长的旧叙事。",
+                                       "key_questions": [{"question": "会加息吗？", "status": "open", "answer": "未定"}],
+                                       "attributes": [{"name": "货币政策", "value": "偏鹰"}]},
+                              "summary": "起点"}}

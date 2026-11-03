@@ -245,7 +245,8 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
         pending = _strip_calls(store.load_pending(wid))
         if pending:
             pending.pop("calls", None)
-        return {"world": world, "steps": store.step_numbers(wid), "pending": pending, "busy": runs.busy(wid)}
+        return {"world": world, "steps": store.step_numbers(wid), "pending": pending, "busy": runs.busy(wid),
+                "calls_per_iteration": engine.call_counts(world)}
 
     @app.put("/api/worlds/{wid}")
     async def put_world(wid: str, request: Request):
@@ -262,12 +263,16 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
         body = await _body(request)
         world = world_or_404(wid)
         not_busy(wid)
-        schema, problems = M.normalize_schema({"fields": body.get("fields")})
+        questions = body.get("questions") if "questions" in body else world["schema"].get("questions", [])
+        schema, problems = M.normalize_schema({"fields": body.get("fields"), "questions": questions})
         if problems:
             raise HTTPException(400, {"message": "the schema does not validate", "problems": problems})
         world["schema"] = schema
         init = world["initial_state"]
         new_vals = body.get("initial_values")
+        new_sts = body.get("initial_statuses")
+        read_only = ("the schema was not saved: this world has steps after the initial state, so its initial %s "
+                     "cannot change. Rewind to step 0 (or fork) first.")
         if isinstance(new_vals, dict):
             if history_len(wid) > 0:
                 old = {f["id"]: init["values"].get(f["id"]) for f in schema["fields"]}
@@ -276,12 +281,20 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
                            not M.values_equal(M.field_map(schema)[fid], old[fid],
                                               M.coerce_value(M.field_map(schema)[fid], given[fid])[0])]
                 if changed:
-                    raise HTTPException(409, "the schema was not saved: this world has steps after the initial state, "
-                                             "so its initial values cannot change. Rewind to step 0 (or fork) first.")
+                    raise HTTPException(409, read_only % "values")
             else:
                 init = {**init, "values": new_vals}
+        if isinstance(new_sts, dict):
+            if history_len(wid) > 0:
+                old_sts = init.get("statuses") or {}
+                changed = [q for q in new_sts if q in old_sts and (old_sts.get(q) or "") != M._text(new_sts[q])]
+                if changed:
+                    raise HTTPException(409, read_only % "statuses")
+            else:
+                init = {**init, "statuses": new_sts}
         init_vals = {f["id"]: (init.get("values") or {}).get(f["id"]) for f in schema["fields"]}
-        world["initial_state"] = {**init, "values": init_vals}
+        world["initial_state"] = {**init, "values": init_vals,
+                                  "statuses": M.normalize_statuses(schema, init.get("statuses"))}
         actor_fields = set(M.field_map(schema))
         for a in world["actors"]:
             if a.get("visible_fields") is not None:
@@ -297,7 +310,7 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
             raise HTTPException(409, "this world has steps after the initial state: rewind to step 0 (or fork a new "
                                      "world) before editing the initial state")
         state, problems = M.normalize_state(world["schema"], {**world["initial_state"], **{
-            k: body[k] for k in ("period", "values", "text") if k in body}, "step": 0})
+            k: body[k] for k in ("period", "values", "statuses", "narrative") if k in body}, "step": 0})
         if problems:
             raise HTTPException(400, {"message": "the initial state does not validate", "problems": problems})
         world["initial_state"] = state
@@ -308,7 +321,8 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
         body = await _body(request)
         world = world_or_404(wid)
         not_busy(wid)
-        actors, problems = M.normalize_actors(body.get("actors"), set(M.field_map(world["schema"])))
+        actors, problems = M.normalize_actors(body.get("actors"), set(M.field_map(world["schema"])),
+                                              world.get("language") or "", world["period_step"]["unit"])
         if problems:
             raise HTTPException(400, {"message": "the actors do not validate", "problems": problems})
         world["actors"] = actors
@@ -319,7 +333,10 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
         body = await _body(request)
         world = world_or_404(wid)
         not_busy(wid)
-        world["synthesizer"] = M.normalize_synthesizer(body)
+        synth, problems = M.normalize_synthesizer(body)
+        if problems:
+            raise HTTPException(400, {"message": "the synthesizer settings do not validate", "problems": problems})
+        world["synthesizer"] = synth
         return {"world": save(world)}
 
     @app.post("/api/worlds/{wid}/duplicate")
@@ -354,6 +371,7 @@ def create_app(root=None, transport: Transport | None = None, backend_factory=No
             out.append({"step": n, "period": st.get("period"), "summary": st.get("summary") or "",
                         "cost": st.get("cost"), "cost_complete": st.get("cost_complete"),
                         "flags": len(st.get("flags") or []), "changes": len(st.get("changes") or []),
+                        "status_changes": len(st.get("status_changes") or []), "partial": bool(st.get("partial")),
                         "created": st.get("created")})
         return {"steps": out}
 
