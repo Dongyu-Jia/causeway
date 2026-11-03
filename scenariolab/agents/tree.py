@@ -1674,6 +1674,8 @@ class Engine:
                         new.append(({**choice, aid: o["id"]}, p * q))
             new.sort(key=lambda t: -t[1])
             profiles = new[:MAX_PROFILES]
+        if not profiles:                            # every branching option at zero mass: the prior's modal path
+            profiles = [({}, 1.0)]
         tot = sum(p for _, p in profiles) or 1.0
         profiles = [(c, p / tot) for c, p in profiles]
         K = int(self.st.K)
@@ -1700,6 +1702,9 @@ class Engine:
             J = [int(sub[j]) for j in J_sub]
             assign = np.array([J[int(np.argmin(D[i, J]))] for i in range(len(pv))])
             heads = [(profiles[j][0], [i for i in range(len(pv)) if assign[i] == j]) for j in J]
+            # two heads with identical feature vectors (options that write the same fields) tie at distance 0 and
+            # every profile goes to the first: the other head is empty, and its profile is merged into the first
+            heads = [h for h in heads if h[1]]
         out = []
         for head, members in heads:
             mem = [{"options": profiles[i][0], "p": float(profiles[i][1])} for i in members]

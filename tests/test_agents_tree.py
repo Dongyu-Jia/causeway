@@ -2,6 +2,7 @@
 
 Every LLM interaction goes through the mock backend (tests/conftest.py: MSL_LLM_BACKEND=mock, the real CLI blocked).
 The quarterly model is the Gaussian stub (scenariolab/agents/stub_model.json)."""
+import dataclasses
 import hashlib
 import json
 import time
@@ -314,6 +315,36 @@ def test_follower_rows_apply_the_commitment_keep_rule():
     shown = next(o for o in bt["options"] if o["id"] == "as_committed")
     assert shown["p_prior"] == pytest.approx(T.COMMITMENT_KEEP, abs=0.02)
     assert A.REACTIONS
+
+
+def test_identical_feature_profiles_never_leave_an_empty_cluster(monkeypatch):
+    """Two branching profiles with identical features tie at distance 0: before the fix the second head got no
+    member and allocate_cluster crashed (the first real snapshot stopped at 2033Q2). Every cluster now has members
+    and every particle slot gets a profile."""
+    eng = T.Engine(small(depth=1), root_accounts=AC.load_root())
+    nd = eng.root()
+    q = T.A.quarter_add(nd.quarter, 1)
+    a0 = eng.model.complete(nd.cloud.state, MA.Given.empty(nd.cloud.n), T.seed_for(1, nd.key, "a0"))
+    gates = AC.gates(nd.cloud.acc) if nd.cloud.acc is not None else {}
+    dec = eng.decide(nd, q, a0, gates, [], [])
+    # options that write something all look alike; status-quo options write nothing: actors branch (their
+    # options differ in impact) and the non-status-quo profiles tie at distance 0
+    real_features = T.Engine.features
+    monkeypatch.setattr(T.Engine, "features", lambda self, payload: {"x": 1.0} if real_features(self, payload) else {})
+
+    def two_heads(p, D, keep, forced=()):               # selection keeps two profiles at distance 0
+        pairs = [(a, b) for a in range(len(p)) for b in range(a + 1, len(p)) if D[a, b] == 0]
+        if not pairs:
+            pytest.skip("no two profiles with identical features at this node")
+        return list(pairs[0]), np.zeros(len(p))
+    monkeypatch.setattr(T, "forward_select", two_heads)
+    eng.st = dataclasses.replace(eng.st, p_min=0.0, K=3)
+    cls = eng.clusters(nd, dec)
+    assert cls and all(c["members"] for c in cls)
+    assert abs(sum(c["p"] for c in cls) - 1.0) < 1e-9
+    for c in cls:
+        alloc = eng.allocate_cluster(nd, c, dec, a0, T.seed_for(1, nd.key, f"alloc|{c['id']}"))
+        assert all(len(v) == nd.cloud.n for v in alloc["assign"].values())
 
 
 def test_mock_fixtures_cover_mechanism_and_nature_branches(tmp_path, mock_llm):
