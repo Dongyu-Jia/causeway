@@ -51,7 +51,8 @@ from .. import config, jsonio
 
 log = logging.getLogger(__name__)
 
-ACCOUNTS_VERSION = "agents-accounts-3 (2026-11-02; per-particle actions; the deficit's pull to its baseline, debt >= 0)"
+ACCOUNTS_VERSION = ("agents-accounts-4 (2026-11-02; the X-date as a hard deadline unless the particle's Congress chose "
+                    "the standoff; agents-accounts-3: per-particle actions, the deficit's pull to its baseline, debt >= 0)")
 ROOT_PATH = config.RESULTS_DIR / "agents_accounts_root.json"
 RAW_AGENTS = config.RAW_DIR / "agents"
 TOL = 1e-6
@@ -1434,6 +1435,7 @@ class Params:
     tga_adjust: float = 0.5
     tga_floor: float = 150.0
     em_capacity: float = 350.0             # 判断值 unless pinned (U-15)
+    deadline_raise_bn: float = 2500.0      # the routine raise at the deadline above the quarter's need (the option's default)
     foreign_share_issuance: float = 0.318
     receipts_elasticity: float = 1.73
     deflator_wedge: float = -0.42
@@ -1886,6 +1888,24 @@ class Accounts:
         subj = S["dhp"] + S["intra"] - p.not_subject_to_limit
         over = subj + np.maximum(need, 0.0) + p.intragov_growth_q - S["limit"]
         em_left = np.maximum(p.em_capacity - S["em_used"], 0.0)
+        # the X-date as a hard deadline (78 limit actions since 1960, 0 defaults: the limit was always raised or
+        # suspended before the Treasury ran out of cash). A particle whose shortfall this quarter (the need beyond the
+        # limit's room and what is left of the extraordinary measures) would take its cash below the floor gets the
+        # routine deadline raise, unless its Congress chose the standoff this quarter: letting the deadline pass is
+        # an explicit decision. The node's menu offers the debt-limit options only when most of its particles bind
+        # (G-L1), so without this a minority of particles defaulted by drawing the no-new-law option (the review:
+        # 83-86% of the base-rate tree's particles in arrears within 10 years). Cash still runs down while it binds.
+        standoff = _act_set(a, "debt_limit_standoff", N)
+        short_prov = np.maximum(over - em_left, 0.0)
+        deadline = ~standoff & ~suspended & (tga_desired - short_prov < p.tga_floor) & (short_prov > 1e-9)
+        if deadline.any():
+            S["intra"] = np.where(deadline, S["intra"] + S["em_used"], S["intra"])
+            S["em_used"] = np.where(deadline, 0.0, S["em_used"])
+            subj = S["dhp"] + S["intra"] - p.not_subject_to_limit
+            S["limit"] = np.where(deadline, subj + np.maximum(need, 0.0) + p.intragov_growth_q + p.deadline_raise_bn,
+                                  S["limit"])
+            over = subj + np.maximum(need, 0.0) + p.intragov_growth_q - S["limit"]
+            em_left = np.maximum(p.em_capacity - S["em_used"], 0.0)
         em_now = np.minimum(np.maximum(over, 0.0), em_left)
         S["em_used"] = S["em_used"] + em_now
         S["intra"] = S["intra"] + p.intragov_growth_q - em_now
@@ -1927,6 +1947,7 @@ class Accounts:
         ended = suspended & (S["susp_q"] == 0)
         if ended.any():              # the suspension ends: the limit is reset at the debt then outstanding
             S["limit"] = np.where(ended, S["dhp"] + S["intra"] - p.not_subject_to_limit, S["limit"])
+        F.update(deadline_raise=deadline.astype(float))
         F.update(nipa_def_q=nipa_q, mts_def_q=mts_q, borrow=borrow, em_now=em_now, customs_q=customs_q, refunds_q=refunds.copy(),
                  outlays_q=outlays_q, xdate=xdate.astype(float), nipa_int_saar=nipa_int, need=need,
                  limit_binding=((short > 1e-9) | (em_now > 1e-9)).astype(float), tga_prev=tga_prev, dhp_prev=dhp_prev,

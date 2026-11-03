@@ -149,7 +149,7 @@ class JobManager:
             return {"run_id": rid, "status": "done", "calls_remaining": 0}
         if r.get("status") in ("running", "queued", "cancelling"):
             raise Conflict(rid)
-        st = T.TreeSettings.coerce(r["settings"])
+        st = T.TreeSettings.saved(r["settings"])
         done = int(r.get("levels_done") or 0)
         if depth is not None:
             if not st.depth < int(depth) <= 80:
@@ -157,6 +157,9 @@ class JobManager:
             st = dataclasses.replace(st, depth=int(depth))
         est = T.estimate(st, cached_levels=done)
         adapter = self._adapter_for(r)                 # ValueError (400): the run's fit cannot be loaded or changed
+        drift = T.version_drift(r.get("versions"), adapter)
+        if drift:                                      # ValueError (400): another engine, catalogue, channel table …
+            raise ValueError(T.drift_refusal(drift, "推演"))
         if st.tree_kind == "agent":
             S.refuse_fallback_stub(adapter, "推演")
         if st.tree_kind == "agent" and real_backend() and not confirm:
@@ -176,7 +179,7 @@ class JobManager:
 
     def extend(self, rid: str, quarters: int, *, confirm: bool = False) -> dict:
         r = self.read(rid)
-        st = T.TreeSettings.coerce(r["settings"])
+        st = T.TreeSettings.saved(r["settings"])
         return self.resume(rid, confirm=confirm, depth=int(st.depth) + int(quarters))
 
     def _launch(self, rid: str, st: T.TreeSettings, *, resume: bool) -> None:
@@ -371,7 +374,7 @@ class JobManager:
             if not r or not r.get("settings"):
                 continue
             try:
-                other = T.TreeSettings.coerce(r["settings"])
+                other = T.TreeSettings.saved(r["settings"])
             except (TypeError, ValueError):
                 continue
             if dataclasses.replace(other, depth=1).hash() != want:
@@ -411,7 +414,7 @@ class JobManager:
                 raise KeyError(f"没有找到快照「{sid}」：不能继续构建")
             if man.get("status") == "done":
                 raise ValueError(f"快照「{sid}」已经完成并冻结；换一个 id 重新构建")
-            st = T.TreeSettings.coerce(man.get("settings") or {})
+            st = T.TreeSettings.saved(man.get("settings") or {})
         else:
             if man is not None:
                 raise ValueError(f"快照「{sid}」已存在（{man.get('status')}）：继续构建请用“继续构建”，或换一个 id")

@@ -543,11 +543,13 @@ function defaultDraft(cfg) {
   return { name: '', depth: d.depth ?? 8, B: d.B ?? 4, K: d.K ?? 3, M_max: d.M_max ?? 3, actors: null,
     synth: { mode: d.synth?.mode || 'gated', depth: d.synth?.depth ?? 4, axes: { ...(d.synth?.axes || {}) } },
     c_scale: null, stress_mode: !!d.stress_mode, n_particles: d.n_particles ?? 500, seed: d.seed ?? 7,
-    max_calls: d.max_calls ?? 60, concurrency: d.concurrency ?? 3, prior_trees: d.prior_trees !== false };
+    max_calls: d.max_calls ?? 60, concurrency: d.concurrency ?? 3, prior_trees: d.prior_trees !== false,
+    channels: d.channels || 'on' };
 }
 function settingsOf(dr) {
   const out = { depth: dr.depth, B: dr.B, K: dr.K, M_max: dr.M_max, synth: dr.synth, stress_mode: dr.stress_mode,
-    n_particles: dr.n_particles, seed: dr.seed, max_calls: dr.max_calls, concurrency: dr.concurrency, prior_trees: dr.prior_trees };
+    n_particles: dr.n_particles, seed: dr.seed, max_calls: dr.max_calls, concurrency: dr.concurrency, prior_trees: dr.prior_trees,
+    channels: dr.channels === 'off' ? 'off' : 'on' };
   if (Array.isArray(dr.actors)) out.actors = dr.actors;
   if (C.isNum(dr.c_scale)) out.c_scale = dr.c_scale;
   return out;
@@ -657,7 +659,9 @@ function renderSettings(grid, env, progressBox) {
         numIn('n_particles', 50, 5000, 50, '每节点粒子', '个'), numIn('seed', 0, 999999, 1, '种子', ''),
         numIn('max_calls', 1, 5000, 1, '新调用上限', '次'), numIn('concurrency', 1, 8, 1, '并发', '个'),
         h('label', { class: 'inl' }, h('input', { type: 'checkbox', checked: dr.stress_mode ? true : null, onchange: (e) => { dr.stress_mode = e.target.checked; changed(); } }), '压力模式'),
-        h('label', { class: 'inl' }, h('input', { type: 'checkbox', checked: dr.prior_trees ? true : null, onchange: (e) => { dr.prior_trees = e.target.checked; changed(); } }), '同时生成两棵对照树（0 次调用）'))),
+        h('label', { class: 'inl' }, h('input', { type: 'checkbox', checked: dr.prior_trees ? true : null, onchange: (e) => { dr.prior_trees = e.target.checked; changed(); } }), '同时生成两棵对照树（0 次调用）'),
+        h('label', { class: 'inl', title: '代码按历史模板与文献，把模型自己不传导的动作分解成模型能读的通用通道；关闭时回到较早的做法（只有后果合成器的机制、转移支付响应表与量化宽松路径），用于对照' },
+          h('input', { type: 'checkbox', checked: dr.channels !== 'off' ? true : null, onchange: (e) => { dr.channels = e.target.checked ? 'on' : 'off'; changed(); } }), '模板通道'))),
     h('div', { class: 'row' }, h('label', { class: 'inl' }, '名称', h('input', { type: 'text', value: dr.name, placeholder: '可选',
       oninput: (e) => { dr.name = e.target.value.slice(0, 80); } }))),
     h('div', { class: 'agents-chips' }, cfg.model?.structural

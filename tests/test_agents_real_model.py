@@ -257,8 +257,11 @@ class RecordingStub(MA.GaussianStub):
 
 
 def test_a_structural_adapter_gets_interventions_through_structural(tmp_path):
+    """P14's lever handling (channels "off": the response table stands in for transfers; the template channels'
+    counterpart is tests/test_agents_channels.py)."""
     ad = RecordingStub()
-    eng = T.Engine(small(n_particles=200, first_quarter="2027Q1"), adapter=ad, root_accounts=AC.load_root())
+    eng = T.Engine(small(n_particles=200, first_quarter="2027Q1", channels="off"), adapter=ad,
+                   root_accounts=AC.load_root())
     root = eng.root()
     a0 = eng.a0(root)
     dec = eng.decide(root, "2027Q1", a0, {}, [], [])
@@ -512,8 +515,11 @@ def _bk(eng, nd, dec, q):
 
 
 def test_levers_the_model_does_not_transmit_get_absent_channels_the_response_table_and_qe_paths():
+    """P14 (channels "off"): inert levers keep the response table and QE's G08 paths; with template channels on
+    (the default) both are replaced (tests/test_agents_channels.py)."""
     ad = InertStub()
-    eng = T.Engine(small(n_particles=200, first_quarter="2027Q1"), adapter=ad, root_accounts=AC.load_root())
+    eng = T.Engine(small(n_particles=200, first_quarter="2027Q1", channels="off"), adapter=ad,
+                   root_accounts=AC.load_root())
     tr = eng.transmission
     assert {"d_bs", "d_transfers", "d_deficit", "d_perstax", "d_tariff", "d_lf", "d_itinv"} <= set(eng.inert)
     assert "d_ff" not in eng.inert and tr["levers"]["d_ff"]["max_z"] > 0.05      # the stub conditions on d_ff
@@ -560,7 +566,8 @@ def test_a_due_commitment_is_routed_like_the_option_that_made_it():
     assert cms and all(cm["write"]["protocol"] == "response_table" for cm in cms)
     old = [{**cm, "write": {k: v for k, v in cm["write"].items() if k != "protocol"}} for cm in cms]
     for commitments in (cms, old):                      # old: saved before protocols travelled with their writes
-        eng = T.Engine(small(n_particles=150, first_quarter="2027Q1"), adapter=InertStub(), root_accounts=AC.load_root())
+        eng = T.Engine(small(n_particles=150, first_quarter="2027Q1", channels="off"), adapter=InertStub(),
+                       root_accounts=AC.load_root())
         root = eng.root()
         root.commitments = [dict(cm, due_quarter="2027Q1") for cm in commitments]
         dec = eng.decide(root, "2027Q1", eng.a0(root), {}, [], [])

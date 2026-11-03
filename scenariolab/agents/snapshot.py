@@ -163,10 +163,20 @@ def full_estimate(settings, *, latency=None, cached_levels: int = 0, adapter=Non
 
 def engine_transmission(eng: T.Engine) -> dict:
     """What the pricing model's interventions reach, for the manifest, run.json and the UI's honesty card: the
-    probe (T.transmission), the inert levers and the lines the card shows."""
+    probe (T.transmission), the inert levers, the template channels (on, the price-puzzle overlay and its first
+    kernel terms, the table's coverage), the model's own Fed prior at the root and the lines the card shows."""
     tr = dict(eng.transmission or {})
+    ch = {"on": bool(eng.channels_on), "version": T.CH.version() if eng.channels_on else None}
+    if eng.channels_on:
+        ch["overlay"] = bool(eng.overlay_on)
+        ch["coverage"] = T.channel_coverage(T.coverage_actors(eng))
+        if ch["overlay"] and eng.layer.kernel is not None:
+            ch["kernel_k1_4"] = {f: [T.rnd(float(x), 4) for x in v[1:5]] for f, v in eng.layer.kernel.items()}
+        ch["literature_arm"] = eng.st.puzzle_literature_arm == "on"
+    root = T.root_prior(eng.model, eng) if eng.structural else {}
     return {"levers": tr.get("levers") or {}, "inert": list(eng.inert), "ff_irf": tr.get("ff_irf"),
-            "basis": tr.get("basis"), "zh": T.transmission_zh(tr, eng.meta)}
+            "basis": tr.get("basis"), "channels": ch, "root_prior": root,
+            "zh": T.transmission_zh(tr, eng.meta, channels=ch, root=root)}
 
 
 def format_estimate(est: dict, st: T.TreeSettings) -> str:
@@ -268,7 +278,7 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
             raise ValueError(f"快照「{sid}」已经完成并冻结；换一个 id 重新构建")
         if not resume:
             raise ValueError(f"快照「{sid}」已存在（{man.get('status')}）：用 --resume 继续，或换一个 id")
-        if T.TreeSettings.coerce(man["settings"]).hash() != st.hash():
+        if T.TreeSettings.saved(man["settings"]).hash() != st.hash():
             raise ValueError(f"快照「{sid}」的设置与这次不同：继续构建必须用相同的设置（{man.get('settings_hash')}）")
     root.mkdir(parents=True, exist_ok=True)
     now = time.strftime("%Y-%m-%dT%H:%M:%S")
@@ -281,6 +291,9 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
     try:
         if resuming:
             adapter = folder_adapter(man, adapter=adapter, allow_model_change=allow_model_change)
+            drift = T.version_drift(man.get("versions"), adapter)
+            if drift:                                     # another engine, catalogue, channel table, prompts …
+                raise ValueError(T.drift_refusal(drift, "快照"))
         else:
             adapter = adapter or MA.load_adapter()
         refuse_fallback_stub(adapter)
@@ -438,7 +451,7 @@ class Explorer:
         return m
 
     def settings(self) -> T.TreeSettings:
-        return T.TreeSettings.coerce(self.manifest().get("settings") or {})
+        return T.TreeSettings.saved(self.manifest().get("settings") or {})
 
     def index(self) -> dict:
         with self._lock:
@@ -511,6 +524,7 @@ class Explorer:
             rec["overlay"] = {"expanded_at": ov.get("expanded_at"), "replayed": ov.get("replayed"),
                               "replay_exact": ov.get("replay_exact"), "quarters": ov.get("quarters"),
                               "model_changed": bool(ov.get("model_changed")),
+                              "versions_changed": ov.get("versions_changed"),
                               "model_fit": ov.get("model_fit") or MA.short_version(ov.get("model_version"))}
         for ch in rec.get("children") or []:
             if ch.get("status") == "pruned" and self.overlay_entry(ch["key"]) is not None:
@@ -667,10 +681,10 @@ class Explorer:
             if c is not None:
                 start, cloud = i, c
                 break
-        built = (self.manifest().get("versions") or {}).get("engine")
-        if built and built != T.ENGINE_VERSION and start != len(chain) - 1:
-            raise ValueError(f"这个{'快照' if self.kind == 'snapshot' else '推演'}由另一版引擎构建（{built}）：节点的粒子云无法按路径重放，"
-                             "只有保存了粒子云的末端可以继续生成；请用当前版本重新构建")
+        drift = T.version_drift(self.manifest().get("versions"), eng.model)
+        if drift and start != len(chain) - 1:
+            raise ValueError(f"这个{'快照' if self.kind == 'snapshot' else '推演'}由另一版代码构建（{T.drift_zh(drift)}已改变）："
+                             "节点的粒子云无法按路径重放，只有保存了粒子云的末端可以继续生成；请用当前版本重新构建")
         if cloud is None:
             root = eng.root()
             if root.key != chain[0]:
@@ -795,6 +809,11 @@ class Explorer:
                        root_accounts=AC.load_root(), journal=journal, institutions=self.institutions())
         nd, replayed = self.node_with_cloud(key, eng)
         model_changed = self.model_changed()
+        # a saved cloud continued under other behaviour versions: allowed (an explicit on-demand branch), recorded on
+        # every overlay entry it writes and in the journal, and shown on the node
+        drift = T.version_drift(self.manifest().get("versions"), model)
+        if drift:
+            journal.emit("versions_changed", node=key, parts=drift)
         nd.status = "pending"
         journal.emit("expand_started", node=key, quarters=quarters, replayed=replayed)
         try:
@@ -845,6 +864,7 @@ class Explorer:
             rec["p_path_own"] = rec["p_path"]
             T.write_json(ent_path, {"record": rec, "detail": det, "expanded_at": now if det is not None else None,
                                     "model_version": MA.identity(model), "model_changed": model_changed,
+                                    "versions_changed": T.drift_zh(drift) if drift else None,
                                     "model_fit": MA.fit_text(model),
                                     "replayed": replayed if node.key == key else None,
                                     "replay_exact": getattr(node, "replay_exact", None) if node.key == key else None,
@@ -1009,6 +1029,12 @@ def main(argv=None) -> int:
                     help="可选：第 deep-from 季之后换用的模型（默认不换：每一步都是 claude-opus-5-5、力度 medium）")
     ap.add_argument("--deep-from", type=int, default=8, help="从第几层开始用 --deep-model（默认 8 = 前 8 季用主模型）")
     ap.add_argument("--synth-depth", type=int, default=4)
+    ap.add_argument("--channels", choices=("on", "off"), default="on",
+                    help="模板通道（默认 on；off = P14 的转移支付响应表与 QE 路径）")
+    ap.add_argument("--puzzle-overlay", choices=("auto", "off"), default="auto",
+                    help="价格之谜的中性修正（默认 auto：传导探针仍发现价格之谜时启用）")
+    ap.add_argument("--puzzle-literature-arm", choices=("on", "off"), default="off",
+                    help="在中性修正之上再加文献的去通胀效应（默认 off：用户决定）")
     ap.add_argument("--no-wait", action="store_true", help="达到用量上限时不等待，直接退出（之后用 --resume 继续）")
     ap.add_argument("--allow-model-change", action="store_true",
                     help="继续构建时允许换用新的季度模型拟合（默认拒绝：一棵树只用一次拟合；切换会记在 manifest 与日志里）")
@@ -1016,7 +1042,8 @@ def main(argv=None) -> int:
     st = default_settings(args.beam, args.quarters, n_particles=args.particles, K=args.K, seed=args.seed,
                           max_calls=args.max_calls, concurrency=args.concurrency, model=args.model,
                           deep_model=args.deep_model, deep_from=args.deep_from, hard_cap=args.hard_cap,
-                          synth={"mode": "gated", "depth": args.synth_depth})
+                          synth={"mode": "gated", "depth": args.synth_depth}, channels=args.channels,
+                          puzzle_overlay=args.puzzle_overlay, puzzle_literature_arm=args.puzzle_literature_arm)
     sid = args.id or f"b{args.beam}_q{args.quarters}"
     probs = st.problems()
     if probs:
@@ -1028,7 +1055,7 @@ def main(argv=None) -> int:
         man0 = read_manifest(snapshot_root(sid)) if args.resume else None
         if man0 is not None and not man0.get("provisional"):
             # a resumed build keeps the settings it started with and is priced by the model it was priced with
-            st = T.TreeSettings.coerce(man0.get("settings") or st.to_dict())
+            st = T.TreeSettings.saved(man0.get("settings") or st.to_dict())
             adapter = folder_adapter(man0, allow_model_change=args.allow_model_change)
             done0 = int(man0.get("levels_done") or 0)
         else:

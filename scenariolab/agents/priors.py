@@ -42,6 +42,10 @@ import pandas as pd
 from .. import config, jsonio
 
 PRIORS_VERSION = "agents-priors-1 (2026-11-01)"
+# the base rates' rules that are code, not table (the engine version carries their changes)
+TRADE_REGIME_ORIGIN = "2026Q4"             # the first simulated quarter: the active regime has lasted since 2025Q1
+TRADE_REGIME_EXIT = 0.125                  # per quarter (one completed episode of 8 quarters; 判断值)
+DEBT_LIMIT_DEADLINE_RESOLVE = 0.98         # resolution when the X-date falls in the quarter (0 defaults in 78)
 PRIORS_PATH = config.RESULTS_DIR / "agents_priors.json"
 
 
@@ -831,14 +835,23 @@ def prior(actor_id: str, option_ids: Sequence[str], ctx=None, *, domain: str | N
                 "source": res["source"], "label": res["label"], "kind": "history", "notes": notes}
     if prior_id == "president_trade":
         regime = (c.get("political") or {}).get("trade_regime", "active")
+        p_big = float(tables["tariff"]["normal_big_move"]["p"] or 0.0423)
+        normal = {"tariff_hold": 1 - p_big, "tariff_up_small": p_big / 2, "tariff_down": p_big / 2,
+                  "tariff_up_large": 0.0, "deal": 0.0}
         if regime == "active":
-            row = {"tariff_up_large": 0.30, "tariff_up_small": 0.25, "tariff_hold": 0.20, "tariff_down": 0.15,
-                   "deal": 0.10}
-            label = "活跃关税体制：15 季中 10 升 4 降（W_A06）；广泛/行业的拆分与降级/协议的拆分是判断值"
+            active = {"tariff_up_large": 0.30, "tariff_up_small": 0.25, "tariff_hold": 0.20, "tariff_down": 0.15,
+                      "deal": 0.10}
+            # the active regime ends at a hazard (one completed episode, 2018Q1-2019Q4: 8 quarters; 判断值): k
+            # quarters after the origin the prior is the mixture of the two regimes by the regime's survival, so the
+            # base rate does not extrapolate 2025's escalations for 20 years (the review: s_tariff 27% at quarter 40)
+            k = max(A.quarters_between(TRADE_REGIME_ORIGIN, quarter), 0) if quarter else 0
+            surv = (1.0 - TRADE_REGIME_EXIT) ** k
+            row = {o: surv * active.get(o, 0.0) + (1.0 - surv) * normal.get(o, 0.0) for o in set(active) | set(normal)}
+            label = ("活跃关税体制：15 季中 10 升 4 降（W_A06）；广泛/行业的拆分与降级/协议的拆分是判断值；"
+                     f"体制每季以 {TRADE_REGIME_EXIT:.3f} 的风险率结束（唯一完成的一段 2018–19 年持续 8 季，判断值），"
+                     f"本季仍在的概率 {surv:.2f}")
         else:
-            p_big = float(tables["tariff"]["normal_big_move"]["p"] or 0.0423)
-            row = {"tariff_hold": 1 - p_big, "tariff_up_small": p_big / 2, "tariff_down": p_big / 2,
-                   "tariff_up_large": 0.0, "deal": 0.0}
+            row = normal
             label = f"平常体制：P(|Δ| ≥ 0.5pp) = {p_big:.3f}（11/260，W_A02）"
         return {"p": normalize(row, ids, 0.005), "source": "tariff_record", "label": label, "kind": "history",
                 "notes": notes}
@@ -862,10 +875,19 @@ def prior(actor_id: str, option_ids: Sequence[str], ctx=None, *, domain: str | N
             spells = f["debt_limit"]
             med = float(spells.get("median_days") or 136)
             hz = 1 - 0.5 ** (91.25 / med)
-            row.update({"debt_limit_raise": hz / 2, "debt_limit_suspend": hz / 2, "debt_limit_standoff": 1 - hz})
+            # the deadline: 78 limit actions, 0 defaults, so a standoff resolves before the X-date. The books' chance
+            # that the X-date falls in this quarter if the limit is not raised (G-L2, p_xdate_next_q) raises the
+            # resolution rate toward DEBT_LIMIT_DEADLINE_RESOLVE (the Jeffreys upper bound of 0/78 is about 0.03),
+            # fully once a tenth of the node's particles face it (the options are allocated at random over the
+            # particles, so a standoff drawn by a particle at its deadline is a default)
+            px = float(((gates.get("congress") or {}).get("p_xdate_next_q")) or 0.0)
+            w = min(max(px / 0.1, 0.0), 1.0)
+            res = hz if DEBT_LIMIT_DEADLINE_RESOLVE is None else hz + (DEBT_LIMIT_DEADLINE_RESOLVE - hz) * w
+            row.update({"debt_limit_raise": res / 2, "debt_limit_suspend": res / 2, "debt_limit_standoff": 1 - res})
             row["no_new_law"] = 0.0            # while the limit binds, "no law" is the standoff
             notes.append(f"上限约束：2011 年以来 10/10 次解决、中位 {med:.0f} 天 → 本季解决约 {hz:.2f}；提高与暂停对半"
-                         "（判断值）；78 次上限行动 0 次违约")
+                         "（判断值）；78 次上限行动 0 次违约"
+                         + (f"；X 日期可能落在本季（账户估计 {px:.0%} 的粒子）→ 解决 {res:.2f}" if px > 0 else ""))
             others = sum(v for k, v in row.items() if not k.startswith("debt_limit") and k != "no_new_law")
             for k in [k for k in row if k.startswith("debt_limit")]:
                 row[k] *= max(1.0 - others, 0.0)

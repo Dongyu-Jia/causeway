@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 
 from .jsonfix import compact_json, transport_schema, truncate
 
-PROMPT_VERSION = "agents-prompts-1"
+PROMPT_VERSION = "agents-prompts-2"           # 2: the synthesizer sees the template channels (模板通道)
 SCHEMA_HEADER = "## 输出格式（JSON schema）"          # the same header as translator.schema_section
 ACTOR_HEADER = "## 行为者："
 CLUSTER_HEADER = "## 动作组 "
@@ -393,6 +393,10 @@ class ClusterSpec:
     stress_share: float | None = None
     regime: list = field(default_factory=list)
     facts: list = field(default_factory=list)
+    # template channels the code already wrote for this cluster (channels.py): [{text}] lines, and their fields (no
+    # mechanism on them; partitions on their axes stay allowed)
+    channels: list = field(default_factory=list)
+    channel_fields: list = field(default_factory=list)
 
     @classmethod
     def coerce(cls, c) -> ClusterSpec:
@@ -867,6 +871,12 @@ def _cluster_section(c: ClusterSpec, fields_zh: dict) -> list[str]:
         out.append(f"- {a.get('actor_zh') or a.get('actor')}｜{a.get('actor')}.{a.get('option')} "
                    f"{a.get('label') or ''}｜{writes}")
     out.append("本季已由动作写入的字段（合成器不得再写）：" + ("、".join(c.written_fields) if c.written_fields else "无"))
+    if c.channels:
+        out.append("模板通道：已由代码写入（模板与文献）：这些字段本季不得再写机制增量，方向不得与之相反；它们的轴仍可分区"
+                   "（分区是模型分布的一段）：")
+        out += [f"- {cell(x.get('text') if isinstance(x, dict) else x)}" for x in c.channels[:12]]
+    if c.channel_fields:
+        out.append("本季已由模板通道写入的全部字段（合成器不得再写机制增量）：" + "、".join(c.channel_fields))
     out.append("支撑检查：" + ("；".join(cell(x) for x in c.support) if c.support else "全部在历史区间内"))
     out.append("状态体制：" + ("；".join(cell(x) for x in c.regime) if c.regime else "无"))
     if c.facts:

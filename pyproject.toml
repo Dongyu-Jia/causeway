@@ -41,6 +41,8 @@ include = ["scenariolab*"]
 "scenariolab.analysis" = ["audit_archive/*.json"]
 # the quarterly stack's committed card, schema and schema view, and the pre-registration records
 "scenariolab.qmodel" = ["*.json", "preregistered/*.json", "preregistered/README.md"]
+# the agent tree's stub model, schema-3.0 overlay and channel table
+"scenariolab.agents" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
