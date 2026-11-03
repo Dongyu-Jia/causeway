@@ -34,7 +34,7 @@ llm = ["anthropic>=2.3"]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.16,<0.17"]
 
 [tool.setuptools.packages.find]
-include = ["scenariolab*", "worldsim*"]
+include = ["scenariolab*"]
 
 [tool.setuptools.package-data]
 "scenariolab.scenarios" = ["specs/*.yaml", "qtables/*.json"]
@@ -46,8 +46,6 @@ include = ["scenariolab*", "worldsim*"]
 # the narrative test's registry inputs and pre-registration, and the research round's oracle ablation
 "scenariolab.evaluation" = ["research/*.json"]
 "scenariolab.evaluation.narrative" = ["research/*", "preregistered/*.json"]
-# WorldSim: the default world and the no-build web UI
-"worldsim" = ["defaults/*.json", "web/*.html", "web/css/*.css", "web/js/*.js", "web/js/pages/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

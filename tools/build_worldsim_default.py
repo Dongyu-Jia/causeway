@@ -1,9 +1,15 @@
 """Build WorldSim's default world 「美国与世界 · 2026Q4」 from Causeway's local data.
 
-    python tools/build_worldsim_default.py            # writes worldsim/defaults/us_2026q4.json
-    python tools/build_worldsim_default.py --check    # rebuilds in memory and reports differences, writes nothing
+WorldSim lives in its own repository (https://github.com/Dongyu-Jia/worldsim) and ships the built file as
+worldsim/defaults/us_2026q4.json. This script writes that file into a WorldSim checkout, and uses the checkout's
+worldsim.model to validate the world:
 
-Inputs (all local; data/ is git-ignored, so the output file is committed and CI never needs data/):
+    git clone https://github.com/Dongyu-Jia/worldsim.git ../worldsim
+    python tools/build_worldsim_default.py                      # writes ../worldsim/worldsim/defaults/us_2026q4.json
+    python tools/build_worldsim_default.py --check              # rebuilds in memory and compares, writes nothing
+    python tools/build_worldsim_default.py --worldsim PATH      # another checkout (or set WORLDSIM_REPO)
+
+Inputs (all local; data/ is git-ignored and never published):
 - data/processed/panel_monthly.csv, panel_quarterly.csv  today's values (2026-09 / start of 2026Q4) and the history
   each field's range note and plausible bounds come from
 - data/raw/fred/*.json                                    payrolls, housing starts, mortgage rate, breakeven, wages,
@@ -17,7 +23,7 @@ Inputs (all local; data/ is git-ignored, so the output file is committed and CI 
   data/raw/fred/{NASDAQ100_eop.csv, VIXCLS, CSUSHPISA,    CSUSHPISA and HPIPONM226S the other asset prices
   HPIPONM226S}.json
 - data/results/instrument_meta.json                       QQQ and TLT start prices (Causeway's estimates, tagged 估算)
-- scenariolab/agents/actors.py, the statesynth note (§7)  the actors' levers, which their decision questions follow
+- scenariolab/agents/actors.py                           the actors' levers, which their decision questions follow
 
 Written here: the world description, the 22 predefined state questions with today's status (grounded in the data and
 the pinned facts, 未确认 where unconfirmed), the ~100-字 narrative, the actors' decision questions (guidance in words:
@@ -33,6 +39,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import sys
 from pathlib import Path
 
@@ -42,7 +49,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 DATA = ROOT / "data"
-OUT = ROOT / "worldsim" / "defaults" / "us_2026q4.json"
+OUT_REL = Path("worldsim") / "defaults" / "us_2026q4.json"
 TODAY_M = "2026-09-01"
 
 
@@ -665,7 +672,7 @@ def Q(qid: str, text: str, guidance: str, required: bool = True) -> dict:
 
 def build_actors(D: Data, v: dict) -> list[dict]:
     """The fourteen actors. Their decision questions follow the levers in Causeway's actor catalogue
-    (scenariolab/agents/actors.py) and the statesynth design note (§7); the guidance carries the constraints in words
+    (scenariolab/agents/actors.py); the guidance carries the constraints in words
     (units, typical options and magnitudes)."""
     A = []
 
@@ -917,7 +924,16 @@ def check_user_numbers(values: dict) -> list[str]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true", help="rebuild in memory and compare with the committed file")
+    ap.add_argument("--worldsim", default=os.environ.get("WORLDSIM_REPO") or str(ROOT.parent / "worldsim"),
+                    help="a checkout of github.com/Dongyu-Jia/worldsim (default: $WORLDSIM_REPO, else ../worldsim)")
     args = ap.parse_args(argv)
+    repo = Path(args.worldsim).expanduser().resolve()
+    if not (repo / "worldsim" / "model.py").is_file():
+        print(f"no WorldSim checkout at {repo}: git clone https://github.com/Dongyu-Jia/worldsim.git there, "
+              "or pass --worldsim PATH")
+        return 1
+    sys.path.insert(0, str(repo))
+    out = repo / OUT_REL
     D = Data()
     world = build_world(D)
     from worldsim import model as M
@@ -936,12 +952,12 @@ def main(argv=None) -> int:
           f"narrative {len(narrative)} characters, {len(world['actors'])} actors: "
           + ", ".join(f"{a['name']} ({len(a['decision_questions'])})" for a in world["actors"]))
     if args.check:
-        same = OUT.exists() and OUT.read_text(encoding="utf-8") == text
+        same = out.exists() and out.read_text(encoding="utf-8") == text
         print("committed file is up to date" if same else "committed file differs from a fresh build")
         return 0 if same else 2
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(text, encoding="utf-8")
-    print(f"wrote {OUT.relative_to(ROOT)} ({len(text.encode()):,} bytes)")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text, encoding="utf-8")
+    print(f"wrote {out} ({len(text.encode()):,} bytes)")
     return 0
 
 

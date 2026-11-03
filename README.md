@@ -169,18 +169,19 @@ python -m scenariolab.evaluation.switch evaluate --run latest     # 评估（退
 
 `POST /api/portfolio/evaluate` 和 `/api/withdrawal/evaluate` 都接受 `scenario_set`（`monthly`、`quarterly` 或 `agent:<编号>`；不写就按切换关的默认）和 `rebalance: "quarterly"`。字段和错误的完整说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 的“季度模型”一章。
 
-## WorldSim：世界模拟（独立的小应用）
+## WorldSim：世界模拟（独立仓库）
 
-`worldsim/` 是同一个仓库里的另一个应用，只做世界模拟，不做资产定价，也没有图表：输入状态（字段表 + 叙事、关键问题、属性）→ 每个行为者（角色、关心什么、行动空间、私有信息）并行决定本期行动 → 合成器看到所有行动，写出同样形状的下一期状态。点一次就是一步。预置世界「美国与世界 · 2026Q4」（54 个字段、14 个行为者）由 `tools/build_worldsim_default.py` 从本地数据生成。
+世界模拟小应用 WorldSim 已拆成独立的开源项目：**[Dongyu-Jia/worldsim](https://github.com/Dongyu-Jia/worldsim)**（MIT）。它只做世界模拟：状态（指标 + 预设问题的现状 + 约 100 字叙述）→ 各行为者回答决策问题、自主行动 → 多步合成器写出下一期状态，点一次走一步。资产价格只是状态里的普通字段。
+
+它预置的世界「美国与世界 · 2026Q4」由本仓库的 `tools/build_worldsim_default.py` 从本地数据生成，写进 WorldSim 的检出目录：
 
 ```bash
-python -m worldsim                    # http://127.0.0.1:8940（WORLDSIM_PORT 可改端口）
-WORLDSIM_LLM=mock python -m worldsim  # 不用 key 的模拟后端，免费
+git clone https://github.com/Dongyu-Jia/worldsim.git ../worldsim
+python tools/build_worldsim_default.py --check    # 与 ../worldsim 里的文件比较（--worldsim PATH 指定别的检出）
+python tools/build_worldsim_default.py            # 重新生成 ../worldsim/worldsim/defaults/us_2026q4.json
 ```
 
-大模型调用走 OpenRouter（默认模型 `google/gemini-4-argon`）。**OpenRouter key 在页面的 Settings → OpenRouter API key 里填写**：只存在本机 `data/worldsim/settings.json`（权限 0600，已被 git 忽略），页面上只显示掩码，不写入日志、提示词或保存的迭代。每次迭代前显示估算成本，之后显示实际成本。详见 [docs/WORLDSIM.md](docs/WORLDSIM.md)。
-
-*WorldSim (English UI): a small local world-simulation app in `worldsim/`: state → actors (in parallel) → synthesizer → next state, one click per step; OpenRouter with your key (entered on the Settings page, stored 0600 under data/worldsim) or a free mock backend. See docs/WORLDSIM.md.*
+*WorldSim, a small LLM world-simulation app, now lives at github.com/Dongyu-Jia/worldsim; this repository keeps only the builder of its default world.*
 
 ## 工作原理
 

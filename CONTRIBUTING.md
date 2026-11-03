@@ -39,8 +39,8 @@ python -m scenariolab.server                # http://127.0.0.1:8765
 
 ```bash
 pytest -q                            # 全部测试，完整构建之后约 9 分钟（没有数据时依赖数据的测试跳过，约 2 分钟）
-ruff check scenariolab tests tools worldsim   # 规则见 pyproject.toml（E9 语法错误 + F pyflakes）
-python -m compileall -q scenariolab worldsim
+ruff check scenariolab tests tools   # 规则见 pyproject.toml（E9 语法错误 + F pyflakes）
+python -m compileall -q scenariolab
 ```
 
 - 需要本地数据或结果文件的测试在构建之前会自动跳过；新克隆的仓库没有 `data/`，CI（`.github/workflows/ci.yml`，Python 3.10 和 3.12）就在这种状态下运行编译检查、ruff 和测试。
@@ -137,7 +137,7 @@ python -m compileall -q scenariolab worldsim
 
 - **Setup:** Python 3.10+, `pip install -e ".[llm,dev]"` (the `llm` extra is only for `MSL_LLM_BACKEND=api`; by default the translator runs the local Claude Code CLI on your own subscription, for personal local use only). The web UI is static ES modules with no build step; ECharts 5.5.1 (Apache-2.0) is vendored in `web/vendor/echarts/`.
 - **Build:** `python -m scenariolab.build` downloads the public data on first run and writes `data/results/`; use `--skip panel` or `--only <steps>` to rebuild part of it, and restart the server afterwards. The module and JSON contracts are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-- **Tests:** `pytest -q`, `ruff check scenariolab tests tools worldsim`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
+- **Tests:** `pytest -q`, `ruff check scenariolab tests tools`. Tests never download data or call the API (use fakes); data-dependent tests skip without `data/`, which is how CI runs them on a fresh clone.
 - **Tests never spend tokens:** every LLM path (the monthly translator, the QTable translator, the agent tree, the narrative test) runs on the mock backend in tests (`MSL_LLM_BACKEND=mock`, `scenariolab/llm/mock.py`: deterministic, schema-valid answers and recorded failure fixtures). Never point a test at `claude_code` or `api`, and never remove the estimate-and-confirm gate to make a test pass. A real call exists only as a command or button the user starts after an estimate.
 - **Pre-registration:** never edit a frozen record (`scenariolab/qmodel/preregistered/`, which lands with the pre-registration round, and `scenariolab/evaluation/narrative/preregistered/`). Results are only appended; a protocol change is a new dated record that names the one it supersedes; commit the frozen record before its results and never squash those commits. The research archives (`docs/research/2026-11-02-sim-redesign/`, `scenariolab/evaluation/narrative/research/`, `scenariolab/evaluation/research/`) are frozen too.
 - **Quarterly stack:** `card.json`, `schema_view.json` and `scenarios/qtables/*.json` are generated (`tools/build_model_card.py`, `tools/schema_view.py`, `tools/qtable_from_yaml.py`; `--check` compares). After editing a built-in YAML, regenerate and review its QTable. The narrative test's key (`data/evaluation/key.json`) stays local, and the prompt builder must never import `key.py`.
