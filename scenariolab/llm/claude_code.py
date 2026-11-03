@@ -87,6 +87,8 @@ E_LIMIT = "已达到 Claude 订阅的用量上限（5 小时或每周额度）{r
 E_RATE = "请求过于频繁（429），请稍后重试。"
 E_FORBIDDEN = "当前 Claude 账号无权使用模型 {model}（403）：检查 MSL_LLM_MODEL，或确认你的订阅包含这个模型。"
 E_MODEL = "Claude Code 无法使用模型 {model}：检查 MSL_LLM_MODEL（模型 ID 是否正确、你的订阅能否使用它）。"
+E_CLI_OLD = ("本机 Claude Code 的版本太旧，不支持模型 {model}：运行 claude update（或更新 Claude 桌面应用）后重试；"
+             "也可以用 MSL_CLAUDE_BIN 指向一个更新的 claude。")
 E_OVERLOADED = "Claude 服务繁忙（529），请稍后重试。"
 E_SERVER = "Claude 服务暂时不可用（{status}），请稍后重试。"
 E_CONTEXT = "输入超出模型上下文窗口：请缩短叙事。"
@@ -449,6 +451,8 @@ def classify_failure(envelope: dict | None, returncode, stderr: str, model: str,
         return "limit", E_LIMIT.format(reset=_reset_hint(text)), _reset_epoch(text)
     if status == 429 or rate:
         return "rate", E_RATE, None
+    if "does not support this model" in low or ("newer is required" in low and "version" in low):
+        return "model", E_CLI_OLD.format(model=model), None          # an API 400: the CLI is older than the model
     if status == 403:
         return "forbidden", E_FORBIDDEN.format(model=model), None
     if status == 404 or ("model" in low and any(k in low for k in ("not found", "not_found", "does not exist",

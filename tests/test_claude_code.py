@@ -583,6 +583,16 @@ FAILURE_KINDS = ["login", "token", "login", "limit", "limit", "rate", "model", "
                  "empty"]                                       # one per FAILURES row, in order
 
 
+def test_an_outdated_cli_pauses_with_the_update_hint():
+    """A 400 'Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is required' is a pause
+    (kind model) with the update hint, not a per-call failure that a run would fall back from on every node."""
+    env = {"is_error": True, "api_error_status": 400,
+           "result": "API Error: 400 Claude Code 2.1.278 does not support this model; version 2.1.280 or newer is "
+                     "required. Run 'claude update', or update the Claude desktop app, then try again."}
+    kind, msg, reset = cc.classify_failure(env, 1, "", MODEL, False)
+    assert kind == "model" and "claude update" in msg and "MSL_CLAUDE_BIN" in msg and reset is None
+
+
 @pytest.mark.parametrize("case, kind", list(zip(FAILURES, FAILURE_KINDS)))
 def test_every_failure_carries_a_machine_readable_kind(fake_cli, monkeypatch, case, kind):
     envelope, code, stderr, token, _ = case
