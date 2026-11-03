@@ -952,6 +952,30 @@ def test_job_manager_marks_runs_paused_after_restart(tmp_path):
     assert mgr.read(d.name)["status"] == "paused" and mgr.read(d.name)["pause"]["reason"] == "server_restart"
 
 
+def test_a_restart_leaves_a_snapshot_another_live_process_is_building(tmp_path):
+    """The CLI builds a snapshot in its own process; a server started meanwhile must not mark it paused (it did, and
+    the UI then offered to continue a build that was running). A build whose owner is gone is paused as before."""
+    import socket
+    import subprocess
+    import sys
+    snaps = tmp_path / "agents" / "snapshots"
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        for sid, pid in (("live", live.pid), ("gone", 2 ** 22 + 7)):
+            d = snaps / sid
+            d.mkdir(parents=True)
+            S.write_manifest(d, {"id": sid, "status": "building", "levels_done": 3,
+                                 "owner": {"pid": pid, "host": socket.gethostname()}})
+        jobs.JobManager(tmp_path / "agents", auto_resume=False)
+        assert S.read_manifest(snaps / "live")["status"] == "building"
+        gone = S.read_manifest(snaps / "gone")
+        assert gone["status"] == "paused" and gone["pause"]["reason"] == "server_restart"
+        assert not S.owner_alive({"owner": {"pid": live.pid, "host": "another-host"}})
+    finally:
+        live.kill()
+        live.wait()
+
+
 def test_export_arrays_layout(tmp_path):
     run, _, _ = run_tree(tmp_path, "x", small(depth=2, keep_paths="full"))
     arr = T.export_arrays(run.leaves, run.adapter.assets)

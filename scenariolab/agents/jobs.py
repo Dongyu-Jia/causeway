@@ -89,11 +89,12 @@ class JobManager:
 
     def recover(self) -> None:
         """Runs left running or queued, and snapshot builds left building, by a previous server process become paused
-        (server_restart)."""
+        (server_restart). A snapshot that another live process on this machine is building (the CLI's
+        `python -m scenariolab.agents.snapshot`, its manifest's owner) is left alone."""
         if self.snaps_dir.exists():
             for d in self.snaps_dir.iterdir():
                 m = S.read_manifest(d) if d.is_dir() else None
-                if m and m.get("status") in ("building", "queued", "cancelling"):
+                if m and m.get("status") in ("building", "queued", "cancelling") and not S.owner_alive(m):
                     m.update(status="paused", pause={"reason": "server_restart", "message": "服务器重启：快照构建已暂停，可以继续",
                                                      "reset_at": None, "level": m.get("levels_done")},
                              updated=time.strftime("%Y-%m-%dT%H:%M:%S"))

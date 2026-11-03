@@ -41,10 +41,12 @@ import dataclasses
 import os
 import re
 import shutil
+import socket
 import sys
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +220,28 @@ class BuildPaused(Exception):
         self.reason, self.message, self.reset_at = reason, message, reset_at
 
 
+def build_owner() -> dict:
+    """The process that builds a snapshot (a CLI build runs outside the server: its restart must not pause it)."""
+    return {"pid": os.getpid(), "host": socket.gethostname()}
+
+
+def owner_alive(man: Mapping | None) -> bool:
+    """Whether another live process on this machine owns the build (the manifest's owner)."""
+    o = (man or {}).get("owner") or {}
+    pid = o.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid() or o.get("host") != socket.gethostname():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:                         # alive, owned by another user
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def write_manifest(root: Path, man: dict) -> None:
     T.write_json(root / "manifest.json", man)
 
@@ -326,7 +350,7 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
             hist.append({"from_level": done, "identity": info["identity"], "label": info["label"]})
         man["pricing_history"] = hist
     man.update(status="building", updated=now, pause=None, resume_pause=None, error=None, settings=st.to_dict(),
-               hard_cap=st.hard_cap, model=st.model or "claude-opus-5-5", effort="medium")
+               hard_cap=st.hard_cap, model=st.model or "claude-opus-5-5", effort="medium", owner=build_owner())
     write_manifest(root, man)
     journal = T.Journal(root / "journal.jsonl", listener=listener)
     if len(man.get("pricing_history") or []) > 1 and man["pricing_history"][-1].get("from_level") == done:
@@ -345,8 +369,10 @@ def build(sid: str, settings, *, resume: bool = False, base: Path | None = None,
 
     def on_level(level, stats):
         m = read_manifest(root) or man
+        if m.get("status") == "paused" and (m.get("pause") or {}).get("reason") == "server_restart":
+            m.update(status="building", pause=None)  # a server started meanwhile took this live build for a leftover
         m.update(updated=time.strftime("%Y-%m-%dT%H:%M:%S"), levels_done=level, levels=run.level_stats,
-                 calls=run.llm.stats if run.llm is not None else None, spent_calls=run.calls_paid())
+                 calls=run.llm.stats if run.llm is not None else None, spent_calls=run.calls_paid(), owner=build_owner())
         write_manifest(root, m)
     try:
         res = run.run(resume=True, on_level=on_level)
