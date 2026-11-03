@@ -851,6 +851,9 @@ def guard_synth(payload: dict, req: SynthRequest, *, allowed=()) -> dict:
                     if fid not in shiftable or fid in written:
                         rep.append(f"{tag}：不能对 {fid} 写机制增量（不允许或本季已被行为者写入），已删除")
                         continue
+                    if fid in set(getattr(spec, "channel_fields", None) or ()):
+                        rep.append(f"{tag}：{fid} 本季已由模板通道写入，不能再写机制增量，已删除")
+                        continue
                     mean = _num((s or {}).get("mean")) if isinstance(s, dict) else None
                     sd = _num((s or {}).get("sd")) if isinstance(s, dict) else None
                     if mean is None:

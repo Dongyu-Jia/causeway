@@ -45,10 +45,11 @@ AXES: dict[str, dict] = {
 }
 AXIS_OF_FIELD = {f: a for a, spec in AXES.items() for f in spec["fields"]}
 DEFAULT_AXES = {"fin_conditions": True, "funding": True, "equity_leg": False}     # U-8, U-10
-# §7.4 precision weights (判断值): channel class -> (w, cap in model sd); well/moderate in normal states: refused
-CHANNEL_W: dict[str, tuple[float, float]] = {"well": (0.2, 1.0), "moderate": (0.5, 1.5), "regime": (0.5, 1.5),
-                                             "thin": (0.8, 2.5), "absent": (1.0, 2.5)}
-CLASS_RANK = {"well": 0, "moderate": 1, "regime": 2, "thin": 3, "absent": 4}
+# §7.4 precision weights (判断值): channel class -> (w, cap in model sd); well/moderate in normal states: refused.
+# "template": a lever or fact whose consequence a template channel already writes (channels.py) weighs as moderate
+CHANNEL_W: dict[str, tuple[float, float]] = {"well": (0.2, 1.0), "moderate": (0.5, 1.5), "template": (0.5, 1.5),
+                                             "regime": (0.5, 1.5), "thin": (0.8, 2.5), "absent": (1.0, 2.5)}
+CLASS_RANK = {"well": 0, "moderate": 1, "template": 1, "regime": 2, "thin": 3, "absent": 4}
 LAG_PROTECTED = ("d_unrate", "d_rgdp", "d_core", "d_cpi_serv", "d_wage", "d_capex", "d_itinv", "d_cons_serv")
 EXPECTATION_FIELDS = ("d_sent", "d_epu", "d_infexp1", "d_infexp_lr")
 # fields an E0-quantity or E2-survey mechanism may shift (synth ∈ {shift, both} in the overlay; never prices)
@@ -266,8 +267,13 @@ def cause_class(classes: Iterable[str]) -> str | None:
 
 def consequences(answer, x: Mapping[str, np.ndarray], *, written: Iterable[str], causes: Iterable[str],
                  classes: Iterable[str], regime: bool, axes: list[tuple[str, str]], c_s: float = C_S,
-                 c_m: float = C_M, stress_mode: bool = False, panic: bool = False, m_max: int = M_MAX) -> tuple[list, list]:
+                 c_m: float = C_M, stress_mode: bool = False, panic: bool = False, m_max: int = M_MAX,
+                 signs: Mapping[str, float] | None = None) -> tuple[list, list]:
     """Guarded ClusterAnswer (status ok) + the cluster's B_k draws -> (branch specs with p | cluster, report lines).
+
+    written: the actors' lever writes and the fields the cluster's template channels wrote (no mechanism on them);
+    signs: {field: sign} of the template channels' statements in this cluster (current and queued): a mechanism's
+    shift on such a field must agree with it.
 
     Branch spec: {id, kind central|partition|mechanism, label, axis, region {lo_z, hi_z}, m, p_llm, q, p, shifts
     {field: {mean_raw, sd_raw, mean, sd, w, cap, cls}}, memory, mechanism, cause, facts, anchors, unintended,
@@ -314,6 +320,10 @@ def consequences(answer, x: Mapping[str, np.ndarray], *, written: Iterable[str],
         shifts = {}
         for fid, s in (b.get("shifts") or {}).items():
             if fid in written or fid not in x:
+                continue
+            sg = float((signs or {}).get(fid) or 0.0)
+            if sg and float(s.get("mean", 0.0) or 0.0) * sg < 0:
+                rep.append(f"{tag}：{fid} 的机制方向与本组的模板通道相反，已删除")
                 continue
             if monetary_only and not regime and fid in LAG_PROTECTED:
                 rep.append(f"{tag}：只由货币政策引起的机制不能在当季写滞后保护字段 {fid}，已删除")
@@ -485,7 +495,8 @@ def attribution(a0_y: Mapping, bk_y: Mapping, child_y: Mapping, kind: str, axis:
         if a not in child_y or a not in bk_y or a not in a0_y:
             continue
         m0, mk, mc = (float(np.median(v[a])) for v in (a0_y, bk_y, child_y))
-        row = {"actions": mk - m0, "partition": 0.0, "fin_conditions": 0.0, "equity_leg": 0.0, "mechanism": 0.0}
+        row = {"actions": mk - m0, "partition": 0.0, "fin_conditions": 0.0, "equity_leg": 0.0, "mechanism": 0.0,
+               "total": mc - m0}                    # the parts' sum (the channel split keeps it)
         if kind == "mechanism":
             row["mechanism"] = mc - mk
         elif axis == "mult":

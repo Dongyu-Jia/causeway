@@ -152,6 +152,18 @@ def test_fed_emergency_and_big_hike_options_open_only_when_their_gates_hold():
     assert "bs_qe" in [o["id"] for o in bs["options"]]
 
 
+def test_the_big_hike_gate_needs_core_inflation_behind_the_michigan_leg():
+    """The policy-channels judge's fix: Michigan 1-year expectations are an unanchored satellite (4.6 at the 2026Q4
+    root with core 2.45), so on their own they no longer open the ≥ 75bp hike; with core ≥ 3.5% they do."""
+    hike = lambda **st: "hike_75plus" in [o["id"] for o in A.menu("fed", ctx(state={**ROOT_STATE, **st}))["main"]["options"]]  # noqa: E731
+    assert not hike(s_core_yoy=2.45, s_infexp1=4.6, s_unrate=4.2)          # today's root: closed
+    assert hike(s_core_yoy=3.6, s_infexp1=4.6, s_unrate=4.2)
+    assert hike(s_core_yoy=4.4, s_infexp1=3.0, s_unrate=4.2)
+    assert not hike(s_core_yoy=4.4, s_infexp1=5.0, s_unrate=5.2)           # unemployment ≥ 5%: closed
+    ok, why = A.GATES["fed_big_hike"](A.NodeContext.of(ctx(state={**ROOT_STATE, "s_core_yoy": 2.45, "s_infexp1": 4.6})))
+    assert not ok and "3.5%" in why
+
+
 def test_the_debt_limit_gate_makes_its_options_required():
     m = A.menu("congress", ctx())
     assert not any(o["id"].startswith("debt_limit") for o in m["main"]["options"])

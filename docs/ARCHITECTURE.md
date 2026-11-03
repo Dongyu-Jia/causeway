@@ -2159,8 +2159,8 @@ the beam search; agents/snapshot.py freezes one run as a snapshot; agents/jobs.p
 
 The tree prices with the history-estimated quarterly stack (scenariolab/qmodel/adapter.py, QAdapter on
 rollout.Stepper) instead of GaussianStub. The tree still never imports the model: everything goes through the
-adapter contract in agents/model_adapter.py. The engine is `agent-tree-4` (the P14 review's fixes); folders built by
-an earlier engine can be browsed, but an unsaved branch of theirs is not replayed.
+adapter contract in agents/model_adapter.py. P14's engine was `agent-tree-4` (now `agent-tree-5`, below); folders
+built by an earlier engine can be browsed, but an unsaved branch of theirs is not replayed.
 
 * **Which model prices a run.** `MA.load_adapter()`: `MSL_AGENT_MODEL` when set (`stub` or `<module>:<factory>`,
   validated once per adapter object; an explicit spec that cannot load is a Chinese ValueError, a 503 from
@@ -2213,9 +2213,10 @@ an earlier engine can be browsed, but an unsaved branch of theirs is not replaye
   d_itinv, …) follow the core but never feed back, and u_bs, u_tr, u_def, u_ptax reach only later-ordered
   financial and survey satellites on impact (≤ 1.2·10⁻⁴ sd of any response field). So d_bs, d_transfers,
   d_deficit, d_perstax, d_tariff, d_lf and d_itinv are inert (d_ff moves the response fields by up to 0.27 sd).
-  For an inert lever the engine: (1) sets its channel class to "absent" (`meta[f]["inert"]`; the synthesizer's
-  gate G1 opens and its mechanisms are eligible); (2) keeps AGENT_DESIGN §6.3's response table: transfers → goods
-  consumption +2.1% annualized per pp, a reduced-form pin the model completes the quarter around (the end of a
+  For an inert lever the engine (with `channels: "off"`, which is how folders built before agent-tree-5 are read;
+  with channels on, the template channels below replace (2) and (3) and narrow (1)): (1) sets its channel class to
+  "absent" (`meta[f]["inert"]`; the synthesizer's gate G1 opens and its mechanisms are eligible); (2) keeps
+  AGENT_DESIGN §6.3's response table: transfers → goods consumption +2.1% annualized per pp, a reduced-form pin the model completes the quarter around (the end of a
   stimulus payment now lowers output: GDP −0.85 against A0 for −2pp, where reading the transfer itself as an
   observation raised it +0.58); (3) writes QE's intervention paths (SIM_DESIGN §5.3, template G08) for `bs_qe`:
   d_tp10 −1 sd and d_y2 −0.5 sd (判断值) set last, d_gz −2 ± 0.5 sd as an observation (it is a core variable; the
@@ -2300,6 +2301,229 @@ an earlier engine can be browsed, but an unsaved branch of theirs is not replaye
   missing panel fail in Chinese instead of falling back. The dry run: 173 calls (166 actor, 7 synthesizer), 88
   rounds, 0.49–1.47 h at 20–60 s a call, about 2.4M input and 0.58M output tokens (assumed sizes), hard cap 208,
   about 127 MB, peak memory about 332 MB, about 1 minute of model time.
+
+### Policy channels (template channels and the price puzzle, 2026-11-02)
+
+P14 measured that most of the catalogue's levers are inert in the stack (the satellites never feed back), so for
+those actions the synthesizer was the only channel for its first four quarters and nothing after. The policy-channels
+round's judge (mapping `judge-1`, protocol P1–P15) gave each catalogue option a channel: the model's own, a template
+(SIM_DESIGN's G/P/S ids, with the literature it rests on) or none, with the reason. The engine was `agent-tree-5`;
+the review round's fixes (below, "Review fixes") make it `agent-tree-6` with the table `channels-2`.
+
+* **The table.** agents/channels.json (`channels-2`) holds the judge's mapping as data: the protocol constants, the
+  lever channels (d_tariff per pp, up and down), the oil-supply composite per z, the two events (the X-date passed,
+  the pandemic), the standing facts and every option (89: 46 with statements, 7 Fed rate options the model transmits
+  itself, 36 none, each with a Chinese reason). Each option keeps the judge's compact statements next to the stack
+  reading the judge measured (`reading`). agents/channels.py reads it; a test checks every template id against
+  qmodel/schema.json (read only) and every field against the adapter's fields.
+* **Statements per particle** (channels.Layer, stepped in `Engine.build_bk` with its own random stream):
+  * modes (P2): `shift` pins A0 + ΣΔ, Δ ~ N(size · x/x0, soft²), soft half the size unless stated (判断值); `hold`
+    pins the particle's A0 value and yields to any write; `display` sets a satellite last (`structural=`, never
+    d_core; d_unrate and d_rgdp only through P6); `label`. Several channels and actors add on one field-quarter;
+    an observation wins over a display.
+  * timing: a statement for quarter dq > 0 goes into a per-particle queue (12 quarters); commitments carry their
+    writes and the queue carries the rest, so a law's second half or the hyperscaler plan's later quarters still
+    transmit. Standing facts (imm_tightening, fed_pressure_public, dovish_nominee, fed_removal_attempt,
+    fed_removal_allowed, debt_limit_standoff, cn_stimulus, cny_weaker) live per particle with their age, at most 8
+    quarters of flows per onset (the independence rungs' drift: while the rung lives, no cap), and leave by the
+    catalogue's exit hazards (A.FACTS); news statements repeated in consecutive quarters within a news group (an
+    actor's moves in one direction, e.g. the two tariff escalations) habituate as 1/k; `cond_fact` options (the courts' reversals) act only
+    where the fact lives; `ends` clears it. The private state rides in the cloud's state (`_ch_queue`, `_ch_fact`,
+    `_ch_factx`, `_ch_streak`, `_ch_ffs`, `_ch_beyond`) and in the draw as `_chn|…` columns, so `take_bk`, the
+    tail rule, nature's mixture, the reduction and the frontier clouds keep it with its particle.
+  * intensity: `lin` statements scale by x/x0 (the option's magnitude against the judge's default), `step` ones
+    are fixed per option; the tariff lever reads each particle's written d_tariff (up and down are different
+    tables: a cut passes through half); the oil composite reads each particle's z (per z: d_oil +0.555 sd, d_ip
+    −0.061 sd over quarters 1–4).
+  * limits: 3 sd per field-quarter, the TPU display capped at 3, the room rule (P8) on GZ, the Baa spread and
+    unemployment by the root's distance to the historical bands, the joint rarity rule (P10: the adapter's
+    `rarity_detail` percentile above 0.99 steps a particle's channel deltas back to 0.75, 0.5, 0.25, 0), and the
+    beyond-history exemption (the blockade, the pandemic, the X-date passed; flagged 超出可测历史). No channel
+    ever writes d_ff; the dollar only where the template states it (G04, G08, G11, G19, G29). Two readings of
+    P10 the judge left open (`Engine._rarity_scale`): a particle as rare without its channels (its actions' own
+    pins, a +2pp tariff or a big hike) keeps them, since scaling back what the channels add cannot fix it; and
+    only particles the channels moved by at least 1 sd jointly are tested (判断值; the stack's rarity costs one
+    pool pass per distinct pin pattern, and a smaller displacement cannot by itself carry a draw past the 99th
+    percentile).
+  * events: the X-date passed fires once per particle, the first quarter its account falls below the cash floor
+    while its debt-limit standoff is live (Congress kept it through the deadline; a TGA hovering at the floor does
+    not repeat the sovereign shock); the pandemic fires at each onset of the node's fact.
+  * increments (P7, P16): a channel's IP statement is added to the completed d_ip in a second completion (the
+    cycle module would otherwise overwrite it); the core-goods pass-through and the price-puzzle overlay are added
+    to the completed inflation flows in a last completion that pins services, goods and core CPI at the quarter's
+    values plus their increments (`Engine._passes`, shared by B_k, the synthesizer's mechanisms and
+    `channel_probe`); the growth fields (P6) are pinned through the mechanism d_ip pin.
+* **One protocol for the old stand-ins.** P14's transfers response table and QE's intervention paths (G08) are
+  now table entries (congress.stimulus_small / stimulus_large, fed.bs_qe, fed.bs_runoff); `RESPONSE_TABLE` and
+  `QE_PATHS` run only with channels off.
+* **The synthesizer does not count twice.** A cluster's `written` is the lever writes plus every field a channel
+  wrote this quarter. The prompt lists the channels (模板通道：已由代码写入…, at most 12 lines) and the full list of
+  channel-written fields; the guard refuses a mechanism shift on any of them (本季已由模板通道写入，不能再写机制增量);
+  a consequence shift whose sign contradicts the channel's is dropped. Channel-caused mechanisms weigh as
+  `template` (CHANNEL_W 0.5–1.5). **G1** asks whether a channel exists: an inert lever whose every write in the
+  cluster a template covers is class `template` (`Engine.lever_class`), a thin fact a template states
+  (`Engine.fact_covered`) no longer opens it, and a template lever outside the satellite's own 1–99% range (罕见)
+  is not a support flag (`Engine.support_flags`: the template's support is the literature's episodes; a value
+  clipped at the history's extreme still is). A cluster opens G1 for beyond-history templates only when at least
+  half its particles are beyond (`BEYOND_FLAG_SHARE`, the accounts' fact threshold); a minority stays a note.
+* **The price puzzle** (decision: overlay, re-identify, disclose). The stack's +50bp "do" raises core CPI y/y
+  (+0.07 at quarter 4, +0.10 at quarter 6); with an inflation-responsive Fed this compounds. The interim overlay
+  adds Δ_f = Σ_k h_k e_{t−k} (k 1–20) to d_cpi_serv, d_cpi_goods and d_core, e = the particle's pinned d_ff minus
+  its own A0 d_ff (0 for bin-labelled particles and free quarters), as an increment on the quarter's values (it
+  never erases another action's inflation; the three fields stay open to the synthesizer). The kernel is
+  deconvolved by a lockstep
+  common-random-numbers pass (`channels.overlay_kernel`, 2,000 particles, about 2 s once per identity; k 1–4 on
+  d_core −0.19, −0.05, −0.04, −0.04 per pp of surprise; goods −0.61, −0.23, −0.19, −0.14). It runs only while
+  `transmission()` still finds the puzzle (`ff_irf.puzzle`) and `puzzle_overlay` is "auto"; a re-identified model
+  without the puzzle switches it off. The literature arm
+  (core −0.15 pp per pp of surprise from quarter 6, 判断值) is `puzzle_literature_arm`, off. The catalogue's
+  `hike_75plus` gate (actors-v2.2) now needs core ≥ 4%, or Michigan 1-year ≥ 4.5% with core ≥ 3.5%, and u < 5%.
+* **Disclosure.** The honesty card (计算口径与局限) says whether channels are on, the counts, the overlay and its
+  state, the literature arm, and the root's hawkish prior with its drivers (`tree.root_prior`: A0's d_ff median and
+  shares ≥ +25bp / +75bp, the carry of September's hike, core and headline y/y, unemployment, Michigan, real oil's
+  historical percentile, the first meeting's pinned result and whether it is confirmed), in Chinese prose without
+  ids. The 动作 tab's 传导 column and each option's line say 模型自身 / 模板通道 · the templates' Chinese names / 只展示 /
+  无, with the chosen option's statements in Chinese under a tap-able 文献与足迹 (`Engine.basis_zh`: field, mode,
+  size per unit, quarters, the cited authors, 判断值); the 后果 tab shows each cluster's channels grouped by field,
+  mode and timing (12 rows, the rest behind a button; queued and display-only rows in a second fold) and the
+  attribution bar has 通道（模板与文献） and 价格之谜修正 parts (computed for the clusters whose children survive the
+  reduction).
+* **Settings and old folders.** TreeSettings `channels` ("on" | "off"), `puzzle_overlay` ("auto" | "off"),
+  `puzzle_literature_arm` ("off" | "on") and `big_hike_gate` ("fixed" | "p14"); channels run in the agent tree only
+  (P20: not in the model tree, nor in the base-rate tree or an agent tree at c = 0). A folder saved before
+  agent-tree-5 has none of these keys and reads them as P14's behaviour (`TreeSettings.saved`, SAVED_DEFAULTS:
+  channels and overlay off, the old gate). That alone does not make a P14 folder continue as built (the review
+  round found it did not: the gate fix and other versions applied regardless), so a resume or extend of a folder
+  whose recorded engine, catalogue, accounts, priors, prompt or channel-table version differs from this code's is
+  refused (`tree.version_drift`, in Chinese, naming the parts), and an on-demand branch of a saved cloud under other
+  versions is recorded on its overlay entries (规则已更新) and in the journal. Measured: a fresh B 2 × 6 mock build
+  with channels off and big_hike_gate "p14" reproduces the P14 build's node records exactly (key, parent, path
+  probability, status, summary, facts) once this round's two deliberate base-rate changes are switched back (the
+  debt limit resolved before the X-date, the tariff regime's exit hazard); the tree hash still differs by the
+  attribution rows' new `total` field. The engine, catalogue (actors-v2.2) and prompt (agents-prompts-2) versions
+  changed: every LLM cache key is new.
+* **Measured** (the stack, data to 2026-09, mock LLM):
+  * `tree.channel_probe(adapter, eng, key)` runs one table entry at its default intensity through the engine's
+    own layer and merge against a placebo with common random numbers (Fed pinned at its A0 draw in the action
+    quarter and free after, commitments executed, facts living per particle). Over the 46 options and two events
+    (1,000 particles, 12 quarters), against the judge's readings on impact (US equity, Treasuries, crude), IP
+    level at quarters 4 and 8, core and headline y/y and unemployment at quarters 4 and 8, and cumulated US
+    equity at quarter 8: the signs agree in 230 of the 233 comparisons where the judge's reading is material
+    (|equity| ≥ 0.15%, IP ≥ 0.05%, y/y and unemployment ≥ 0.02 pp), the size ratio (ours / the judge's) has median 1.01 (p10 0.92,
+    p90 1.14), and the largest response over the first three quarters differs by 0.005 sd at the median (at most
+    0.13 sd, the pandemic). The three disagreements are one option: courts.uphold_protection, which the probe
+    measures with the removal attempt it requires live in both arms, so ending the attempt also ends its services
+    drift (core −0.10 pp at quarter 4, where the judge measured the reversal's statements alone, +0.02); without
+    a live attempt it does nothing, as its condition says. The six display-only options move no response field,
+    except china.tw_large_exercise, whose catalogue entry still writes a +1 sd GPR observation (crude −0.44%,
+    IP −0.03 sd; not a channel); the shutdown displays GDP only. The probe also returns quarters 1–8 of every
+    response field in sd (`path_sd`) and of cumulated US equity (`us_equity_cum_pct`).
+  * The prior-only trees still reproduce the model (the P14 neutrality test, channels on).
+  * Beam 2 × 80 on the stack (mock LLM, N 500): 272 s against 75 s with channels off (3.6×: the merge, the
+    rarity test, two-pass IP and the attribution's two completions per cluster; the estimate's model time applies
+    `COMPUTE_CHANNELS_FACTOR`, 3.4 minutes against 1.0), 129.4 MB (estimate 127.1 MB, +2%), peak memory 341 MB
+    (estimate 338 MB), no runtime warning, no identity failure. Calls: 173 in both runs (166 actor, 7 synthesizer;
+    the dry run's upper bound is unchanged, 173, hard cap 208). G1 opened in 0 of 477 cluster-quarters against 477
+    of 477 with channels off (every cluster carried the mock President's +2pp tariff, outside d_tariff's 1–99%
+    range, and the inert levers); the synthesizer still ran for the same 21 cluster-quarters of the first four
+    levels (G3, the debt-limit standoff fact; G5 at the root). The rarity rule scaled no particle; the overlay ran
+    on 99% of particle-quarters (the mock Fed's pinned options differ from A0).
+  * Tail particles in 78 of 80 quarters, 1.8% a quarter on average (at most 3.6%; channels off 1.4% and 2.8%),
+    cumulated 0.5% by quarter 4, 4.1% by 8, 16% by 20, 45% by 40 and 76% by 80 (channels off 1.1%, 3.6%, 11%,
+    37%, 66%). The mock drives most of it: its President takes the broad tariff (+2pp) every quarter and its
+    Congress stays in the debt-limit standoff in 447 of 477 cluster-quarters, so the X-date passes for 34% of
+    the particles in quarter 5 and 1–6% a quarter after.
+  * Opposite actions in one node (same particles, common random numbers): bigtech capex_cut minus
+    capex_raise_large over 149 nodes moves the quarter's medians GZ +0.063 (higher in 100% of the nodes), the Baa
+    spread +0.042 (100%), unemployment +0.007 (98%), GDP −0.15 pp (99%), the capex display −2.1 pp and sentiment
+    −0.57 (the cut's channels: GZ +0.20 sd and IP −0.057 sd; the raise's IP +0.057 sd); with channels off the
+    pair differs only in d_itinv (GZ, spread, unemployment and GDP within 0.001, signs split about evenly).
+    belligerents ceasefire minus stalemate (6 nodes): crude −18.9 log points (channels off −9.4, the reduced-form
+    oil pins), with the oil template's same-quarter goods hold (goods +0.02 against −1.7 off); OPEC quota_raise
+    minus hold −2.45. The President's tariff forced both ways at one node (2027Q1, N 300, the real-model test):
+    +2pp minus −1pp moves goods inflation +0.53 pp annualized, IP −0.16, US equity −1.10% and Treasuries +1.49%
+    in the quarter; with channels off the two clusters are identical.
+* **Review fixes** (`agent-tree-6`, `channels-2`, actors-v2.3, agents-accounts-4; the review round's findings, each
+  measured on the stack with `tree.channel_probe`, 1,000 particles, against a placebo with common random numbers):
+  * the price-puzzle overlay pinned the three inflation flows at each particle's A0 draw plus h·e, erasing every
+    other action's same-quarter inflation once it ran (an oil escalation's CPI y/y at quarter 4 +0.36 silent,
+    −0.03 running). It is now an increment in a last completion (P16): with a tiny surprise history running it,
+    the escalation reads +0.36 again, and the overlay's fields are no longer channel-written for the synthesizer.
+  * goods statements barely reached core (d_core loads 0.137 on headline): every non-energy goods statement now
+    has a core-goods increment (`protocol.core_goods`: core +0.4775 × the goods move less the model's own 0.070,
+    1.83 core sd per goods sd), in the same pass, with goods and services held so the core observation does not
+    impute services (+0.82 sd per sd otherwise). A 2pp broad tariff: core y/y at quarter 4 +0.27 (headline +0.24),
+    against +0.03 before. The pandemic's reopening shortages take 0.2 of the factor (calibrated to the one episode:
+    core y/y at quarter 8 +4.1, 2020Q2→2022Q2 +3.7; the full factor gave +6.1). The tariff pass-through is in its
+    stated units (0.0553 sd a quarter per pp: 0.21% of the goods level over three quarters; 0.041 delivered 0.156%).
+  * the X-date fired the first time a particle's TGA fell below the floor, with no other condition, and the
+    base-rate Congress kept a standoff at a constant hazard: 83–86% of the base-rate tree's particles defaulted
+    within 10 years (history: 0 in 78). Now (P18) the event needs the particle's debt-limit standoff to be live;
+    the books treat the X-date as a hard deadline (the routine raise, unless the particle's Congress chose the
+    standoff that quarter: the standoff option now carries an account action); the base-rate Congress resolves
+    with probability 0.98 once a tenth of the node's particles face the X-date. Base-rate tree on the stub with
+    the root's books, 24 quarters: X-date share 0, arrears 1% (with the old rules at 16 quarters the two leaves had the X-date passed in 3% and 40% of their particles and arrears in 50%).
+  * channels run in the agent tree only (P20): the base-rate tree draws history's actions at history's frequencies,
+    whose average effects the model's residuals already contain (with channels the review measured GZ 3.02
+    against 1.66 at quarter 20); an agent tree at c = 0 (the base-rate tree by construction) has none either. The
+    active tariff regime ends at a hazard (0.125 a quarter, one completed episode of 8 quarters; 判断值), so the
+    base rate stops extrapolating 2025's escalations, and tariff-uncertainty news habituates within a news group
+    (the two escalations, the two substitute authorities, a deal and a lapse), not only on an exact repeat.
+  * the independence rungs were summed (the full ladder wrote 2.5 × the template) and their drift stopped after 8
+    quarters while the court's ruling never exits, so climbing the ladder lowered core inflation (allowed removal:
+    core y/y −0.29 at quarters 20 and 40). The ladder is now levels (P19: an onset writes the increment over the
+    highest live rung; the drift is the highest live rung's while it lives): allowed removal's core y/y +0.38 at
+    quarter 20, +0.66 at 40, +0.91 at 80 (a gradual de-anchoring, no blow-up), with a Fed at its own draw. A
+    removal attempt alone still lowers core in the long run (−0.33 at quarter 20): its exit hazard (0.5 a
+    quarter) ends the drift within about two quarters while its tighter financial conditions persist.
+  * demand-side activity statements carry a give-back (P17: decay 12 for fiscal writes, 8 for capex, uncertainty,
+    geopolitical tails and China's stimulus), since the cycle module never reverses a pulse: a large stimulus's IP
+    level peaks at +2.05% and is −0.10% at quarter 20 (before +0.62% at quarters 8 and 40; the phased deficit cuts
+    take it slightly below the placebo around quarter 12, −0.52%); capex_slash keeps the model's own GZ-driven part
+    (−0.70% at quarter 20). Supply-side statements stay in the level.
+  * the catalogue's GPR writes are set last (do_last) with channels on, so the Taiwan exercise is display-only as
+    mapped (crude 0 instead of −0.44%) and escalate's and the blockade's activity is not counted twice; a d_y10
+    statement still brings the stack's growth-news association on oil (QE's yield statement alone lowers crude
+    0.9%; documented, P21).
+  * readings with the Fed on the model's rule and on the placebo's own rate path (`channel_probe(fed="held")`,
+    stored per entry as `review_reading`, shown under 文献与足迹): the model's systematic moves carry the price
+    puzzle's lags that the overlay does not touch, e.g. core y/y at quarter 20 after the X-date −1.45 on the rule
+    against −0.92 held, capex_slash −0.56 against −0.27, the blockade −0.60 against −0.18. The honesty card says
+    that inflation in the agent tree follows the rule's path whatever the agent Fed chooses, and that a captured
+    Fed's easing has no inflation effect under the overlay.
+  * the channel attribution (two completions per cluster, a third of build_bk's time) runs only for the clusters
+    whose children survive the reduction (`Engine.defer_attribution`, `finish_attribution`); pruned records never
+    kept it. `channel_probe`'s cache key now has the table's version, the engine's channel settings and the fed
+    mode (a test edited the table and changed n to dodge the cache). The honesty card's meeting line follows the
+    pinned result and its confirmation (`fed_pin`), the carry clause only when there is a carry, and the coverage
+    counts active actors (the Treasury's four options are dormant).
+  * the 动作 and 后果 tabs show no code ids at 1100 and 375 px (template names in Chinese, a tap-able 文献与足迹,
+    the channel table grouped; checked headless on the rebuilt snapshot, no console errors, no horizontal scroll).
+  * Beam 2 × 80 rebuilt on the stack (mock LLM, N 500): 251 s with channels on against 75 s off (3.3×, the
+    estimate's `COMPUTE_CHANNELS_FACTOR`; the dry run says about 3.1 minutes of model time), 131.3 MB (estimate
+    127.1), peak memory 353 MB (estimate 341), 173 calls in both runs (166 actor, 7 synthesizer; hard cap 208), no
+    runtime warning, no identity failure. G1 opened in 0 of 477 cluster-quarters (477 with channels off); the
+    synthesizer ran in the same 21 cluster-quarters; the overlay ran on 99.4% of particle-quarters and the rarity
+    rule scaled no particle; every kept node's attribution has the channel split. The mock's President now holds
+    the tariff in 158 of 159 nodes (the regime's exit hazard moves its modal base rate), its Congress takes the
+    standoff as the leading option in 4 nodes, and the X-date event touched 21 cluster-quarters at 1.1% of their
+    particles on average (the explicit standoffs). Tail particles 1.5% a quarter on average (at most 3.1%;
+    channels off 1.1% and 2.6%), cumulated 0% by quarter 4, 2.5% by 8, 9.7% by 20, 34% by 40 and 70% by 80
+    (channels off 1.0%, 2.3%, 11%, 33%, 58%; agent-tree-5 had 0.5%, 4.1%, 16%, 45%, 76%).
+* **What the first real snapshot needs.** `MSL_AGENT_MODEL=scenariolab.qmodel.adapter:make_adapter python -m
+  scenariolab.agents.snapshot --beam 2 --quarters 80 --dry-run`, then `--yes` (channels on, the overlay auto, the
+  literature arm off: `--channels`, `--puzzle-overlay`, `--puzzle-literature-arm`). The engine, catalogue, accounts,
+  prompt and channel-table versions changed, so nothing is cached, and folders built before agent-tree-6 cannot be
+  resumed or extended by this code (they stay readable). Before reviewing it: the honesty card should say the
+  overlay is active and show the root's hawkish prior; the coverage line names the 44 active template options.
+  Things a real run will show that the mock cannot: whether the LLM Fed, reading the textbook, over-tightens under
+  the neutral overlay (disclosed; the literature arm is the user's call); whether the real Congress chooses a
+  standoff through an X-date (the only way it now passes); whether the synthesizer, gated off G1 in covered
+  clusters, still adds mechanisms through G3 in the first four quarters. Open items for later rounds: the qmodel
+  round's re-identification of the policy shock (the overlay then switches itself off; its acceptance should also
+  test the systematic part, e.g. the rule against a held path after a GZ shock), expectations tied to inflation
+  (de-anchoring as a level shift instead of the services drift), and channels.json (like overlay.json) is read
+  from the source tree, not packaged.
 
 ## 季度模型 (qmodel/, evaluation/; SIM_DESIGN 2026-11-02)
 

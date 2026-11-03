@@ -228,6 +228,18 @@ def test_debt_limit_gate_fires_at_the_root_and_closes_after_a_raise():
     assert any(g["synth"]["xdate_mechanism_allowed"] for g in gB)
 
 
+def test_the_x_date_is_a_hard_deadline_unless_congress_chose_the_standoff():
+    """78 limit actions, 0 defaults: with no debt-limit action the books raise the limit at the deadline (cash runs
+    down while it binds, never below the floor); only a standoff chosen every quarter lets the X-date pass."""
+    acc, _, _ = run_path(paths()["B"])
+    assert np.all(acc.s["tga"] >= acc.p.tga_floor - 1e-9) and not np.any(acc.s["arrears"] > 1e-6)
+    standoff = A.account_actions([A.option_payload("congress", "debt_limit_standoff")])
+    assert standoff == {"debt_limit_standoff": True}
+    b = [{**x, **standoff} for x in paths()["B"]]
+    acc2, _, _ = run_path(b)
+    assert np.mean(acc2.s["tga"] < acc2.p.tga_floor) > 0.5 or np.mean(acc2.s["arrears"] > 1e-6) > 0.5
+
+
 def test_a_debt_limit_suspension_lifts_the_constraint_and_resets_the_limit_after():
     acts = [A.account_actions([A.option_payload("congress", "debt_limit_suspend", 2)])] + [{}] * 3
     acc, reports, g = run_path(acts)

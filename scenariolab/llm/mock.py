@@ -219,7 +219,8 @@ REGION = re.compile(r"\((-∞|-?\d+(?:\.\d+)?),(\+∞|-?\d+(?:\.\d+)?)[\])]\s*(.
 
 
 def cluster_sections(user: str) -> dict[str, dict]:
-    """{cluster id: {"written": [...], "masses": {axis: [(lo, hi, name, mass)]}}} from an S1 user message."""
+    """{cluster id: {"written": [...], "channels": [...], "masses": {axis: [(lo, hi, name, mass)]}}} from an S1 user
+    message (channels: the fields the 模板通道 lines say the code already wrote)."""
     out = {}
     for part in re.split(rf"(?m)^(?={re.escape(CLUSTER_HEADER)})", str(user or "")):
         m = re.match(rf"{re.escape(CLUSTER_HEADER)}([a-z0-9_]+)", part)
@@ -230,6 +231,21 @@ def cluster_sections(user: str) -> dict[str, dict]:
         w = re.search(r"本季已由动作写入的字段[^：]*：(.*)", section)
         if w and w.group(1).strip() != "无":
             written = [x.strip() for x in w.group(1).split("、") if x.strip()]
+        channels: list[str] = []
+        cw = re.search(r"本季已由模板通道写入的全部字段[^：]*：(.*)", section)
+        if cw:
+            channels = [x.strip() for x in cw.group(1).split("、") if x.strip()]
+        in_ch = False
+        for line in section.splitlines():
+            if line.startswith("模板通道："):
+                in_ch = True
+                continue
+            if in_ch and line.startswith("- "):
+                f = line[2:].split(" ", 1)[0].strip()
+                if re.fullmatch(r"[a-z][a-z0-9_]*", f) and f not in channels:
+                    channels.append(f)
+                continue
+            in_ch = False
         masses: dict = {}
         for line in section.splitlines():
             a = re.match(r"- ([a-z][a-z0-9_]*)(?:（[^）]*）)?：(.*)", line)
@@ -244,7 +260,7 @@ def cluster_sections(user: str) -> dict[str, dict]:
                     regions.append((lo, hi, r.group(3).strip(), float(r.group(4))))
             if regions:
                 masses[a.group(1)] = regions
-        out[m.group(1)] = {"written": written, "masses": masses}
+        out[m.group(1)] = {"written": written, "channels": channels, "masses": masses}
     return out
 
 
@@ -719,14 +735,19 @@ def _shift_fields(schema: dict | None) -> list:
         return []
 
 
-def _mutate(name: str, answer: dict, schema: dict | None = None) -> dict:
+def _mutate(name: str, answer: dict, schema: dict | None = None, user: str = "") -> dict:
     a = copy.deepcopy(answer)
     block = _first_actor_block(a)
     if name == "synth_mechanism":
-        # a mechanism branch next to the partitions (the UI's 机制 rows; not the mock's default behaviour)
-        fields = [f for f in _shift_fields(schema) if f in ("d_sent", "d_cons_serv", "d_capex", "d_unrate")] or \
-            _shift_fields(schema)
+        # a mechanism branch next to the partitions (the UI's 机制 rows; not the mock's default behaviour), on a
+        # field neither an actor nor a template channel wrote in that cluster (as the prompt's rules ask)
+        prefer = [f for f in _shift_fields(schema) if f in ("d_sent", "d_cons_serv", "d_capex", "d_unrate")]
+        rest = [f for f in _shift_fields(schema) if f not in prefer]
+        sections = cluster_sections(user)
         for c in a.get("clusters") or []:
+            sec = sections.get(c.get("cluster_id"), {})
+            taken = set(sec.get("written") or []) | set(sec.get("channels") or [])
+            fields = [f for f in prefer + rest if f not in taken]
             if c.get("status") != "ok" or not c.get("branches") or not fields:
                 continue
             cen = next((b for b in c["branches"] if b.get("kind") == "central"), c["branches"][0])
@@ -925,7 +946,8 @@ class MockClaude:
             if fixture in ERRORS:
                 raise ERRORS[fixture](model, timeout)
             if fixture in ANSWER_FIXTURES and isinstance(answer, dict):
-                answer = _mutate(fixture, answer, schema_from_system(system) if fixture == "synth_mechanism" else None)
+                answer = _mutate(fixture, answer, schema_from_system(system) if fixture == "synth_mechanism" else None,
+                                 user if fixture == "synth_mechanism" else "")
             text = json.dumps(answer, ensure_ascii=False)
             if fixture in TEXT_FIXTURES:
                 text = _text_fixture(fixture, text)

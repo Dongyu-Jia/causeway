@@ -106,10 +106,97 @@ const COLOR_MODES = [
   { value: 's_core_yoy', label: '核心通胀' }, { value: 's_unrate', label: '失业率' }, { value: 'none', label: '不着色' },
 ];
 const ATTR_PARTS = [
-  { id: 'actions', zh: '行动经模型', color: '#9775fa' }, { id: 'partition', zh: '后果分区', color: '#74c0fc' },
+  { id: 'actions', zh: '行动经模型', color: '#9775fa' }, { id: 'channels', zh: '通道（模板与文献）', color: '#66d9e8' },
+  { id: 'overlay', zh: '价格之谜修正', color: '#c0eb75' }, { id: 'partition', zh: '后果分区', color: '#74c0fc' },
   { id: 'fin_conditions', zh: '金融条件分段（情景假说）', color: '#ffc078' }, { id: 'equity_leg', zh: '股票腿分段', color: '#e599f7' },
   { id: 'mechanism', zh: '机制', color: '#adb5bd' },
 ];
+// how an option reaches the fields the quarterly model reads (Engine.option_channel): the model's own channel, a
+// template channel (its ids and literature basis), shown only (no macro footprint in history), or none
+const CHANNEL_KIND = { model: ['模型自身', 'good'], template: ['模板通道', 'accent'], display: ['只展示', ''], none: ['无', ''],
+  commitment: ['按承诺', ''], custom: ['自定义', 'warn'] };
+// a template's Chinese name without its parenthetical (the chips and lines stay short; never the code id)
+const tmplName = (t) => String((typeof t === 'string' ? t : t?.zh) || '模板').replace(/（[^）]*）/g, '').trim();
+function channelChip(ch) {
+  if (!ch) return h('span', { class: 'muted' }, '—');
+  const [lab, tone] = CHANNEL_KIND[ch.kind] || ['—', ''];
+  const names = (ch.templates || []).map(tmplName).filter(Boolean);
+  const short = names.slice(0, 2).join('、') + (names.length > 2 ? ' 等' : '');
+  const title = [C.humanize(ch.zh || ''), ...(names.length ? [`模板：${names.join('、')}`] : []),
+    ...((ch.basis_zh || []).length ? ['文献与足迹：', ...ch.basis_zh] : [])].filter(Boolean).join('\n');
+  return h('span', { style: { display: 'inline-flex', gap: '4px', flexWrap: 'wrap' } },
+    C.chip(short && ch.kind !== 'none' && ch.kind !== 'model' ? `${lab} · ${short}` : lab, tone, title),
+    ch.beyond_history ? C.chip('超出可测历史', 'warn') : null);
+}
+// the chosen option's statements in words, tap-able (a title= tooltip cannot be opened on a touch screen)
+function channelBasis(ch) {
+  const lines = ch?.basis_zh || [];
+  if (!lines.length) return null;
+  const rd = ch?.reading_zh || [];
+  return h('details', { style: { marginTop: '4px' } },
+    h('summary', { style: { fontSize: '12px', cursor: 'pointer' } }, `文献与足迹（${lines.length} 条写入）`),
+    h('ul', { class: 'list', style: { fontSize: '12px', margin: '4px 0 0' } }, lines.map(t => h('li', {}, t))),
+    rd.length ? h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } }, rd.map(t => h('div', {}, t))) : null);
+}
+const MODE_ZH = { shift: '移动', hold: '按住', display: '只展示', label: '标签', overlay: '修正增量' };
+const SOURCE_KIND = (src) => (src === 'queue' ? '此前动作的后续季度' : src === 'overlay' ? '价格之谜修正' : '');
+const MODE_ORDER = { shift: 0, label: 1, hold: 2, overlay: 3, display: 4 };
+// a cluster's template channels (bk["channels"]), grouped by field, mode and timing: the cluster-mean shift (over all
+// its particles), the largest share it applied to, its two largest sources and the templates' names; this quarter's
+// shifts, labels and holds first (12, the rest behind a button), queued and display-only rows in a second fold
+function channelGroups(rows) {
+  const g = new Map();
+  for (const r of rows) {
+    const when = r.when === 'now' ? 'now' : 'later';
+    // the price-puzzle overlay is an increment on the quarter's inflation, not a channel-written field
+    const mode = r.source === 'overlay' ? 'overlay' : r.mode;
+    const k = `${r.field}|${mode}|${when}`;
+    const e = g.get(k) || { field: r.field, mode, when, net: 0, share: 0, src: [], tm: [], q: new Set(), beyond: false };
+    const sh = r.share || 0;
+    if (C.isNum(r.mean_sd)) e.net += r.mean_sd * sh;
+    e.share = Math.max(e.share, sh);
+    e.src.push([Math.abs(r.mean_sd || 0) * sh + sh * 1e-3, C.humanize(r.source_zh || SOURCE_KIND(r.source) || '—')]);
+    for (const t of (r.templates_zh || [])) if (!e.tm.includes(tmplName(t))) e.tm.push(tmplName(t));
+    for (const q of (r.q || [])) if (q > 0) e.q.add(q);
+    e.beyond = e.beyond || !!r.beyond;
+    g.set(k, e);
+  }
+  return [...g.values()].map(e => ({ ...e, src: [...new Map(e.src.sort((a, b) => b[0] - a[0]).map(x => [x[1], x])).keys()].slice(0, 2).join('、'),
+    q: [...e.q].sort((a, b) => a - b) }));
+}
+function channelTable(ui, cl) {
+  const rows = (cl?.channels || []).filter(r => (r.share || 0) >= 0.01);
+  if (!rows.length) return null;
+  const groups = channelGroups(rows);
+  const main = groups.filter(e => e.when === 'now' && e.mode !== 'display')
+    .sort((a, b) => (MODE_ORDER[a.mode] ?? 9) - (MODE_ORDER[b.mode] ?? 9) || Math.abs(b.net) - Math.abs(a.net));
+  const rest = groups.filter(e => !(e.when === 'now' && e.mode !== 'display'))
+    .sort((a, b) => (a.when === 'now') - (b.when === 'now') || Math.abs(b.net) - Math.abs(a.net));
+  const cols = [
+    { key: 'field', label: '字段', fmt: (v) => C.fieldName(v) },
+    { key: 'mode', label: '方式', fmt: (v) => MODE_ZH[v] || '—' },
+    { key: 'net', label: '平均（标准差）', fmt: (v, r) => (['shift', 'display', 'overlay'].includes(r.mode) ? C.num(v, 2, true) : '—') },
+    { key: 'share', label: '粒子', fmt: (v) => C.pct(v, 0) },
+    { key: 'when', label: '时间', fmt: (v, r) => (v === 'now' ? '本季' : `之后第 ${r.q.join('、') || '—'} 季`) },
+    { key: 'src', label: '来源', wrap: true },
+    { key: 'tm', label: '模板', wrap: true, fmt: (v, r) => [...(v || []), ...(r.beyond ? ['超出可测历史'] : [])].join('、') || '—' },
+  ];
+  const LIMIT = 12;
+  const box = h('div');
+  const paint = (all) => {
+    C.fill(box, ui.table(cols, all ? main : main.slice(0, LIMIT), { stack: true }),
+      main.length > LIMIT ? h('button', { class: 'btn', type: 'button', style: { marginTop: '4px' }, onclick: () => paint(!all) },
+        all ? '只看前 12 项' : `显示全部 ${main.length} 项`) : null);
+  };
+  paint(false);
+  return h('details', { style: { marginTop: '6px' } },
+    h('summary', { style: { fontSize: '12px', cursor: 'pointer' } },
+      `模板通道：代码按模板与文献写入 ${new Set(main.filter(e => e.mode !== 'overlay').map(e => e.field)).size} 个字段（逐粒子；合成器不再重复写这些字段）`),
+    box,
+    rest.length ? h('details', { style: { marginTop: '6px' } },
+      h('summary', { style: { fontSize: '12px', cursor: 'pointer' } }, `排队到之后几季的与只展示的写入（${rest.length} 项）`),
+      ui.table(cols, rest, { stack: true })) : null);
+}
 // level colouring (政策利率, 核心通胀, 失业率): a neutral sand-to-umber ramp (blue is probability; red/green are returns)
 const SEQ_LO = '#f6efe2', SEQ_HI = '#7c4a12';
 const MAIN_ASSETS = ['us_equity', 'nasdaq', 'treasury_10y', 'gold', 'crude_oil'];
@@ -517,17 +604,24 @@ export function honestyCard(env, sum) {
   const pm = sum ? pricingModel(env, m) : (env.cfg?.model || { stub: env.stub });
   const ts = sum ? tailSummary(m) : null;
   const tr = (sum ? m.transmission : null) || (pm.stub ? null : env.cfg?.transmission) || null;
+  // template channels: the folder's own setting (a folder saved before channels existed has none: off)
+  const stg = (m && m.settings) || {};
+  const chOn = tr?.channels ? !!tr.channels.on : (sum ? stg.channels === 'on' : true);
+  const chLine = chOn
+    ? li('模板通道：模型自己不传导的动作（财政、关税、移民、资产负债表、科技公司的投资、出口管制、独立性、石油供给等），由代码按历史模板与文献分解成模型能读的通用通道，逐季、逐粒子写入，第 5 季以后同样有效；后果合成器不再重复写这些字段。通道只用于智能体树：历史基率树（大模型权重为 0）按历史频率抽取动作，模型的残差已包含它们的平均效果，所以那里不写通道。每个动作的通道见节点详情的“动作”与“后果”。')
+    : li('这次没有模板通道（较早的做法）：模型不传导的杠杆只有后果合成器在前几季写的机制、转移支付的响应表和量化宽松的干预路径。');
   return h('details', { class: 'card', style: { marginTop: '12px' } },
     h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '计算口径与局限'),
     h('ul', { class: 'list', style: { fontSize: '13px', marginTop: '8px' } },
       li('行为者只选动作，后果由合成器给出，价格只来自季度模型。'),
-      li('账户是记账，不写价格，也不是模型的学习输入；每个粒子的账户按它自己的动作更新。联邦赤字/GDP 以每季 4.7% 的速度回到基线（1973–2019 年的历史回归；基线随立法动作移动），公众持有的债务不低于 0。'),
+      li('账户是记账，不写价格，也不是模型的学习输入；每个粒子的账户按它自己的动作更新。联邦赤字/GDP 以每季 4.7% 的速度回到基线（1973–2019 年的历史回归；基线随立法动作移动），公众持有的债务不低于 0。X 日期是硬期限：1960 年以来 78 次上限行动没有一次违约，所以除非国会在那一季选择对峙，现金将跌破下限时账户按惯例提高上限。'),
       li('大模型知道历史：任何历史回放都会泄漏信息（状态本身就能定年），只能当管道测试；能干净检验的只有护栏与恒等式、不调用大模型的先验树、合成状态上的变形测试，以及从今天起的前瞻账本，而账本要好几年才能分辨中等程度的偏差。'),
       li('概率是蓝色，涨跌颜色跟随 K 线配色；每个行为者的大模型权重、上限与精度权重都是判断值，尚未校准。'),
       li('束搜索每层只保留 B 个节点：被剪掉的分支的质量与粒子并入最近的保留节点，不会丢掉；一个子节点只能带一种离散状态（事实、政治状态、承诺），没有单独成支的少数状态在节点详情里标出比例。'),
       li('第 D 季之后没有智能体：按历史平均反应函数推演；回撤是季末口径。'),
       pm.stub ? li('现在用的是高斯桩模型（不是资产模型）：资产价格只用于检查流程，不能当作结果，也不能导出。')
         : li(`资产价格来自${pricingText(pm)}，试运行：切换门未通过。${STRUCTURAL_TEXT}`),
+      chLine,
       ...((tr?.zh || []).map(t => li(t))),
       pm.stub ? null : li('政策利率不低于模型的下限 0.1%：离下限不足的降息选项不进菜单；10 月议息会议是锁定事实时，模型的季前分布只在相容的选项上重新归一（模型树不做这一步，它的选项就是模型自己的利率分布分档）。'),
       ts ? li(tailText(ts)) : null,
@@ -1106,7 +1200,8 @@ async function drawDetail(B, key, { scroll = false } = {}) {
       rec.overlay?.replayed ? (rec.overlay.replay_exact === false
         ? C.chip('近似重放', 'warn', '粒子云由父节点保存的粒子云重放一个季度得到；保存精度（float32）让个别粒子落到分区边界另一侧，这里取离散状态相同的格子')
         : C.chip('由父节点重放', '', '粒子云由父节点保存的粒子云（构建时并入了被剪节点、重抽样到 N）重放一个季度得到')) : null,
-      rec.overlay?.model_changed ? C.chip('定价模型已更新', 'warn', `这个分支由新的模型拟合定价（${rec.overlay.model_fit || '数据或模型已更新'}），与冻结核心的拟合不同：同一棵树里的数字不完全可比`) : null),
+      rec.overlay?.model_changed ? C.chip('定价模型已更新', 'warn', `这个分支由新的模型拟合定价（${rec.overlay.model_fit || '数据或模型已更新'}），与冻结核心的拟合不同：同一棵树里的数字不完全可比`) : null,
+      rec.overlay?.versions_changed ? C.chip('规则已更新', 'warn', `这个分支由另一版代码生成（${rec.overlay.versions_changed}已改变），与冻结核心的规则不同：同一棵树里的数字不完全可比`) : null),
     h('div', { class: 'agents-actions', style: { marginTop: '8px' } },
       h('button', { class: 'btn primary', type: 'button', onclick: () => env.go('story', { node: rec.key, page: rec.level }) }, '在连环画里播放'),
       h('button', { class: 'btn', type: 'button', onclick: () => B.pathBox.scrollIntoView({ behavior: 'smooth', block: 'start' }) }, '整条路径'),
@@ -1250,14 +1345,18 @@ function actorBlock(B, a, { chosen, signal, title, leaderChoice = null } = {}) {
     { key: 'p_llm', label: '大模型判断', fmt: (v) => C.prob(v) },
     { key: 'p_prior', label: '历史基率', fmt: (v, o) => { const t = C.prob(v); const far = C.isNum(v) && C.isNum(o.p_llm) && Math.abs(v - o.p_llm) > 0.3; return far ? h('span', {}, t, ' ', C.chip('与大模型相差 >30 个百分点', 'warn')) : t; } },
     { key: 'writes', label: '写入', wrap: true, fmt: (v) => (v ? C.humanize(v) : h('span', { class: 'muted' }, '不写字段')) },
+    { key: 'channel', label: '传导', fmt: (v) => channelChip(v) },
   ], rows, { stack: true, rowClass: (o) => (o.id === chosen ? 'agents-chosen' : '') });
   C.put(blk, tbl);
   const ch = rows.find(o => o.id === chosen);
   if (ch?.rationale) C.put(blk, h('div', { class: 'agents-why', style: { marginTop: '6px' } }, `理由：${C.humanize(ch.rationale)}`));
+  if (ch?.channel?.zh) C.put(blk, h('div', { class: 'agents-why', style: { marginTop: '4px' } }, `传导：${C.humanize(ch.channel.zh)}`));
+  const basis = channelBasis(ch?.channel);
+  if (basis) C.put(blk, basis);
   if (a.prior?.label) C.put(blk, h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } }, `历史基率来源：${C.sourceLabel(C.humanize(a.prior.label))}`));
   if ((a.attributes || []).length) {
     C.put(blk, h('div', { class: 'muted', style: { fontSize: '12px', marginTop: '4px' } },
-      a.attributes.map(d => `${d.zh.replace(/（.*$/, '')}：${(d.options || []).filter(o => (o.p || 0) >= 0.05).map(o => `${o.label} ${C.prob(o.p)}`).join(' · ')}`).join('；')));
+      a.attributes.map(d => `${d.zh.replace(/（.*$/, '')}：${(d.options || []).filter(o => (o.p || 0) >= 0.05).map(o => `${o.label} ${C.prob(o.p)}${o.channel && o.channel.kind !== 'none' ? `（${(CHANNEL_KIND[o.channel.kind] || [''])[0]}${(o.channel.templates || []).length && o.channel.kind !== 'model' ? '：' + o.channel.templates.map(tmplName).join('、') : ''}）` : ''}`).join(' · ')}`).join('；')));
   }
   const leader = typeof a.follower_of === 'string' ? a.follower_of : Array.isArray(a.follower_of) ? a.follower_of[0] : null;
   if (leader && a.cond && typeof a.cond === 'object' && Object.keys(a.cond).length) {
@@ -1368,6 +1467,9 @@ function tabConseq(x) {
       C.put(body, h('div', { class: 'agents-chips', style: { marginBottom: '6px' } }, C.chip(SYNTH_ZH[cons.synth_status] || '后果合成', cons.synth_status === 'called' ? 'accent' : 'warn'),
         ...(cons.gates || []).map(g => C.chip(`门控：${C.gateName(g)}`, ''))));
       C.put(body, branchRows(ui, cons.branches, rec.branch?.id));
+      const mine = (pdet?.clusters || []).find(k => k.id === rec.cluster?.id);
+      const ct = channelTable(ui, mine);
+      if (ct) C.put(body, ct);
       if ((cons.report || []).length) C.put(body, h('ul', { class: 'list', style: { fontSize: '12px' } }, cons.report.map(t => h('li', {}, C.prose(t)))));
     } else if (rec.branch) {
       C.put(body, branchRows(ui, [rec.branch], rec.branch.id));
@@ -1384,7 +1486,7 @@ function tabConseq(x) {
       C.put(body, h('div', { class: 'agents-cluster', style: { marginBottom: '10px' } },
         h('div', { class: 'agents-cluster-h' }, h('b', {}, C.humanize(cl?.label || '动作簇')), h('span', { class: 'muted' }, `概率 ${C.prob(cl?.p)}`),
           C.chip(SYNTH_ZH[c.synth_status] || '后果合成', c.synth_status === 'called' ? 'accent' : 'warn')),
-        branchRows(ui, c.branches, null)));
+        branchRows(ui, c.branches, null), channelTable(ui, cl)));
     }
   } else C.put(body, ui.notice('这个节点没有展开：没有下一季的后果。', 'info'));
   const hz = det?.hazards || {};
@@ -1556,7 +1658,7 @@ function tabAssets(x) {
   const attr = rec.summary?.attribution;
   if (attr) {
     C.put(body, h('div', { class: 'section-title' }, '本季回报的来源（中位数分解）'),
-      h('p', { class: 'agents-why' }, '行动经模型 = 行为者的动作通过季度模型带来的变化；后果分区 = 合成器选中模型自身分布的哪一段；金融条件分段是情景假说；机制是有上限的增量。单位：对数回报。'),
+      h('p', { class: 'agents-why' }, '行动经模型 = 行为者的动作通过季度模型带来的变化；通道 = 代码按模板与文献写入的后果（模型自己不传导的杠杆）；价格之谜修正 = 抵消意外利率决定对通胀的反向作用；后果分区 = 合成器选中模型自身分布的哪一段；金融条件分段是情景假说；机制是有上限的增量。单位：对数回报。'),
       attributionBars(attr, MAIN_ASSETS, ui));
   }
 }

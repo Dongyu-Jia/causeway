@@ -35,7 +35,8 @@ from pathlib import Path
 
 from .. import config, jsonio
 
-CATALOGUE_VERSION = "actors-v2.1 (2026-11-01; AGENT_DESIGN §4 on schema-revise-2 3.0)"
+CATALOGUE_VERSION = ("actors-v2.3 (2026-11-02; the standoff tells the accounts it lets the deadline pass; the big-hike "
+                     "gate's Michigan leg needs core >= 3.5% (big_hike_gate p14: the old gate); notes without template ids)")
 AGENTS_DATA_DIR = config.DATA_DIR / "agents"
 INSTITUTIONS_PATH = AGENTS_DATA_DIR / "institutions.json"
 OVERLAY_PATH = Path(__file__).resolve().parent / "overlay.json"     # written by the registry builder (if present)
@@ -374,7 +375,7 @@ FED = Actor(
             _o("hike_75plus", "大幅加息（≥75bp）", param=Param("size", "升幅", "pp", 0.75, 1.5, 1.0, FED_STEP),
                writes=[Write("policy_rate_chg", "point", magnitude=True)], gate="fed_big_hike", bin=(0.625, INF),
                signal=("将坚决把通胀压回 2%", 1, 2), protocol="lagged",
-               note="只在核心通胀 ≥ 4% 或 1 年通胀预期 ≥ 4.5% 且失业率 < 5% 时开放；锚：2022Q2–Q4 +1.25/+1.50/+1.25pp"),
+               note="只在核心通胀 ≥ 4%（或 1 年通胀预期 ≥ 4.5% 且核心通胀 ≥ 3.5%）且失业率 < 5% 时开放；锚：2022Q2–Q4 +1.25/+1.50/+1.25pp"),
         ), note="零下限：利率变动的下限是 −s_ff（逐粒子）；25bp 取整；菜单规则：覆盖先验 ≥ 90% 的最少档位，最多 4 个"),
         Domain("balance_sheet", "资产负债表（属性，并入利率选项）", "attribute", options=(
             _o("bs_hold", "维持现行资产负债表安排", status_quo=True,
@@ -437,7 +438,7 @@ PRESIDENT = Actor(
                    _o("ec_hold", "维持", status_quo=True, signal=("出口管制维持现状", 0, 2)),
                    _o("ec_tighten", "收紧", facts=[("export_controls_level", +1)],
                       signal=("将收紧对华先进芯片出口", 1, 2),
-                      note="通道缺失：合成器可在 x_supply_chain、d_capex 写机制"),
+                      note="历次管制季度没有宏观或金融足迹：模板通道只展示，行业效应不能由行为者写入"),
                    _o("ec_ease", "放松", facts=[("export_controls_level", -1)], signal=("将放宽部分出口许可", -1, 2)),
                )),
         Domain("energy", "能源（属性；供给中断时可分叉）", "attribute", branch_when="石油供给中断持续时", options=(
@@ -511,8 +512,9 @@ CONGRESS = Actor(
                account=[("debt_limit_suspend_q", "magnitude")], clears=("debt_limit_binding", "debt_limit_standoff"),
                facts=[("debt_limit_suspended", True)], gate="debt_limit_live", signal=("将暂停债务上限", 0, 1)),
             _o("debt_limit_standoff", "债务上限对峙（未解决）", facts=[("debt_limit_standoff", True)],
+               account=[("debt_limit_standoff", True)],
                gate="debt_limit_live", signal=("不会无条件提高上限", 0, 1),
-               note="只写事实；不确定性与风险偏好的后果由合成器写"),
+               note="只写事实；开始时一次性的风险偏好冲击由模板通道写入（制度风险与政策不确定性模板）"),
         ), note="选项是最终成为法律的结果（签署或否决已含在内）；赤字由模型按恒等式推断（SCHEMA 规则 2）"),
         Domain("deadline", "拨款截止（属性；截止季度）", "attribute", live="deadline_quarter", options=(
             _o("cr_on_time", "按时拨款或续命", status_quo=True, clears=("shutdown",), signal=("政府将正常运转", 0, 1)),
@@ -548,7 +550,7 @@ CHINA = Actor(
         Domain("trade_response", "对美贸易回应（跟随总统·关税）", "main", prior="china_trade", options=(
             _o("no_response", "不回应", status_quo=True, signal=("中方保持克制", 0, 1)),
             _o("retaliate_tariffs", "对等加征关税", facts=[("cn_retaliation", True)], clears=("trade_truce",),
-               signal=("将采取对等反制措施", 1, 1), note="中国对美关税字段缺失：只写事实（后果经由合成器）"),
+               signal=("将采取对等反制措施", 1, 1), note="中国对美关税字段缺失：只写事实；小的产出损失由模板通道写入"),
             _o("retaliate_export_controls", "加征关税并收紧出口管制（稀土等）",
                facts=[("cn_retaliation", True), ("export_controls_cn", +1)], clears=("trade_truce",),
                signal=("将限制关键矿产出口", 1, 2)),
@@ -559,7 +561,7 @@ CHINA = Actor(
             _o("targeted_support", "定向支持（现状）", status_quo=True, signal=("政策保持连续稳定", 0, 2)),
             _o("major_stimulus", "大规模刺激（财政/信贷）", facts=[("cn_stimulus", True)],
                account=[("cn_stimulus", True)], signal=("将加大逆周期调节力度", 1, 2),
-               note="信贷脉冲字段缺失：只写事实；不再用金属与新兴市场美元价格作后备（ACTORS_V2 §4.6）"),
+               note="信贷脉冲字段缺失：只写事实；后果由模板通道写入（中国刺激模板的一半：需求推动的油价、美元走弱）"),
         )),
         Domain("fx", "人民币（属性）", "attribute", options=(
             _o("fx_hold", "汇率稳定", status_quo=True, signal=("保持人民币汇率基本稳定", 0, 2)),
@@ -619,7 +621,7 @@ BIGTECH = Actor(
             _o("capex_slash", "大幅削减（2001–02 型）", param=Param("x_pct", "未来 4 季计划变动", "%", -60.0, -30.0, -35.0),
                writes=[Write("hyperscaler_capex_g", "point", magnitude=True)],
                account=[("bt_capex_plan_pct", "magnitude")], signal=("将大幅削减资本开支以保护现金流", -1, 4),
-               protocol="thin", note="打开合成器金融条件轴的收紧区（倾斜 ×1.5）"),
+               protocol="thin", note="资本开支破裂型：模板通道写入信用利差与工业产出（不再倾斜合成器的金融条件轴）"),
         ), note="字段 hyperscaler_capex_g 不存在时：d_itinv 写 0.16·x 的增量，持续 4 季（承诺，可被下一季指引修改）"),
         Domain("workforce", "用工（属性）", "attribute", options=(
             _o("hire_hold", "维持", status_quo=True, signal=("招聘按计划进行", 0, 2)),
@@ -673,7 +675,7 @@ COURTS = Actor(
             _o("uphold_protection", "维持免职保护", status_quo=True, facts=[("fed_removal_protected", True)],
                political=[("independence_risk", 0)], signal=("", 0, 1)),
             _o("allow_removal", "允许罢免", facts=[("fed_removal_allowed", True)], political=[("independence_risk", 2)],
-               signal=("", 0, 1), note="打开合成器的独立性机制（d_infexp_lr、d_infexp1；通道缺失）"),
+               signal=("", 0, 1), note="独立性模板通道的顶端：收益率、美元、信用利差与之后的服务通胀漂移"),
         )),
         Domain("antitrust", "反垄断救济", "main", live="ruling:antitrust", prior="courts", options=(
             _o("dismiss_or_behavioral", "驳回或行为性救济", status_quo=True, signal=("", 0, 1)),
@@ -1031,6 +1033,7 @@ class NodeContext:
     resolver: object = None
     leader_choices: dict = field(default_factory=dict)
     pinned_meeting: bool = True              # False: the model tree's menus (no trimming for a pinned meeting)
+    big_hike_gate: str = "fixed"             # "p14": the gate as P14 built it (TreeSettings.big_hike_gate)
 
     @classmethod
     def of(cls, ctx) -> "NodeContext":
@@ -1167,11 +1170,21 @@ def _gate_fed_emergency(c):
 
 
 def _gate_big_hike(c):
+    """Core ≥ 4%, or Michigan 1-year ≥ 4.5% together with core ≥ 3.5%; and unemployment < 5% (the policy-channels
+    judge's fix: Michigan is an unanchored satellite, 4.6 at the 2026Q4 root with core 2.45, and alone it kept the
+    big hike open in 72% of particle-quarters under an inflation-responsive rule). A tree whose settings say
+    big_hike_gate "p14" (a folder built before the fix) keeps the gate it was built with: core ≥ 4% or Michigan ≥
+    4.5%, unemployment < 5%."""
     core, inf1, u = c.s("s_core_yoy"), c.s("s_infexp1"), c.s("s_unrate")
-    hot = (core is not None and core >= 4.0) or (inf1 is not None and inf1 >= 4.5)
+    if getattr(c, "big_hike_gate", "fixed") == "p14":
+        hot = (core is not None and core >= 4.0) or (inf1 is not None and inf1 >= 4.5)
+        if hot and (u is None or u < 5.0):
+            return True, "核心通胀 ≥ 4% 或 1 年通胀预期 ≥ 4.5%，失业率 < 5%"
+        return False, "核心通胀 < 4% 且 1 年通胀预期 < 4.5%（或失业率 ≥ 5%）"
+    hot = (core is not None and core >= 4.0) or (inf1 is not None and inf1 >= 4.5 and core is not None and core >= 3.5)
     if hot and (u is None or u < 5.0):
-        return True, "核心通胀 ≥ 4% 或 1 年通胀预期 ≥ 4.5%，失业率 < 5%"
-    return False, "核心通胀 < 4% 且 1 年通胀预期 < 4.5%（或失业率 ≥ 5%）"
+        return True, "核心通胀 ≥ 4%，或 1 年通胀预期 ≥ 4.5% 且核心通胀 ≥ 3.5%；失业率 < 5%"
+    return False, "核心通胀 < 4%，且 1 年通胀预期 < 4.5% 或核心通胀 < 3.5%（或失业率 ≥ 5%）"
 
 
 def _gate_qe(c):
