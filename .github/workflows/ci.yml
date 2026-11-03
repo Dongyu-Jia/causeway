@@ -42,10 +42,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Compile
-        run: python -m compileall -q scenariolab tools
+        run: python -m compileall -q scenariolab tools worldsim
 
       - name: Lint (ruff E9, F)
-        run: ruff check --output-format=github scenariolab tests tools
+        run: ruff check --output-format=github scenariolab tests tools worldsim
 
       - name: Test
         run: pytest -q

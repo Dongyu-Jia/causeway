@@ -169,6 +169,19 @@ python -m scenariolab.evaluation.switch evaluate --run latest     # 评估（退
 
 `POST /api/portfolio/evaluate` 和 `/api/withdrawal/evaluate` 都接受 `scenario_set`（`monthly`、`quarterly` 或 `agent:<编号>`；不写就按切换关的默认）和 `rebalance: "quarterly"`。字段和错误的完整说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) 的“季度模型”一章。
 
+## WorldSim：世界模拟（独立的小应用）
+
+`worldsim/` 是同一个仓库里的另一个应用，只做世界模拟，不做资产定价，也没有图表：输入状态（字段表 + 叙事、关键问题、属性）→ 每个行为者（角色、关心什么、行动空间、私有信息）并行决定本期行动 → 合成器看到所有行动，写出同样形状的下一期状态。点一次就是一步。预置世界「美国与世界 · 2026Q4」（54 个字段、14 个行为者）由 `tools/build_worldsim_default.py` 从本地数据生成。
+
+```bash
+python -m worldsim                    # http://127.0.0.1:8940（WORLDSIM_PORT 可改端口）
+WORLDSIM_LLM=mock python -m worldsim  # 不用 key 的模拟后端，免费
+```
+
+大模型调用走 OpenRouter（默认模型 `google/gemini-4-argon`）。**OpenRouter key 在页面的 Settings → OpenRouter API key 里填写**：只存在本机 `data/worldsim/settings.json`（权限 0600，已被 git 忽略），页面上只显示掩码，不写入日志、提示词或保存的迭代。每次迭代前显示估算成本，之后显示实际成本。详见 [docs/WORLDSIM.md](docs/WORLDSIM.md)。
+
+*WorldSim (English UI): a small local world-simulation app in `worldsim/`: state → actors (in parallel) → synthesizer → next state, one click per step; OpenRouter with your key (entered on the Settings page, stored 0600 under data/worldsim) or a free mock backend. See docs/WORLDSIM.md.*
+
 ## 工作原理
 
 ```
